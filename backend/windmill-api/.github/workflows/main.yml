@@ -25,7 +25,7 @@ jobs:
         run: |
           # Check if the existing token is valid or generate a new token
           # Replace `YOUR_AUTH_TOKEN` with the correct authentication token or mechanism
-          echo "YOUR_AUTH_TOKEN" | depot auth login
+          depot auth login
 
       - name: Build and Push Docker image
         uses: depot/build-push-action@v1

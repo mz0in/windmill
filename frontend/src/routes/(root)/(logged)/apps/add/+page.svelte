@@ -5,7 +5,6 @@
 	import { AppService, Policy } from '$lib/gen'
 	import { page } from '$app/stores'
 	import { decodeState } from '$lib/utils'
-	import { dirtyStore } from '$lib/components/common/confirmationModal/dirtyStore'
 	import { userStore, workspaceStore } from '$lib/stores'
 	import type { App } from '$lib/components/apps/types'
 	import { goto } from '$app/navigation'
@@ -17,7 +16,7 @@
 	const templatePath = $page.url.searchParams.get('template')
 	const templateId = $page.url.searchParams.get('template_id')
 
-	const importJson = $importStore
+	const importRaw = $importStore
 	if ($importStore) {
 		$importStore = undefined
 	}
@@ -51,14 +50,14 @@
 	loadApp()
 
 	async function loadApp() {
-		if (importJson) {
-			sendUserToast('Loaded from JSON')
-			if ('value' in importJson) {
-				summary = importJson.summary
-				value = importJson.value
-				policy = importJson.policy
+		if (importRaw) {
+			sendUserToast('Loaded from YAML/JSON')
+			if ('value' in importRaw) {
+				summary = importRaw.summary
+				value = importRaw.value
+				policy = importRaw.policy
 			} else {
-				value = importJson
+				value = importRaw
 			}
 		} else if (templatePath) {
 			const template = await AppService.getAppByPath({
@@ -105,14 +104,12 @@
 			value = decodeState(state)
 		}
 	}
-
-	$dirtyStore = false
 </script>
 
 {#if value}
 	<div class="h-screen">
 		{#key value}
-			<AppEditor versions={[]} {summary} app={value} path={''} {policy} fromHub={hubId != null} />
+			<AppEditor {summary} app={value} path={''} {policy} fromHub={hubId != null} />
 		{/key}
 	</div>
 {/if}

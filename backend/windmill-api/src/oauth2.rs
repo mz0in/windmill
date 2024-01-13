@@ -38,16 +38,13 @@ use windmill_common::jobs::JobPayload;
 use windmill_common::more_serde::maybe_number_opt;
 use windmill_common::users::username_to_permissioned_as;
 use windmill_common::utils::{not_found_if_none, now_from_db};
+use windmill_common::variables::build_crypt;
 
 use crate::db::ApiAuthed;
 use crate::saml::SamlSsoLogin;
 use crate::users::{login_externally, LoginUserInfo};
 use crate::webhook_util::{InstanceEvent, WebhookShared};
-use crate::{
-    db::DB,
-    variables::{build_crypt, encrypt},
-    workspaces::WorkspaceSettings,
-};
+use crate::{db::DB, variables::encrypt, workspaces::WorkspaceSettings};
 use crate::{BASE_URL, HTTP_CLIENT, IS_SECURE, OAUTH_CLIENTS, SLACK_SIGNING_SECRET};
 use windmill_common::error::{self, to_anyhow, Error};
 use windmill_common::oauth2::*;
@@ -55,8 +52,6 @@ use windmill_common::oauth2::*;
 use windmill_queue::PushIsolationLevel;
 
 use std::{fs, str};
-
-pub const WORKSPACE_SLACK_BOT_TOKEN_PATH: &str = "f/slack_bot/bot_token";
 
 pub fn global_service() -> Router {
     Router::new()
@@ -860,7 +855,10 @@ async fn slack_command(
     if let Some(settings) = settings {
         if let Some(path) = &settings.slack_command_script {
             let (payload, tag) = if let Some(path) = path.strip_prefix("flow/") {
-                (JobPayload::Flow(path.to_string()), None)
+                (
+                    JobPayload::Flow { path: path.to_string(), dedicated_worker: None },
+                    None,
+                )
             } else {
                 let path = path.strip_prefix("script/").unwrap_or_else(|| path);
                 let (
@@ -872,6 +870,8 @@ async fn slack_command(
                     language,
                     dedicated_worker,
                     priority,
+                    _delete_after_use,
+                    _timeout,
                 ) = windmill_common::get_latest_deployed_hash_for_path(
                     &db,
                     &settings.workspace_id,

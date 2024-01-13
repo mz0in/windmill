@@ -12,11 +12,14 @@ use crate::{
     webhook_util::{WebhookMessage, WebhookShared},
 };
 use axum::{
+    body,
     extract::{Extension, Path, Query},
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
-use hyper::StatusCode;
+use bytes::Bytes;
+use hyper::{header, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use sql_builder::{bind::Bind, SqlBuilder};
@@ -54,6 +57,10 @@ pub fn workspaced_service() -> Router {
         .route("/type/update/:name", post(update_resource_type))
         .route("/type/delete/:name", delete(delete_resource_type))
         .route("/type/create", post(create_resource_type))
+}
+
+pub fn public_service() -> Router {
+    Router::new().route("/custom_component/:name", get(custom_component))
 }
 
 #[derive(FromRow, Serialize, Deserialize)]
@@ -240,6 +247,7 @@ async fn list_resources(
 async fn get_resource(
     authed: ApiAuthed,
     Extension(user_db): Extension<UserDB>,
+    Extension(db): Extension<DB>,
     Path((w_id, path)): Path<(String, StripPath)>,
 ) -> JsonResult<ListableResource> {
     let path = path.to_path();
@@ -262,7 +270,9 @@ async fn get_resource(
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
-
+    if resource_o.is_none() {
+        explain_resource_perm_error(&path, &w_id, &db).await?;
+    }
     let resource = not_found_if_none(resource_o, "Resource", path)?;
     Ok(Json(resource))
 }
@@ -288,6 +298,7 @@ async fn exists_resource(
 async fn get_resource_value(
     authed: ApiAuthed,
     Extension(user_db): Extension<UserDB>,
+    Extension(db): Extension<DB>,
     Path((w_id, path)): Path<(String, StripPath)>,
 ) -> JsonResult<Option<serde_json::Value>> {
     let path = path.to_path();
@@ -300,10 +311,80 @@ async fn get_resource_value(
     )
     .fetch_optional(&mut *tx)
     .await?;
+
     tx.commit().await?;
+    if value_o.is_none() {
+        explain_resource_perm_error(&path, &w_id, &db).await?;
+    }
 
     let value = not_found_if_none(value_o, "Resource", path)?;
     Ok(Json(value))
+}
+
+async fn explain_resource_perm_error(
+    path: &str,
+    w_id: &str,
+    db: &sqlx::Pool<Postgres>,
+) -> windmill_common::error::Result<()> {
+    let extra_perms = sqlx::query_scalar!(
+        "SELECT extra_perms from resource WHERE path = $1 AND workspace_id = $2",
+        path,
+        w_id
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| Error::NotFound(format!("Resource {} not found", path)))?;
+    if path.starts_with("f/") {
+        let folder = path.split("/").nth(1).ok_or_else(|| {
+            Error::BadRequest(format!(
+                "path {} should have at least 2 components separated by /",
+                path
+            ))
+        })?;
+        let folder_extra_perms = sqlx::query_scalar!(
+            "SELECT extra_perms from folder WHERE name = $1 AND workspace_id = $2",
+            folder,
+            w_id
+        )
+        .fetch_optional(db)
+        .await?;
+        return Err(Error::NotAuthorized(format!(
+            "Resource exists but you don't have access to it:\nresource perms: {}\nfolder perms: {}",
+            serde_json::to_string_pretty(&extra_perms).unwrap_or_default(), serde_json::to_string_pretty(&folder_extra_perms).unwrap_or_default()
+        )));
+    } else {
+        return Err(Error::NotAuthorized(format!(
+            "Resource exists but you don't have access to it:\nresource perms: {}",
+            serde_json::to_string_pretty(&extra_perms).unwrap_or_default()
+        )));
+    }
+}
+
+async fn custom_component(
+    authed: ApiAuthed,
+    Extension(user_db): Extension<UserDB>,
+    Path((w_id, name)): Path<(String, String)>,
+) -> Result<Response> {
+    let mut tx = user_db.begin(&authed).await?;
+
+    let cc_o = sqlx::query_scalar!(
+        "SELECT value->>'js' FROM resource
+        WHERE path = $1 AND workspace_id = $2",
+        format!("f/app_custom/{name}"),
+        &w_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+
+    tx.commit().await?;
+
+    let cc = not_found_if_none(cc_o, "Custom Component", name)?;
+    let res = Response::builder().header(header::CONTENT_TYPE, "text/javascript");
+
+    Ok(res
+        .body(body::boxed(body::Full::from(Bytes::from(cc))))
+        .unwrap())
 }
 
 #[derive(Deserialize)]
@@ -313,38 +394,64 @@ struct JobInfo {
 async fn get_resource_value_interpolated(
     authed: ApiAuthed,
     Extension(user_db): Extension<UserDB>,
+    Extension(db): Extension<DB>,
     Tokened { token }: Tokened,
     Path((w_id, path)): Path<(String, StripPath)>,
     Query(job_info): Query<JobInfo>,
 ) -> JsonResult<Option<serde_json::Value>> {
-    let path = path.to_path();
-    let mut tx = user_db.clone().begin(&authed).await?;
+    return get_resource_value_interpolated_internal(
+        &authed,
+        &user_db,
+        &db,
+        w_id.as_str(),
+        path.to_path(),
+        job_info.job_id,
+        token.as_str(),
+    )
+    .await
+    .map(|success| Json(success));
+}
+
+use async_recursion::async_recursion;
+
+pub async fn get_resource_value_interpolated_internal(
+    authed: &ApiAuthed,
+    user_db: &UserDB,
+    db: &DB,
+    workspace: &str,
+    path: &str,
+    job_id: Option<Uuid>,
+    token: &str,
+) -> Result<Option<serde_json::Value>> {
+    let mut tx = user_db.clone().begin(authed).await?;
 
     let value_o = sqlx::query_scalar!(
         "SELECT value from resource WHERE path = $1 AND workspace_id = $2",
-        path.to_owned(),
-        &w_id
+        path,
+        workspace
     )
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
+    if value_o.is_none() {
+        explain_resource_perm_error(path, workspace, db).await?;
+    }
 
     let value = not_found_if_none(value_o, "Resource", path)?;
     if let Some(value) = value {
-        Ok(Json(Some(
-            transform_json_value(&authed, &user_db, &w_id, value, &job_info.job_id, &token).await?,
-        )))
+        Ok(Some(
+            transform_json_value(authed, user_db, db, workspace, value, &job_id, token).await?,
+        ))
     } else {
-        Ok(Json(None))
+        Ok(None)
     }
 }
-
-use async_recursion::async_recursion;
 
 #[async_recursion]
 pub async fn transform_json_value<'c>(
     authed: &ApiAuthed,
     user_db: &UserDB,
+    db: &DB,
     workspace: &str,
     v: Value,
     job_id: &Option<Uuid>,
@@ -354,8 +461,8 @@ pub async fn transform_json_value<'c>(
         Value::String(y) if y.starts_with("$var:") => {
             let path = y.strip_prefix("$var:").unwrap();
             let tx: Transaction<'_, Postgres> = user_db.clone().begin(authed).await?;
-            let v =
-                crate::variables::get_value_internal(tx, workspace, path, &authed.username).await?;
+            let v = crate::variables::get_value_internal(tx, db, workspace, path, &authed.username)
+                .await?;
             Ok(Value::String(v))
         }
         Value::String(y) if y.starts_with("$res:") => {
@@ -374,7 +481,7 @@ pub async fn transform_json_value<'c>(
             tx.commit().await?;
             let v = not_found_if_none(v, "Resource", path)?;
             if let Some(v) = v {
-                transform_json_value(authed, user_db, workspace, v, job_id, token).await
+                transform_json_value(authed, user_db, db, workspace, v, job_id, token).await
             } else {
                 Ok(Value::Null)
             }
@@ -432,7 +539,7 @@ pub async fn transform_json_value<'c>(
             for (a, b) in m.clone().into_iter() {
                 m.insert(
                     a.clone(),
-                    transform_json_value(authed, user_db, workspace, b, job_id, token).await?,
+                    transform_json_value(authed, user_db, db, workspace, b, job_id, token).await?,
                 );
             }
             Ok(Value::Object(m))

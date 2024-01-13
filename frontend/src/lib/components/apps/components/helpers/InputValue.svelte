@@ -7,12 +7,18 @@
 		TemplateV2Input,
 		UploadAppInput
 	} from '../../inputType'
-	import type { AppViewerContext, GroupContext, ListContext, RichConfiguration } from '../../types'
+	import type {
+		AppEditorContext,
+		AppViewerContext,
+		GroupContext,
+		ListContext,
+		RichConfiguration
+	} from '../../types'
 	import { accessPropertyByPath } from '../../utils'
 	import { computeGlobalContext, eval_like } from './eval'
 	import deepEqualWithOrderedArray from './deepEqualWithOrderedArray'
 	import { deepEqual } from 'fast-equals'
-	import { isCodeInjection } from '$lib/utils'
+	import { deepMergeWithPriority, isCodeInjection } from '$lib/utils'
 
 	type T = string | number | boolean | Record<string | number, any> | undefined
 
@@ -21,9 +27,11 @@
 	export let id: string | undefined = undefined
 	export let error: string = ''
 	export let key: string = ''
+	export let field: string = key
 
 	const { componentControl, runnableComponents } = getContext<AppViewerContext>('AppViewerContext')
 
+	const editorContext = getContext<AppEditorContext>('AppEditorContext')
 	const iterContext = getContext<ListContext>('ListWrapperContext')
 	const rowContext = getContext<ListContext>('RowWrapperContext')
 	const groupContext = getContext<GroupContext>('GroupContext')
@@ -42,7 +50,7 @@
 		(fullContext.iter != undefined ||
 			fullContext.row != undefined ||
 			fullContext.group != undefined) &&
-		lastInput.connections.some(
+		lastInput.connections?.some(
 			(x) => x.componentId == 'row' || x.componentId == 'iter' || x.componentId == 'group'
 		) &&
 		debounceEval()
@@ -53,7 +61,7 @@
 		(fullContext.iter != undefined ||
 			fullContext.row != undefined ||
 			fullContext.group != undefined) &&
-		lastInput.connections.some(
+		lastInput.connections?.some(
 			(x) => x.componentId == 'row' || x.componentId == 'iter' || x.componentId == 'group'
 		) &&
 		debounceTemplate()
@@ -86,8 +94,8 @@
 	let firstDebounce = true
 	const debounce_ms = 50
 
-	export async function computeExpr() {
-		const nvalue = await evalExpr(lastInput as EvalAppInput)
+	export async function computeExpr(args?: Record<string, any>) {
+		const nvalue = await evalExpr(lastInput as EvalAppInput, args)
 		if (!deepEqual(nvalue, value)) {
 			value = nvalue
 		}
@@ -138,6 +146,13 @@
 
 	const debounceEval = async () => {
 		let nvalue = await evalExpr(lastInput as EvalAppInput)
+
+		if (field) {
+			editorContext?.evalPreview.update((x) => {
+				x[`${id}.${field}`] = nvalue
+				return x
+			})
+		}
 		if (!deepEqual(nvalue, value)) {
 			if (
 				typeof nvalue == 'string' ||
@@ -236,12 +251,15 @@
 		}
 	}
 
-	async function evalExpr(input: EvalAppInput | EvalV2AppInput): Promise<any> {
+	async function evalExpr(
+		input: EvalAppInput | EvalV2AppInput,
+		args?: Record<string, any>
+	): Promise<any> {
 		if (iterContext && $iterContext.disabled) return
 		try {
 			const r = await eval_like(
 				input.expr,
-				computeGlobalContext($worldStore, fullContext),
+				computeGlobalContext($worldStore, deepMergeWithPriority(fullContext, args ?? {})),
 				true,
 				$state,
 				$mode == 'dnd',
@@ -253,7 +271,7 @@
 			return r
 		} catch (e) {
 			error = e.message
-			console.error("Eval error in app input '" + id + "' with key '" + key + "'", e)
+			console.warn("Eval error in app input '" + id + "' with key '" + key + "'", e)
 			return value
 		}
 	}
@@ -277,7 +295,7 @@
 				error = ''
 				return r
 			} catch (e) {
-				console.debug("Eval error in app input '" + id + "' with key '" + key + "'", e)
+				console.warn("Eval error in app input '" + id + "' with key '" + key + "'", e)
 				return e.message
 			}
 		} else if (input.type === 'static') {

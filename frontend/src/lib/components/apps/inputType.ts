@@ -1,5 +1,5 @@
 import type { ReadFileAs } from '../common/fileInput/model'
-import type { TypedComponent } from './editor/component'
+import type { DecisionTreeNode, TypedComponent } from './editor/component'
 import type { InlineScript } from './types'
 
 export type InputType =
@@ -26,6 +26,13 @@ export type InputType =
 	| 'table-column'
 	| 'plotly'
 	| 'chartjs'
+	| 'DecisionTreeNode'
+	| 'ag-chart'
+	| 'resource'
+	| 'db-explorer'
+	| 'db-table'
+	| 's3'
+	| 'number-tuple'
 
 // Connection to an output of another component
 // defined by the id of the component and the path of the output
@@ -139,6 +146,7 @@ type InputConfiguration<T extends InputType, V extends InputType> = {
 	fieldType: T
 	subFieldType?: V
 	format?: string | undefined
+	loading?: boolean
 	fileUpload?: {
 		/** Use `*` to accept anything. */
 		accept: string
@@ -172,7 +180,7 @@ export type AppInput =
 	| AppInputSpec<'any', any>
 	| AppInputSpec<'object', Record<string | number, any>>
 	| AppInputSpec<'object', string>
-	| (AppInputSpec<'select', string> & StaticOptions)
+	| (AppInputSpec<'select', string, 'db-table'> & StaticOptions)
 	| AppInputSpec<'icon-select', string>
 	| AppInputSpec<'color', string>
 	| AppInputSpec<'array', string[], 'text'>
@@ -191,9 +199,15 @@ export type AppInput =
 	| AppInputSpec<'array', object[], 'tab-select'>
 	| AppInputSpec<'schema', object>
 	| AppInputSpec<'array', object[], 'ag-grid'>
+	| AppInputSpec<'array', object[], 'db-explorer'>
 	| AppInputSpec<'array', object[], 'table-column'>
 	| AppInputSpec<'array', object[], 'plotly'>
 	| AppInputSpec<'array', object[], 'chartjs'>
+	| AppInputSpec<'array', DecisionTreeNode, 'DecisionTreeNode'>
+	| AppInputSpec<'array', object[], 'ag-chart'>
+	| AppInputSpec<'resource', string>
+	| AppInputSpec<'resource', string, 's3'>
+	| AppInputSpec<'array', object[], 'number-tuple'>
 
 export type RowAppInput = Extract<AppInput, { type: 'row' }>
 export type StaticAppInput = Extract<AppInput, { type: 'static' }>

@@ -15,11 +15,9 @@
 		VariableService
 	} from '$lib/gen'
 	import { superadmin, userStore, workspaceStore } from '$lib/stores'
-	import { faEye, faPlus } from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher } from 'svelte'
-	import { Icon } from 'svelte-awesome'
 	import { writable } from 'svelte/store'
-	import { Button, Drawer, DrawerContent } from './common'
+	import { Alert, Button, Drawer, DrawerContent } from './common'
 	import Badge from './common/badge/Badge.svelte'
 	import ToggleButton from './common/toggleButton-v2/ToggleButton.svelte'
 	import ToggleButtonGroup from './common/toggleButton-v2/ToggleButtonGroup.svelte'
@@ -27,7 +25,8 @@
 	import { random_adj } from './random_positive_adjetive'
 	import Required from './Required.svelte'
 	import Tooltip from './Tooltip.svelte'
-	import { Folder, User } from 'lucide-svelte'
+	import { Eye, Folder, Plus, SearchCode, User } from 'lucide-svelte'
+	import ContentSearch from './ContentSearch.svelte'
 
 	type PathKind = 'resource' | 'script' | 'variable' | 'flow' | 'schedule' | 'app' | 'raw_app'
 	let meta: Meta | undefined = undefined
@@ -133,7 +132,14 @@
 					workspace: $workspaceStore!
 				})
 			)
-				.filter((x) => x != initialFolder)
+				.filter(
+					(x) =>
+						x != initialFolder &&
+						x != 'app_groups' &&
+						x != 'app_custom' &&
+						x != 'app_themes' &&
+						x != 'app_custom'
+				)
 				.map((x) => ({
 					name: x,
 					write:
@@ -256,7 +262,13 @@
 	function setDirty() {
 		!dirty && (dirty = true)
 	}
+
+	let contentSearch: ContentSearch
 </script>
+
+{#if kind != 'app' && kind != 'schedule' && initialPath != '' && initialPath != undefined}
+	<ContentSearch bind:this={contentSearch} />
+{/if}
 
 <Drawer bind:this={newFolder}>
 	<DrawerContent
@@ -269,12 +281,7 @@
 		{#if !folderCreated}
 			<div class="flex flex-row">
 				<input class="mr-2" placeholder="New folder name" bind:value={newFolderName} />
-				<Button
-					size="md"
-					startIcon={{ icon: faPlus }}
-					disabled={!newFolderName}
-					on:click={addFolder}
-				>
+				<Button size="md" startIcon={{ icon: Plus }} disabled={!newFolderName} on:click={addFolder}>
 					New&nbsp;folder
 				</Button>
 			</div>
@@ -377,9 +384,9 @@
 								size="xs"
 								disabled={!meta.owner || meta.owner == ''}
 								on:click={viewFolder.openDrawer}
-							>
-								<Icon scale={0.8} data={faEye} /></Button
-							>
+								iconOnly
+								startIcon={{ icon: Eye }}
+							/>
 							<Button
 								title="New folder"
 								btnClasses="!p-1.5"
@@ -388,10 +395,10 @@
 								size="xs"
 								{disabled}
 								on:click={newFolder.openDrawer}
-							>
-								<Icon scale={0.8} data={faPlus} /></Button
-							></div
-						>
+								iconOnly
+								startIcon={{ icon: Plus }}
+							/>
+						</div>
 					</label>
 				{/if}
 			</div>
@@ -441,6 +448,26 @@
 		</div>
 		<div class="text-red-600 dark:text-red-400 text-2xs">{error}</div>
 	</div>
+
+	{#if kind != 'app' && kind != 'schedule' && initialPath != '' && initialPath != undefined && initialPath != path}
+		<Alert type="warning" class="mt-4" title="Moving may break other items relying on it">
+			You are renaming an item that may be depended upon by other items. This may break apps, flows
+			or resources. Find if it used elsewhere using the content search. Note that linked variables
+			and resources (having the same path) are automatically moved together.
+			<div class="flex pt-2">
+				<Button
+					variant="border"
+					color="dark"
+					on:click={() => {
+						contentSearch?.open(initialPath)
+					}}
+					startIcon={{ icon: SearchCode }}
+				>
+					Search
+				</Button>
+			</div>
+		</Alert>
+	{/if}
 </div>
 
 <style>

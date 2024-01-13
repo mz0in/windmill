@@ -28,7 +28,7 @@
 	export let editor: Editor
 	export let diffEditor: DiffEditor
 
-	const { flowStore, flowStateStore, testStepStore } =
+	const { flowStore, flowStateStore, testStepStore, pathStore } =
 		getContext<FlowEditorContext>('FlowEditorContext')
 
 	// Test
@@ -54,7 +54,7 @@
 		// let jobId: string | undefined = undefined
 		if (val.type == 'rawscript') {
 			await testJobLoader?.runPreview(
-				val.path ?? ($flowStore?.path ?? '') + '/' + mod.id,
+				val.path ?? ($pathStore ?? '') + '/' + mod.id,
 				val.content,
 				val.language,
 				args,
@@ -124,11 +124,13 @@
 		<Splitpanes horizontal>
 			<Pane size={50} minSize={10}>
 				<LogViewer
+					small
 					jobId={testJob?.id}
 					duration={testJob?.['duration_ms']}
 					mem={testJob?.['mem_peak']}
 					content={testJob?.logs}
 					isLoading={testIsLoading}
+					tag={testJob?.tag}
 				/>
 			</Pane>
 			<Pane size={50} minSize={10} class="text-sm text-tertiary">

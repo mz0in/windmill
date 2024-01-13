@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::{
     db::{ApiAuthed, DB},
     users::{require_owner_of_path, OptAuthed},
-    variables::build_crypt,
     webhook_util::{WebhookMessage, WebhookShared},
     HTTP_CLIENT,
 };
@@ -39,7 +38,9 @@ use windmill_common::{
     utils::{
         http_get_from_hub, not_found_if_none, paginate, query_elems_from_hub, Pagination, StripPath,
     },
+    variables::build_crypt,
 };
+use windmill_git_sync::{handle_deployment_metadata, DeployedObject};
 use windmill_queue::{push, PushArgs, PushIsolationLevel, QueueTransaction};
 
 pub fn workspaced_service() -> Router {
@@ -54,6 +55,8 @@ pub fn workspaced_service() -> Router {
         .route("/update/*path", post(update_app))
         .route("/delete/*path", delete(delete_app))
         .route("/create", post(create_app))
+        .route("/history/p/*path", get(get_app_history))
+        .route("/history_update/a/:id/v/:version", post(update_app_history))
 }
 
 pub fn unauthed_service() -> Router {
@@ -124,6 +127,19 @@ pub struct AppWithLastVersionAndDraft {
     pub draft_only: Option<bool>,
 }
 
+#[derive(Serialize)]
+pub struct AppHistory {
+    pub app_id: i64,
+    pub version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_msg: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AppHistoryUpdate {
+    pub deployment_msg: Option<String>,
+}
+
 pub type StaticFields = HashMap<String, Box<RawValue>>;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -153,6 +169,7 @@ pub struct CreateApp {
     pub value: serde_json::Value,
     pub policy: Policy,
     pub draft_only: Option<bool>,
+    pub deployment_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +178,7 @@ pub struct EditApp {
     pub summary: Option<String>,
     pub value: Option<serde_json::Value>,
     pub policy: Option<Policy>,
+    pub deployment_message: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -310,6 +328,64 @@ async fn get_app_w_draft(
 
     let app = not_found_if_none(app_o, "App", path)?;
     Ok(Json(app))
+}
+
+async fn get_app_history(
+    authed: ApiAuthed,
+    Extension(user_db): Extension<UserDB>,
+    Path((w_id, path)): Path<(String, StripPath)>,
+) -> JsonResult<Vec<AppHistory>> {
+    let mut tx = user_db.begin(&authed).await?;
+    let query_result = sqlx::query!(
+        "SELECT a.id as app_id, av.id as version_id, dm.deployment_msg as deployment_msg
+        FROM app a LEFT JOIN app_version av ON a.id = av.app_id LEFT JOIN deployment_metadata dm ON av.id = dm.app_version
+        WHERE a.workspace_id = $1 AND a.path = $2
+        ORDER BY created_at DESC",
+        w_id,
+        path.to_path(),
+    ).fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+
+    let result: Vec<AppHistory> = query_result
+        .into_iter()
+        .map(|row| AppHistory {
+            app_id: row.app_id,
+            version: row.version_id,
+            deployment_msg: row.deployment_msg,
+        })
+        .collect();
+    return Ok(Json(result));
+}
+
+async fn update_app_history(
+    authed: ApiAuthed,
+    Extension(user_db): Extension<UserDB>,
+    Path((w_id, app_id, app_version)): Path<(String, i64, i64)>,
+    Json(app_history_update): Json<AppHistoryUpdate>,
+) -> Result<()> {
+    let mut tx = user_db.begin(&authed).await?;
+    let app_path = sqlx::query_scalar!("SELECT path FROM app WHERE id = $1", app_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if app_path.is_none() {
+        tx.commit().await?;
+        return Err(Error::NotFound(
+            format!("App with ID {app_id} not found").to_string(),
+        ));
+    }
+
+    sqlx::query!(
+        "INSERT INTO deployment_metadata (workspace_id, path, app_version, deployment_msg) VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id, path, app_version) WHERE app_version IS NOT NULL DO UPDATE SET deployment_msg = $4",
+        w_id,
+        app_path.unwrap(),
+        app_version,
+        app_history_update.deployment_msg,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    return Ok(());
 }
 
 async fn get_app_by_id(
@@ -512,13 +588,18 @@ async fn create_app(
     )
     .await?;
 
+    let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(dm) = app.deployment_message {
+        args.insert("deployment_message".to_string(), json!(dm));
+    }
+
     let tx = PushIsolationLevel::Transaction(tx);
-    let (dependency_job_uuid, tx) = push(
+    let (dependency_job_uuid, new_tx) = push(
         &db,
         tx,
         &w_id,
         JobPayload::AppDependencies { path: app.path.clone(), version: v_id },
-        PushArgs::empty(),
+        args,
         &authed.username,
         &authed.email,
         windmill_common::users::username_to_permissioned_as(&authed.username),
@@ -538,7 +619,9 @@ async fn create_app(
     )
     .await?;
     tracing::info!("Pushed app dependency job {}", dependency_job_uuid);
-    tx.commit().await?;
+
+    new_tx.commit().await?;
+
     webhook.send_message(
         w_id.clone(),
         WebhookMessage::CreateApp { workspace: w_id, path: app.path.clone() },
@@ -582,7 +665,9 @@ pub async fn get_hub_app_by_id(
 
 async fn delete_app(
     authed: ApiAuthed,
+    Extension(db): Extension<DB>,
     Extension(user_db): Extension<UserDB>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
     Extension(webhook): Extension<WebhookShared>,
     Path((w_id, path)): Path<(String, StripPath)>,
 ) -> Result<String> {
@@ -607,10 +692,11 @@ async fn delete_app(
     sqlx::query!(
         "DELETE FROM app WHERE path = $1 AND workspace_id = $2",
         path,
-        w_id
+        &w_id
     )
     .execute(&mut *tx)
     .await?;
+
     audit_log(
         &mut *tx,
         &authed.username,
@@ -622,6 +708,36 @@ async fn delete_app(
     )
     .await?;
     tx.commit().await?;
+
+    handle_deployment_metadata(
+        &authed.email,
+        &authed.username,
+        &db,
+        &w_id,
+        DeployedObject::App {
+            path: path.to_string(),
+            parent_path: Some(path.to_string()),
+            version: 0, // dummy version as it will not get inserted in db
+        },
+        Some(format!("App '{}' deleted", path)),
+        rsmq,
+        true,
+    )
+    .await?;
+
+    sqlx::query!(
+        "DELETE FROM deployment_metadata WHERE path = $1 AND workspace_id = $2 AND app_version IS NOT NULL",
+        path,
+        w_id
+    )
+    .execute(&db)
+    .await
+    .map_err(|e| {
+        Error::InternalErr(format!(
+            "error deleting deployment metadata for script with path {path} in workspace {w_id}: {e}"
+        ))
+    })?;
+
     webhook.send_message(
         w_id.clone().clone(),
         WebhookMessage::DeleteApp { workspace: w_id, path: path.to_owned() },
@@ -753,16 +869,21 @@ async fn update_app(
     )
     .await?;
 
+    let tx: PushIsolationLevel<'_, rsmq_async::MultiplexedRsmq> =
+        PushIsolationLevel::Transaction(tx);
     if let Some(v_id) = v_id {
-        let tx: PushIsolationLevel<'_, rsmq_async::MultiplexedRsmq> =
-            PushIsolationLevel::Transaction(tx);
+        let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+        if let Some(dm) = ns.deployment_message {
+            args.insert("deployment_message".to_string(), json!(dm));
+        }
+        args.insert("parent_path".to_string(), json!(path));
 
-        let (dependency_job_uuid, tx) = push(
+        let (dependency_job_uuid, new_tx) = push(
             &db,
             tx,
             &w_id,
             JobPayload::AppDependencies { path: npath.clone(), version: v_id },
-            PushArgs::empty(),
+            args,
             &authed.username,
             &authed.email,
             windmill_common::users::username_to_permissioned_as(&authed.username),
@@ -782,10 +903,9 @@ async fn update_app(
         )
         .await?;
         tracing::info!("Pushed app dependency job {}", dependency_job_uuid);
-        tx.commit().await?;
-    } else {
-        tx.commit().await?;
+        new_tx.commit().await?;
     }
+
     webhook.send_message(
         w_id.clone(),
         WebhookMessage::UpdateApp {

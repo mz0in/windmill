@@ -65,6 +65,10 @@ import GraphqlIcon from './GraphqlIcon.svelte'
 import NocoDbIcon from './NocoDbIcon.svelte'
 import AzureIcon from './AzureIcon.svelte'
 import OktaIcon from './OktaIcon.svelte'
+import MsSqlServerIcon from './MSSqlServerIcon.svelte'
+import AuthentikIcon from './AuthentikIcon.svelte'
+import AutheliaIcon from './AutheliaIcon.svelte'
+import KanidmIcon from './KanidmIcon.svelte'
 
 export const APP_TO_ICON_COMPONENT = {
 	postgresql: PostgresIcon,
@@ -90,6 +94,7 @@ export const APP_TO_ICON_COMPONENT = {
 	mailchimp: MailchimpIcon,
 	sendgrid: SendgridIcon,
 	snowflake: SendflakeIcon,
+	ms_sql_server: MsSqlServerIcon,
 	qrcode: QRCodeIcon,
 	linkedin: LinkedinIcon,
 	hubspot: HubspotIcon,
@@ -136,7 +141,10 @@ export const APP_TO_ICON_COMPONENT = {
 	graphql: GraphqlIcon,
 	nocodb: NocoDbIcon,
 	azure: AzureIcon,
-	okta: OktaIcon
+	okta: OktaIcon,
+	authentik: AuthentikIcon,
+	authelia: AutheliaIcon,
+	kanidm: KanidmIcon
 } as const
 
 export {
@@ -202,5 +210,8 @@ export {
 	NocoDbIcon,
 	AzureIcon,
 	MicrosoftIcon,
-	OktaIcon
+	OktaIcon,
+	AuthentikIcon,
+	AutheliaIcon,
+	KanidmIcon
 }

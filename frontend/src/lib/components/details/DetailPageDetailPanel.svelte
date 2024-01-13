@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { Tabs, Tab, TabContent, Button } from '$lib/components/common'
 	import { copyToClipboard } from '$lib/utils'
-	import { faClipboard } from '@fortawesome/free-solid-svg-icons'
-	import { CalendarCheck2, Terminal, Webhook } from 'lucide-svelte'
+	import { CalendarCheck2, Clipboard, Terminal, Webhook } from 'lucide-svelte'
 	import { Highlight } from 'svelte-highlight'
+	import { yaml } from 'svelte-highlight/languages'
 	import json from 'svelte-highlight/languages/json'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
+	import YAML from 'yaml'
 
 	let triggerSelected: 'webhooks' | 'schedule' | 'cli' = 'webhooks'
 	export let flow_json: any | undefined = undefined
@@ -13,7 +14,9 @@
 
 	export let isOperator: boolean = false
 
-	let selected = 'saved_inputs'
+	export let selected: string
+
+	let rawType: 'json' | 'yaml' = 'yaml'
 
 	$: if (hasStepDetails) {
 		selected = 'flow_step'
@@ -25,13 +28,13 @@
 
 <Splitpanes horizontal class="h-full">
 	<Pane size={100}>
-		<Tabs {selected}>
+		<Tabs bind:selected>
 			<Tab value="saved_inputs">Saved inputs</Tab>
 			{#if !isOperator}
 				<Tab value="details">Details & Triggers</Tab>
 			{/if}
 			{#if flow_json}
-				<Tab value="flow_json">JSON</Tab>
+				<Tab value="raw">Raw</Tab>
 			{/if}
 			{#if hasStepDetails}
 				<Tab value="flow_step">Step</Tab>
@@ -82,20 +85,37 @@
 							</Pane>
 						</Splitpanes>
 					</TabContent>
-					<TabContent value="flow_json" class="flex flex-col flex-1 h-full overflow-auto">
-						<div class="relative pt-2">
-							<Button
-								on:click={() => copyToClipboard(JSON.stringify(flow_json, null, 4))}
-								color="light"
-								variant="border"
-								size="xs"
-								startIcon={{ icon: faClipboard }}
-								btnClasses="absolute top-2 right-2 w-min"
-							>
-								Copy content
-							</Button>
-							<Highlight language={json} code={JSON.stringify(flow_json, null, 4)} />
-						</div>
+					<TabContent value="raw" class="flex flex-col flex-1 h-full overflow-auto">
+						<Tabs bind:selected={rawType} wrapperClass="mt-4">
+							<Tab value="yaml">YAML</Tab>
+							<Tab value="json">JSON</Tab>
+							<svelte:fragment slot="content">
+								<div class="relative pt-2">
+									<Button
+										on:click={() =>
+											copyToClipboard(
+												rawType === 'yaml'
+													? YAML.stringify(flow_json)
+													: JSON.stringify(flow_json, null, 4)
+											)}
+										color="light"
+										variant="border"
+										size="xs"
+										startIcon={{ icon: Clipboard }}
+										btnClasses="absolute top-2 right-2 w-min"
+									>
+										Copy content
+									</Button>
+									<Highlight
+										class="overflow-auto px-1"
+										language={rawType === 'yaml' ? yaml : json}
+										code={rawType === 'yaml'
+											? YAML.stringify(flow_json)
+											: JSON.stringify(flow_json, null, 4)}
+									/>
+								</div>
+							</svelte:fragment>
+						</Tabs>
 					</TabContent>
 					<TabContent value="flow_step" class="flex flex-col flex-1 h-full">
 						<slot name="flow_step" />

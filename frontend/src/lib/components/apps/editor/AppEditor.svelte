@@ -24,7 +24,6 @@
 	import Tabs from '$lib/components/common/tabs/Tabs.svelte'
 	import { userStore, workspaceStore } from '$lib/stores'
 	import { classNames, encodeState } from '$lib/utils'
-	import { faPlus } from '@fortawesome/free-solid-svg-icons'
 	import AppPreview from './AppPreview.svelte'
 	import ComponentList from './componentsPanel/ComponentList.svelte'
 	import ContextPanel from './contextPanel/ContextPanel.svelte'
@@ -54,13 +53,26 @@
 	import DarkModeObserver from '$lib/components/DarkModeObserver.svelte'
 	import { getTheme } from './componentsPanel/themeUtils'
 	import StylePanel from './settingsPanel/StylePanel.svelte'
+	import type DiffDrawer from '$lib/components/DiffDrawer.svelte'
+	import RunnableJobPanel from './RunnableJobPanel.svelte'
 
 	export let app: App
 	export let path: string
 	export let policy: Policy
 	export let summary: string
 	export let fromHub: boolean = false
-	export let versions: number[]
+	export let diffDrawer: DiffDrawer | undefined = undefined
+	export let savedApp:
+		| {
+				value: App
+				draft?: any
+				path: string
+				summary: string
+				policy: any
+				draft_only?: boolean
+		  }
+		| undefined = undefined
+	export let version: number | undefined = undefined
 
 	migrateApp(app)
 
@@ -119,6 +131,7 @@
 		selectedComponent,
 		mode,
 		connectingInput,
+		bgRuns: writable([]),
 		breakpoint,
 		runnableComponents: writable({}),
 		appPath: path,
@@ -149,8 +162,11 @@
 
 	let yTop = writable(0)
 
+	let runnableJob = writable({ focused: false, jobs: {}, frontendJobs: {}, width: 100 })
 	setContext<AppEditorContext>('AppEditorContext', {
 		yTop,
+		runnableJobEditorPanel: runnableJob,
+		evalPreview: writable({}),
 		componentActive,
 		dndItem: writable({}),
 		refreshComponents: writable(undefined),
@@ -190,10 +206,15 @@
 
 	let befSelected: string | undefined = undefined
 
-	$: if ($selectedComponent?.[0] != befSelected && $selectedComponent?.[0] != undefined) {
+	$: if ($selectedComponent?.[0] != befSelected) {
 		befSelected = $selectedComponent?.[0]
-		selectedTab = 'settings'
+		if ($selectedComponent?.[0] != undefined) {
+			onSelectedComponentChange()
+		}
+	}
 
+	function onSelectedComponentChange() {
+		selectedTab = 'settings'
 		if (befSelected) {
 			if (!['ctx', 'state'].includes(befSelected) && !befSelected?.startsWith(BG_PREFIX)) {
 				let item = findGridItem($appStore, befSelected)
@@ -202,7 +223,11 @@
 						parentComponentId: befSelected,
 						subGridIndex: 0
 					}
-				} else if (item?.data.type === 'tabscomponent' || item?.data.type === 'steppercomponent') {
+				} else if (
+					item?.data.type === 'tabscomponent' ||
+					item?.data.type === 'steppercomponent' ||
+					item?.data.type === 'conditionalwrapper'
+				) {
 					$focusedGrid = {
 						parentComponentId: befSelected,
 						subGridIndex:
@@ -376,16 +401,20 @@
 
 	let css: string | undefined = undefined
 
+	let lastTheme: string | undefined = undefined
 	appStore.subscribe(async (currentAppStore) => {
 		if (!currentAppStore.theme) {
 			return
 		}
 
-		if (currentAppStore.theme.type === 'inlined') {
-			css = currentAppStore.theme.css
-		} else if (currentAppStore.theme.type === 'path' && currentAppStore.theme?.path) {
-			let loadedCss = await getTheme($workspaceStore!, currentAppStore.theme.path)
-			css = loadedCss.value
+		if (JSON.stringify(currentAppStore.theme) != lastTheme) {
+			if (currentAppStore.theme.type === 'inlined') {
+				css = currentAppStore.theme.css
+			} else if (currentAppStore.theme.type === 'path' && currentAppStore.theme?.path) {
+				let loadedCss = await getTheme($workspaceStore!, currentAppStore.theme.path)
+				css = loadedCss.value
+			}
+			lastTheme = JSON.stringify(currentAppStore.theme)
 		}
 	})
 
@@ -456,6 +485,8 @@
 			}
 		}
 	}
+
+	let runnableJobEnterTimeout: NodeJS.Timeout | undefined = undefined
 </script>
 
 <DarkModeObserver on:change={onThemeChange} />
@@ -464,7 +495,15 @@
 
 {#if !$userStore?.operator}
 	{#if $appStore}
-		<AppEditorHeader on:restore {versions} {policy} {fromHub} bind:this={appEditorHeader} />
+		<AppEditorHeader
+			on:restore
+			{policy}
+			{fromHub}
+			bind:this={appEditorHeader}
+			{diffDrawer}
+			bind:savedApp
+			{version}
+		/>
 		{#if $mode === 'preview'}
 			<SplitPanesWrapper>
 				<div
@@ -521,7 +560,7 @@
 									class={twMerge(
 										'bg-surface-secondary h-full w-full relative',
 										$appStore.css?.['app']?.['viewer']?.class,
-										'wm-app-viewer z-[100]  h-full overflow-visible'
+										'wm-app-viewer h-full overflow-visible'
 									)}
 									style={$appStore.css?.['app']?.['viewer']?.style}
 								>
@@ -564,7 +603,7 @@
 										on:scroll={parseScroll}
 										class={classNames(
 											'mx-auto w-full h-full z-50',
-											$appStore.fullscreen ? '' : 'max-w-7xl border-x',
+											$appStore.fullscreen ? '' : 'max-w-7xl',
 											$componentActive ? 'absolute' : 'overflow-auto'
 										)}
 										style={$componentActive ? `top: -${$yTop}px;` : ''}
@@ -584,15 +623,29 @@
 							</Pane>
 							{#if $connectingInput?.opened == false && !$componentActive}
 								<Pane bind:size={runnablePanelSize}>
-									<div class="relative h-full w-full">
+									<!-- svelte-ignore a11y-no-static-element-interactions -->
+									<div
+										class="relative h-full w-full overflow-x-visible"
+										on:mouseenter={() => {
+											runnableJobEnterTimeout && clearTimeout(runnableJobEnterTimeout)
+											$runnableJob.focused = true
+										}}
+										on:mouseleave={() => {
+											runnableJobEnterTimeout = setTimeout(
+												() => ($runnableJob.focused = false),
+												200
+											)
+										}}
+									>
 										<InlineScriptsPanel />
+										<RunnableJobPanel />
 									</div>
 								</Pane>
 							{/if}
 						</Splitpanes>
 					</Pane>
 					<Pane bind:size={rightPanelSize} minSize={15} maxSize={33}>
-						<div class="relative flex flex-col h-full">
+						<div bind:clientWidth={$runnableJob.width} class="relative flex flex-col h-full">
 							<Tabs bind:selected={selectedTab} wrapperClass="!min-h-[42px]" class="!h-full">
 								<Popover disappearTimeout={0} notClickable placement="bottom">
 									<svelte:fragment slot="text">Component library</svelte:fragment>
@@ -706,7 +759,7 @@
 			variant="border"
 			color="blue"
 			size="sm"
-			startIcon={{ icon: faPlus }}
+			startIcon={{ icon: Plus }}
 			on:click={() => {
 				variableEditor?.initNew?.()
 			}}

@@ -102,6 +102,31 @@
         "ordinal": 19,
         "name": "on_recovery_extra_args",
         "type_info": "Json"
+      },
+      {
+        "ordinal": 20,
+        "name": "ws_error_handler_muted",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 21,
+        "name": "retry",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 22,
+        "name": "summary",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 23,
+        "name": "no_flow_overlap",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 24,
+        "name": "tag",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
@@ -130,6 +155,11 @@
       true,
       true,
       true,
+      true,
+      false,
+      true,
+      true,
+      false,
       true
     ]
   },

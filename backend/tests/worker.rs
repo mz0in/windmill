@@ -124,7 +124,7 @@ impl ApiServer {
 
         let addr = sock.local_addr().unwrap();
         drop(sock);
-        let (port_tx, _port_rx) = tokio::sync::oneshot::channel::<u16>();
+        let (port_tx, _port_rx) = tokio::sync::oneshot::channel::<String>();
 
         let task = tokio::task::spawn(windmill_api::run_server(
             db.clone(),
@@ -961,7 +961,7 @@ fn spawn_test_worker(
     tokio::sync::broadcast::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    for x in [windmill_worker::LOCK_CACHE_DIR] {
+    for x in [windmill_worker::LOCK_CACHE_DIR, windmill_worker::GO_BIN_CACHE_DIR] {
         std::fs::DirBuilder::new()
             .recursive(true)
             .create(x)
@@ -994,6 +994,7 @@ fn spawn_test_worker(
             &base_internal_url,
             None,
             Arc::new(RwLock::new(None)),
+            false,
         )
         .await
     };
@@ -1084,6 +1085,7 @@ async fn test_deno_flow(db: Pool<Postgres>) {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None
                 },
                 FlowModule {
                     id: "b".to_string(),
@@ -1119,6 +1121,7 @@ async fn test_deno_flow(db: Pool<Postgres>) {
                             mock: None,
                             timeout: None,
                             priority: None,
+                            delete_after_use: None,
                         }],
                     },
                     stop_after_if: Default::default(),
@@ -1130,6 +1133,7 @@ async fn test_deno_flow(db: Pool<Postgres>) {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
             ],
             same_worker: false,
@@ -1230,6 +1234,7 @@ async fn test_deno_flow_same_worker(db: Pool<Postgres>) {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
                 FlowModule {
                     id: "b".to_string(),
@@ -1276,6 +1281,7 @@ async fn test_deno_flow_same_worker(db: Pool<Postgres>) {
                                 mock: None,
                                 timeout: None,
                                 priority: None,
+                                delete_after_use: None,
                             },
                             FlowModule {
                                 id: "e".to_string(),
@@ -1308,6 +1314,7 @@ async fn test_deno_flow_same_worker(db: Pool<Postgres>) {
                                 mock: None,
                                 timeout: None,
                                 priority: None,
+                                delete_after_use: None
                             },
                         ],
                     },
@@ -1320,26 +1327,26 @@ async fn test_deno_flow_same_worker(db: Pool<Postgres>) {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None
                 },
                 FlowModule {
                     id: "c".to_string(),
                     value: FlowModuleValue::RawScript {
                         input_transforms: [
-
-                        (
-                            "loops".to_string(),
-                            InputTransform::Javascript { expr: "results.b".to_string() },
-                        ),
-                        (
-                            "path".to_string(),
-                            InputTransform::Static { value: json!("outer.txt") },
-                        ),
-                        (
-                            "path2".to_string(),
-                            InputTransform::Static { value: json!("inner.txt") },
-                        ),
-                    ]
-                    .into(),
+                            (
+                                "loops".to_string(),
+                                InputTransform::Javascript { expr: "results.b".to_string() },
+                            ),
+                            (
+                                "path".to_string(),
+                                InputTransform::Static { value: json!("outer.txt") },
+                            ),
+                            (
+                                "path2".to_string(),
+                                InputTransform::Static { value: json!("inner.txt") },
+                            ),
+                        ]
+                        .into(),
                         language: ScriptLang::Deno,
                         content: r#"export async function main(path: string, loops: string[], path2: string) {
                             return await Deno.readTextFile(`./shared/${path}`) + "," + loops + "," + await Deno.readTextFile(`./shared/${path2}`);
@@ -1360,6 +1367,7 @@ async fn test_deno_flow_same_worker(db: Pool<Postgres>) {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
             ],
             same_worker: true,
@@ -1658,7 +1666,8 @@ func main(derp string) (string, error) {
         language: ScriptLang::Go,
         concurrent_limit: None,
         concurrency_time_window_s: None,
-        cache_ttl: None
+        cache_ttl: None,
+        dedicated_worker: None
     }))
     .arg("derp", json!("world"))
     .run_until_complete(&db, port)
@@ -1688,7 +1697,8 @@ echo "hello $msg"
         language: ScriptLang::Bash,
         concurrent_limit: None,
         concurrency_time_window_s: None,
-        cache_ttl: None
+        cache_ttl: None,
+        dedicated_worker: None
     }))
     .arg("msg", json!("world"))
     .run_until_complete(&db, port)
@@ -1715,7 +1725,8 @@ def main():
         lock: None,
         concurrent_limit: None,
         concurrency_time_window_s: None,
-        cache_ttl: None
+        cache_ttl: None,
+        dedicated_worker: None
     });
 
     let result = run_job_in_new_worker_until_complete(&db, job, port)
@@ -1748,7 +1759,8 @@ def main():
         lock: None,
         concurrent_limit: None,
         concurrency_time_window_s: None,
-        cache_ttl: None
+        cache_ttl: None,
+        dedicated_worker: None
     });
 
     let result = run_job_in_new_worker_until_complete(&db, job, port)
@@ -1780,7 +1792,8 @@ def main():
         lock: None,
         concurrent_limit: None,
         concurrency_time_window_s: None,
-        cache_ttl: None
+        cache_ttl: None,
+        dedicated_worker: None
     });
 
     let result = run_job_in_new_worker_until_complete(&db, job, port)
@@ -1792,7 +1805,7 @@ def main():
 }
 
 #[sqlx::test(fixtures("base"))]
-async fn test_empty_loop(db: Pool<Postgres>) {
+async fn test_empty_loop_1(db: Pool<Postgres>) {
     initialize_tracing().await;
     let server = ApiServer::start(db.clone()).await;
     let port = server.addr.port();
@@ -2573,8 +2586,11 @@ async fn test_flow_lock_all(db: Pool<Postgres>) {
                     tag: None,
                     ws_error_handler_muted: None,
                     priority: None,
+                    dedicated_worker: None,
+                    timeout: None,
                 },
                 draft_only: None,
+                deployment_message: None,
             },
         )
         .await
@@ -2796,10 +2812,9 @@ async fn test_complex_flow_restart(db: Pool<Postgres>) {
         }),
     }).run_until_complete(&db, port).await;
 
-    assert_eq!(
-        first_run_result.json_result().unwrap(),
-        restarted_flow_result.json_result().unwrap()
-    );
+    let first_run_result_int = serde_json::from_value::<i32>(first_run_result.json_result().unwrap()).expect("first_run_result was not an int");
+    let restarted_flow_result_int = serde_json::from_value::<i32>(restarted_flow_result.json_result().unwrap()).expect("restarted_flow_result was not an int");
+    assert_eq!(first_run_result_int, restarted_flow_result_int);
 }
 
 #[sqlx::test(fixtures("base"))]
@@ -2854,6 +2869,11 @@ async fn test_script_schedule_handlers(db: Pool<Postgres>) {
         script_path: "f/system/failing_script".to_string(),
         timezone: "UTC".to_string(),
         schedule: format!("{} {} * * * *", then.second(), then.minute()).to_string(),
+        ws_error_handler_muted: None,
+        retry: None,
+        no_flow_overlap: None,
+        summary: None,
+        tag: None,
     };
 
     let _ = client.create_schedule("test-workspace", &schedule).await;
@@ -2913,6 +2933,11 @@ async fn test_script_schedule_handlers(db: Pool<Postgres>) {
                 on_recovery_extra_args: None,
                 timezone: "UTC".to_string(),
                 schedule: format!("{} {} * * * *", then.second(), then.minute()).to_string(),
+                ws_error_handler_muted: None,
+                retry: None,
+                summary: None,
+                no_flow_overlap: None,
+                tag: None,
             },
         )
         .await
@@ -2988,6 +3013,11 @@ async fn test_flow_schedule_handlers(db: Pool<Postgres>) {
         script_path: "f/system/failing_flow".to_string(),
         timezone: "UTC".to_string(),
         schedule: format!("{} {} * * * *", then.second(), then.minute()).to_string(),
+        ws_error_handler_muted: None,
+        retry: None,
+        no_flow_overlap: None,
+        summary: None,
+        tag: None,
     };
 
     let _ = client.create_schedule("test-workspace", &schedule).await;
@@ -3048,6 +3078,11 @@ async fn test_flow_schedule_handlers(db: Pool<Postgres>) {
                 on_recovery_extra_args: None,
                 timezone: "UTC".to_string(),
                 schedule: format!("{} {} * * * *", then.second(), then.minute()).to_string(),
+                ws_error_handler_muted: None,
+                retry: None,
+                summary: None,
+                no_flow_overlap: None,
+                tag: None,
             },
         )
         .await
@@ -3119,6 +3154,10 @@ async fn run_deployed_relative_imports(db: &Pool<Postgres>, script_content: Stri
             schema: std::collections::HashMap::new(),
             ws_error_handler_muted: Some(false),
             priority: None,
+            delete_after_use: None,
+            timeout: None,
+            restart_unless_cancelled: None,
+            deployment_message: None,
         },
     ).await.unwrap();
 
@@ -3173,6 +3212,7 @@ async fn run_preview_relative_imports(db: &Pool<Postgres>, script_content: Strin
             concurrent_limit: None,
             concurrency_time_window_s: None,
             cache_ttl: None,
+            dedicated_worker: None
         })).push(&db2).await;
 
 

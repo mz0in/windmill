@@ -6,9 +6,15 @@
  * LICENSE-AGPL for a copy of the license.
  */
 
+use magic_crypt::{MagicCrypt256, MagicCryptTrait};
 use serde::{Deserialize, Serialize};
+use sqlx::{Postgres, Transaction};
 
-use crate::BASE_URL;
+use crate::{BASE_URL, DB};
+
+lazy_static::lazy_static! {
+    pub static ref SECRET_SALT: Option<String> = std::env::var("SECRET_SALT").ok();
+}
 
 #[derive(Serialize, Clone)]
 
@@ -48,7 +54,6 @@ pub struct ExportableListableVariable {
     pub extra_perms: serde_json::Value,
     pub account: Option<i32>,
     pub is_oauth: Option<bool>,
-    pub is_expired: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +64,72 @@ pub struct CreateVariable {
     pub description: String,
     pub account: Option<i32>,
     pub is_oauth: Option<bool>,
+}
+
+pub async fn build_crypt<'c>(
+    db: &mut Transaction<'c, Postgres>,
+    w_id: &str,
+) -> crate::error::Result<MagicCrypt256> {
+    let key = get_workspace_key(w_id, db).await?;
+    let crypt_key = if let Some(ref salt) = SECRET_SALT.as_ref() {
+        format!("{}{}", key, salt)
+    } else {
+        key
+    };
+    Ok(magic_crypt::new_magic_crypt!(crypt_key, 256))
+}
+
+pub async fn get_workspace_key<'c>(
+    w_id: &str,
+    db: &mut Transaction<'c, Postgres>,
+) -> crate::error::Result<String> {
+    let key = sqlx::query_scalar!(
+        "SELECT key FROM workspace_key WHERE workspace_id = $1 AND kind = 'cloud'",
+        w_id
+    )
+    .fetch_one(&mut **db)
+    .await
+    .map_err(|e| crate::Error::InternalErr(format!("fetching workspace key: {e}")))?;
+    Ok(key)
+}
+
+pub async fn get_secret_value_as_admin(
+    db: &DB,
+    w_id: &str,
+    path: &str,
+) -> crate::error::Result<String> {
+    let variable_o = sqlx::query!(
+        "SELECT value, is_secret, path from variable WHERE variable.path = $1 AND variable.workspace_id = $2", path, w_id
+    )
+    .fetch_optional(db)
+    .await?;
+
+    let variable = if let Some(variable) = variable_o {
+        variable
+    } else {
+        return Err(crate::Error::NotFound(format!(
+            "variable {} not found in workspace {}",
+            path, w_id
+        )));
+    };
+
+    let r = if variable.is_secret {
+        let value = variable.value;
+        if !value.is_empty() {
+            let mut tx = db.begin().await?;
+            let mc = build_crypt(&mut tx, &w_id).await?;
+            tx.commit().await?;
+
+            mc.decrypt_base64_to_string(value)
+                .map_err(|e| crate::Error::InternalErr(e.to_string()))?
+        } else {
+            "".to_string()
+        }
+    } else {
+        variable.value
+    };
+
+    Ok(r)
 }
 
 pub async fn get_reserved_variables(
@@ -75,25 +146,6 @@ pub async fn get_reserved_variables(
     step_id: Option<String>,
 ) -> [ContextualVariable; 15] {
     let state_path = {
-        let flow_path = flow_path
-            .clone()
-            .unwrap_or_else(|| "NO_FLOW_PATH".to_string());
-        let script_path = path.clone().unwrap_or_else(|| "NO_JOB_PATH".to_string());
-        let schedule_path = schedule_path
-            .clone()
-            .map(|x| format!("/{x}"))
-            .unwrap_or_else(String::new);
-
-        let script_path = if script_path.ends_with("/") {
-            "NO_NAME".to_string()
-        } else {
-            script_path
-        };
-
-        format!("{permissioned_as}/{flow_path}/{script_path}{schedule_path}")
-    };
-
-    let state_path_2 = {
         let trigger = if schedule_path.is_some() {
             username.to_string()
         } else {
@@ -200,13 +252,13 @@ pub async fn get_reserved_variables(
         },
         ContextualVariable {
             name: "WM_STATE_PATH".to_string(),
-            value: state_path,
-            description: "State resource path unique to a script and its trigger (legacy, in a migration period against WM_STATE_PATH_NEW)".to_string(),
+            value: state_path.clone(),
+            description: "State resource path unique to a script and its trigger".to_string(),
         },
         ContextualVariable {
             name: "WM_STATE_PATH_NEW".to_string(),
-            value: state_path_2,
-            description: "State resource path unique to a script and its trigger".to_string(),
+            value: state_path,
+            description: "State resource path unique to a script and its trigger (legacy)".to_string(),
         },
         ContextualVariable {
             name: "WM_FLOW_STEP_ID".to_string(),

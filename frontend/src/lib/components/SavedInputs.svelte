@@ -3,11 +3,10 @@
 	import { InputService, type Input, RunnableType, type CreateInput } from '$lib/gen/index.js'
 	import { userStore, workspaceStore } from '$lib/stores.js'
 	import { classNames, displayDate, sendUserToast } from '$lib/utils.js'
-	import { faSave } from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher } from 'svelte'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
 	import ObjectViewer from './propertyPicker/ObjectViewer.svelte'
-	import { ArrowLeftIcon, Edit, ExternalLink, X } from 'lucide-svelte'
+	import { ArrowLeftIcon, Edit, ExternalLink, Save, X } from 'lucide-svelte'
 	import Toggle from './Toggle.svelte'
 	import Tooltip from './Tooltip.svelte'
 	import TimeAgo from './TimeAgo.svelte'
@@ -146,7 +145,7 @@
 		<Pane>
 			<div class="w-full flex flex-col gap-4 p-2">
 				<div class="w-full flex justify-between items-center gap-4 flex-wrap">
-					<span class="text-sm font-extrabold flex-shrink-0"
+					<span class="text-sm font-semibold flex-shrink-0"
 						>Saved Inputs <Tooltip
 							>Shared inputs are available to anyone with access to the script</Tooltip
 						></span
@@ -156,7 +155,7 @@
 							on:click={() => saveInput(args)}
 							disabled={!isValid}
 							loading={savingInputs}
-							startIcon={{ icon: faSave }}
+							startIcon={{ icon: Save }}
 							color="light"
 							size="xs"
 						>
@@ -261,7 +260,7 @@
 
 		<Pane>
 			<div class="w-full flex flex-col gap-4 p-2">
-				<span class="text-sm font-extrabold">Previous runs</span>
+				<span class="text-sm font-semibold">Previous runs</span>
 
 				<div class="w-full flex flex-col gap-1 p-0 h-full overflow-y-auto">
 					{#if previousInputs.length > 0}
@@ -289,7 +288,7 @@
 										{i.created_by}
 									</div>
 									<div
-										class="whitespace-nowrap col-span-3 font-normal overflow-hidden text-ellipsis flex-shrink text-center"
+										class="whitespace-nowrap col-span-3 !text-tertiary !text-2xs overflow-hidden text-ellipsis flex-shrink text-center"
 									>
 										<TimeAgo date={i.created_at ?? ''} />
 									</div>
@@ -316,7 +315,7 @@
 		<Pane>
 			<div class="h-full overflow-hidden min-h-0 flex flex-col justify-between">
 				<div class="w-full flex flex-col min-h-0 gap-2 px-2 py-2 grow">
-					<div class="text-sm font-extrabold">Preview</div>
+					<div class="text-sm font-semibold">Preview</div>
 					<div class="w-full flex flex-col">
 						<Button
 							color="blue"
@@ -332,7 +331,7 @@
 					</div>
 					<div class="w-full min-h-0 grow overflow-auto">
 						{#if Object.keys(selectedInput?.args || {}).length > 0}
-							<div class="border overflow-auto h-full p-2">
+							<div class=" overflow-auto h-full p-2">
 								<ObjectViewer json={selectedInput?.args} />
 							</div>
 						{:else}

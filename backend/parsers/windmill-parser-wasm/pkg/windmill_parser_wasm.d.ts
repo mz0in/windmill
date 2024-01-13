@@ -14,6 +14,11 @@ export function parse_outputs(code: string): string;
 * @param {string} code
 * @returns {string}
 */
+export function parse_ts_imports(code: string): string;
+/**
+* @param {string} code
+* @returns {string}
+*/
 export function parse_bash(code: string): string;
 /**
 * @param {string} code
@@ -54,6 +59,11 @@ export function parse_snowflake(code: string): string;
 * @param {string} code
 * @returns {string}
 */
+export function parse_mssql(code: string): string;
+/**
+* @param {string} code
+* @returns {string}
+*/
 export function parse_graphql(code: string): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -62,6 +72,7 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly parse_deno: (a: number, b: number, c: number) => void;
   readonly parse_outputs: (a: number, b: number, c: number) => void;
+  readonly parse_ts_imports: (a: number, b: number, c: number) => void;
   readonly parse_bash: (a: number, b: number, c: number) => void;
   readonly parse_powershell: (a: number, b: number, c: number) => void;
   readonly parse_go: (a: number, b: number, c: number) => void;
@@ -70,6 +81,7 @@ export interface InitOutput {
   readonly parse_mysql: (a: number, b: number, c: number) => void;
   readonly parse_bigquery: (a: number, b: number, c: number) => void;
   readonly parse_snowflake: (a: number, b: number, c: number) => void;
+  readonly parse_mssql: (a: number, b: number, c: number) => void;
   readonly parse_graphql: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

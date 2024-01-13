@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte'
-	import { FileUp } from 'lucide-svelte'
+	import { FileUp, Trash } from 'lucide-svelte'
 	import Button from '../../common/button/Button.svelte'
-	import { faTrash } from '@fortawesome/free-solid-svg-icons'
 	import { twMerge } from 'tailwind-merge'
 	import type { ReadFileAs } from './model'
 
@@ -17,6 +16,7 @@
 	export let hideIcon = false
 	export let iconSize = 36
 	export let returnFileNames = false
+	export let submittedText: string | undefined = undefined
 	const dispatch = createEventDispatcher()
 	let input: HTMLInputElement
 	let files: File[] | undefined = undefined
@@ -33,8 +33,15 @@
 		}
 		for (let i = 0; i < fileList.length; i++) {
 			const file = fileList.item(i)
-			if (file) files.push(file)
+			if (file) {
+				files.push(file)
+			}
 		}
+
+		if (!files.length) {
+			files = undefined
+		}
+
 		// Needs to be reset so the same file can be selected
 		// multiple times in a row
 		input.value = ''
@@ -77,7 +84,6 @@
 
 	async function dispatchChange() {
 		files = files
-
 		if (convertTo && files) {
 			const promises = files.map(convertFile)
 			let converted: ConvertedFile[] | { name: string; data: ConvertedFile }[] = await Promise.all(
@@ -110,7 +116,7 @@
 		<div class="w-full max-h-full overflow-auto px-6">
 			<slot name="selected-title">
 				<div class="text-center mb-2 px-2">
-					Selected file{files.length > 1 ? 's' : ''}:
+					{submittedText ? submittedText : `Selected file${files.length > 1 ? 's' : ''}`}:
 				</div>
 			</slot>
 			<ul class="relative z-20 max-w-[500px] bg-surface rounded-lg overflow-hidden mx-auto">
@@ -126,7 +132,7 @@
 							variant="border"
 							iconOnly
 							btnClasses="bg-transparent"
-							startIcon={{ icon: faTrash }}
+							startIcon={{ icon: Trash }}
 							on:click={() => removeFile(i)}
 						/>
 					</li>

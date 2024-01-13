@@ -6,6 +6,8 @@
  * LICENSE-AGPL for a copy of the license.
  */
 
+use std::collections::HashMap;
+
 use crate::db::ApiAuthed;
 use crate::{
     db::DB,
@@ -24,6 +26,7 @@ use axum::{
 
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sql_builder::prelude::*;
 use sql_builder::SqlBuilder;
 use sqlx::{FromRow, Postgres, Transaction};
@@ -38,7 +41,7 @@ use windmill_common::{
     scripts::Schema,
     utils::{http_get_from_hub, not_found_if_none, paginate, Pagination, StripPath},
 };
-use windmill_queue::PushArgs;
+use windmill_git_sync::{handle_deployment_metadata, DeployedObject};
 use windmill_queue::{push, schedule::push_scheduled_job, PushIsolationLevel, QueueTransaction};
 
 pub fn workspaced_service() -> Router {
@@ -315,7 +318,7 @@ async fn create_flow(
 
     sqlx::query!(
         "INSERT INTO flow (workspace_id, path, summary, description, value, edited_by, edited_at, \
-         schema, dependency_job, draft_only, tag) VALUES ($1, $2, $3, $4, $5, $6, now(), $7::text::json, NULL, $8, $9)",
+         schema, dependency_job, draft_only, tag, dedicated_worker) VALUES ($1, $2, $3, $4, $5, $6, now(), $7::text::json, NULL, $8, $9, $10)",
         w_id,
         nf.path,
         nf.summary,
@@ -324,7 +327,8 @@ async fn create_flow(
         &authed.username,
         nf.schema.and_then(|x| serde_json::to_string(&x.0).ok()),
         nf.draft_only,
-        nf.tag
+        nf.tag,
+        nf.dedicated_worker
     )
     .execute(&mut tx)
     .await?;
@@ -353,13 +357,21 @@ async fn create_flow(
     )
     .await?;
 
+    let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(dm) = nf.deployment_message {
+        args.insert("deployment_message".to_string(), json!(dm));
+    }
+
     let tx = PushIsolationLevel::Transaction(tx);
-    let (dependency_job_uuid, mut tx) = push(
+    let (dependency_job_uuid, mut new_tx) = push(
         &db,
         tx,
         &w_id,
-        JobPayload::FlowDependencies { path: nf.path.clone() },
-        PushArgs::empty(),
+        JobPayload::FlowDependencies {
+            path: nf.path.clone(),
+            dedicated_worker: nf.dedicated_worker,
+        },
+        args,
         &authed.username,
         &authed.email,
         windmill_common::users::username_to_permissioned_as(&authed.username),
@@ -385,10 +397,10 @@ async fn create_flow(
         nf.path,
         w_id
     )
-    .execute(&mut tx)
+    .execute(&mut new_tx)
     .await?;
-    tx.commit().await?;
 
+    new_tx.commit().await?;
     webhook.send_message(
         w_id.clone(),
         WebhookMessage::CreateFlow { workspace: w_id.clone(), path: nf.path.clone() },
@@ -472,7 +484,8 @@ async fn update_flow(
     let old_dep_job = not_found_if_none(old_dep_job, "Flow", flow_path)?;
     sqlx::query!(
         "UPDATE flow SET path = $1, summary = $2, description = $3, value = $4, edited_by = $5, \
-         edited_at = now(), schema = $6::text::json, dependency_job = NULL, draft_only = NULL, tag = $9 WHERE path = $7 AND workspace_id = $8",
+         edited_at = now(), schema = $6::text::json, dependency_job = NULL, draft_only = NULL, tag = $9, dedicated_worker = $10
+        WHERE path = $7 AND workspace_id = $8",
         nf.path,
         nf.summary,
         nf.description.unwrap_or_else(String::new),
@@ -481,7 +494,8 @@ async fn update_flow(
         schema.and_then(|x| serde_json::to_string(&x).ok()),
         flow_path,
         w_id,
-        nf.tag
+        nf.tag,
+        nf.dedicated_worker
     )
     .execute(&mut tx)
     .await?;
@@ -514,11 +528,12 @@ async fn update_flow(
     .await?;
 
     if let Some(schedule) = schedule {
+        clear_schedule(tx.transaction_mut(), &flow_path, &w_id).await?;
         schedulables.push(schedule);
     }
 
     for schedule in schedulables.into_iter() {
-        clear_schedule(tx.transaction_mut(), &schedule.path, true, &w_id).await?;
+        clear_schedule(tx.transaction_mut(), &schedule.path, &w_id).await?;
 
         if schedule.enabled {
             tx = push_scheduled_job(&db, tx, schedule).await?;
@@ -560,12 +575,21 @@ async fn update_flow(
 
     let tx = PushIsolationLevel::Transaction(tx);
 
-    let (dependency_job_uuid, mut tx) = push(
+    let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(dm) = nf.deployment_message {
+        args.insert("deployment_message".to_string(), json!(dm));
+    }
+    args.insert("parent_path".to_string(), json!(flow_path));
+
+    let (dependency_job_uuid, mut new_tx) = push(
         &db,
         tx,
         &w_id,
-        JobPayload::FlowDependencies { path: nf.path.clone() },
-        PushArgs::empty(),
+        JobPayload::FlowDependencies {
+            path: nf.path.clone(),
+            dedicated_worker: nf.dedicated_worker,
+        },
+        args,
         &authed.username,
         &authed.email,
         windmill_common::users::username_to_permissioned_as(&authed.username),
@@ -590,17 +614,19 @@ async fn update_flow(
         nf.path,
         w_id
     )
-    .execute(&mut tx)
+    .execute(&mut new_tx)
     .await?;
     if let Some(old_dep_job) = old_dep_job {
         sqlx::query!(
             "UPDATE queue SET canceled = true WHERE id = $1",
             old_dep_job
         )
-        .execute(&mut tx)
+        .execute(&mut new_tx)
         .await?;
     }
-    tx.commit().await?;
+
+    new_tx.commit().await?;
+
     Ok(nf.path.to_string())
 }
 
@@ -636,8 +662,12 @@ pub struct FlowWDraft {
     pub draft: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_error_handler_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedicated_worker: Option<bool>,
 }
 
 async fn get_flow_by_path_w_draft(
@@ -649,7 +679,8 @@ async fn get_flow_by_path_w_draft(
     let mut tx = user_db.begin(&authed).await?;
 
     let flow_o = sqlx::query_as::<_, FlowWDraft>(
-        "SELECT flow.path, flow.summary, flow,description, flow.schema, flow.value, flow.extra_perms, flow.draft_only, flow.ws_error_handler_muted, draft.value as draft, flow.tag FROM flow
+        "SELECT flow.path, flow.summary, flow,description, flow.schema, flow.value, flow.extra_perms, flow.draft_only, flow.ws_error_handler_muted, flow.dedicated_worker, draft.value as draft, flow.tag
+         FROM flow
         LEFT JOIN draft ON 
         flow.path = draft.path AND draft.workspace_id = $2 AND draft.typ = 'flow' 
         WHERE flow.path = $1 AND flow.workspace_id = $2",
@@ -689,8 +720,10 @@ struct Archived {
 
 async fn archive_flow_by_path(
     authed: ApiAuthed,
+    Extension(db): Extension<DB>,
     Extension(user_db): Extension<UserDB>,
     Extension(webhook): Extension<WebhookShared>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
     Path((w_id, path)): Path<(String, StripPath)>,
     Json(archived): Json<Archived>,
 ) -> Result<String> {
@@ -717,6 +750,27 @@ async fn archive_flow_by_path(
     )
     .await?;
     tx.commit().await?;
+
+    handle_deployment_metadata(
+        &authed.email,
+        &authed.username,
+        &db,
+        &w_id,
+        DeployedObject::Flow { path: path.to_string(), parent_path: Some(path.to_string()) },
+        Some(format!(
+            "Flow '{}' {}",
+            path,
+            if archived.archived.unwrap_or(true) {
+                "archived"
+            } else {
+                "unarchived"
+            }
+        )),
+        rsmq,
+        true,
+    )
+    .await?;
+
     webhook.send_message(
         w_id.clone(),
         WebhookMessage::ArchiveFlow { workspace: w_id, path: path.to_owned() },
@@ -727,7 +781,9 @@ async fn archive_flow_by_path(
 
 async fn delete_flow_by_path(
     authed: ApiAuthed,
+    Extension(db): Extension<DB>,
     Extension(user_db): Extension<UserDB>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
     Extension(webhook): Extension<WebhookShared>,
     Path((w_id, path)): Path<(String, StripPath)>,
 ) -> Result<String> {
@@ -761,6 +817,32 @@ async fn delete_flow_by_path(
     )
     .await?;
     tx.commit().await?;
+
+    handle_deployment_metadata(
+        &authed.email,
+        &authed.username,
+        &db,
+        &w_id,
+        DeployedObject::Flow { path: path.to_string(), parent_path: Some(path.to_string()) },
+        Some(format!("Flow '{}' deleted", path)),
+        rsmq,
+        true,
+    )
+    .await?;
+
+    sqlx::query!(
+        "DELETE FROM deployment_metadata WHERE path = $1 AND workspace_id = $2 AND script_hash IS NULL and app_version IS NULL",
+        path,
+        w_id
+    )
+    .execute(&db)
+    .await
+    .map_err(|e| {
+        Error::InternalErr(format!(
+            "error deleting deployment metadata for script with path {path} in workspace {w_id}: {e}"
+        ))
+    })?;
+
     webhook.send_message(
         w_id.clone(),
         WebhookMessage::DeleteFlow { workspace: w_id, path: path.to_owned() },
@@ -798,6 +880,7 @@ mod tests {
                         )]
                         .into(),
                         hash: None,
+                        tag_override: None,
                     },
                     stop_after_if: None,
                     summary: None,
@@ -808,6 +891,7 @@ mod tests {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
                 FlowModule {
                     id: "b".to_string(),
@@ -833,6 +917,7 @@ mod tests {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
                 FlowModule {
                     id: "c".to_string(),
@@ -855,6 +940,7 @@ mod tests {
                     mock: None,
                     timeout: None,
                     priority: None,
+                    delete_after_use: None,
                 },
             ],
             failure_module: Some(FlowModule {
@@ -863,6 +949,7 @@ mod tests {
                     path: "test".to_string(),
                     input_transforms: HashMap::new(),
                     hash: None,
+                    tag_override: None,
                 },
                 stop_after_if: Some(StopAfterIf {
                     expr: "previous.isEmpty()".to_string(),
@@ -876,14 +963,15 @@ mod tests {
                 mock: None,
                 timeout: None,
                 priority: None,
+                delete_after_use: None,
             }),
             same_worker: false,
             concurrent_limit: None,
             concurrency_time_window_s: None,
             skip_expr: None,
             cache_ttl: None,
-            ws_error_handler_muted: None,
             priority: None,
+            early_return: None,
         };
         let expect = serde_json::json!({
           "modules": [
@@ -897,7 +985,8 @@ mod tests {
                     }
                   },
                 "type": "script",
-                "path": "test"
+                "path": "test",
+                "tag_override": Option::<String>::None,
               },
             },
             {
@@ -940,7 +1029,8 @@ mod tests {
             "value": {
               "input_transforms": {},
               "type": "script",
-              "path": "test"
+              "path": "test",
+              "tag_override": Option::<String>::None,
             },
             "stop_after_if": {
                 "expr": "previous.isEmpty()",
@@ -976,7 +1066,12 @@ mod tests {
         assert_eq!(
             Retry {
                 constant: Default::default(),
-                exponential: ExponentialDelay { attempts: 0, multiplier: 1, seconds: 123 }
+                exponential: ExponentialDelay {
+                    attempts: 0,
+                    multiplier: 1,
+                    seconds: 123,
+                    random_factor: None
+                }
             },
             serde_json::from_str(
                 r#"
@@ -994,7 +1089,12 @@ mod tests {
     fn retry_exponential() {
         let retry = Retry {
             constant: ConstantDelay::default(),
-            exponential: ExponentialDelay { attempts: 3, multiplier: 4, seconds: 3 },
+            exponential: ExponentialDelay {
+                attempts: 3,
+                multiplier: 4,
+                seconds: 3,
+                random_factor: None,
+            },
         };
         assert_eq!(
             vec![
@@ -1015,7 +1115,12 @@ mod tests {
     fn retry_both() {
         let retry = Retry {
             constant: ConstantDelay { attempts: 2, seconds: 4 },
-            exponential: ExponentialDelay { attempts: 2, multiplier: 1, seconds: 3 },
+            exponential: ExponentialDelay {
+                attempts: 2,
+                multiplier: 1,
+                seconds: 3,
+                random_factor: None,
+            },
         };
         assert_eq!(
             vec![

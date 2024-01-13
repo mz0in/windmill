@@ -5,15 +5,8 @@
 	import type { SupportedLanguage } from '$lib/common'
 	import { sendUserToast } from '$lib/toast'
 	import type Editor from '../Editor.svelte'
-	import {
-		faCancel,
-		faCheck,
-		faClose,
-		faMagicWandSparkles
-	} from '@fortawesome/free-solid-svg-icons'
 	import Popup from '../common/popup/Popup.svelte'
-	import { Icon } from 'svelte-awesome'
-	import { dbSchemas, copilotInfo, type DBSchema } from '$lib/stores'
+	import { dbSchemas, copilotInfo, type DBSchema, workspaceStore } from '$lib/stores'
 	import type DiffEditor from '../DiffEditor.svelte'
 	import { scriptLangToEditorLang } from '$lib/scripts'
 	import type SimpleEditor from '../SimpleEditor.svelte'
@@ -26,7 +19,7 @@
 	import LoadingIcon from '../apps/svelte-select/lib/LoadingIcon.svelte'
 	import { sleep } from '$lib/utils'
 	import { autoPlacement } from '@floating-ui/core'
-	import { ExternalLink } from 'lucide-svelte'
+	import { Ban, Check, ExternalLink, HistoryIcon, Wand2, X, ZapIcon } from 'lucide-svelte'
 	import { fade } from 'svelte/transition'
 	import { isInitialCode } from '$lib/script_helpers'
 
@@ -54,6 +47,7 @@
 		if (funcDesc.length <= 0) {
 			return
 		}
+		savePrompt()
 		try {
 			genLoading = true
 			blockPopupOpen = true
@@ -65,7 +59,8 @@
 						description: funcDesc,
 						code: editor?.getCode() || '',
 						dbSchema: dbSchema,
-						type: 'edit'
+						type: 'edit',
+						workspace: $workspaceStore!
 					},
 					generatedCode,
 					abortController
@@ -76,7 +71,8 @@
 						language: lang,
 						description: funcDesc,
 						dbSchema: dbSchema,
-						type: 'gen'
+						type: 'gen',
+						workspace: $workspaceStore!
 					},
 					generatedCode,
 					abortController
@@ -127,7 +123,7 @@
 		diffEditor?.hide()
 	}
 
-	$: input?.focus()
+	$: input && setTimeout(() => input?.focus(), 100)
 
 	function clear() {
 		$generatedCode = ''
@@ -152,6 +148,51 @@
 	}
 
 	$: updateSchema(lang, args, $dbSchemas)
+
+	let codeDiv: HTMLDivElement | undefined
+	let lastScrollHeight = 0
+	function updateScroll() {
+		if (codeDiv && lastScrollHeight !== codeDiv.scrollHeight) {
+			codeDiv.scrollTop = codeDiv.scrollHeight
+			lastScrollHeight = codeDiv.scrollHeight
+		}
+	}
+
+	let promptHistory: string[] = []
+	function getPromptHistory() {
+		try {
+			promptHistory = JSON.parse(localStorage.getItem('prompts-' + lang) || '[]')
+		} catch (e) {
+			console.error('error interacting with local storage', e)
+		}
+	}
+
+	function savePrompt() {
+		if (promptHistory.includes(funcDesc)) {
+			return
+		}
+		promptHistory.unshift(funcDesc)
+		while (promptHistory.length > 5) {
+			promptHistory.pop()
+		}
+		try {
+			localStorage.setItem('prompts-' + lang, JSON.stringify(promptHistory))
+		} catch (e) {
+			console.error('error interacting with local storage', e)
+		}
+	}
+
+	function clearPromptHistory() {
+		promptHistory = []
+		try {
+			localStorage.setItem('prompts-' + lang, JSON.stringify(promptHistory))
+		} catch (e) {
+			console.error('error interacting with local storage', e)
+		}
+	}
+	$: lang && getPromptHistory()
+
+	$: $generatedCode && updateScroll()
 </script>
 
 {#if genLoading}
@@ -168,17 +209,18 @@
 				color="red"
 				on:click={rejectDiff}
 				variant="contained"
-			>
-				<Icon data={faClose} />
-			</Button><Button
+				startIcon={{ icon: X }}
+				iconOnly
+			/>
+			<Button
 				title="Accept generated code"
 				btnClasses="!font-medium px-2 w-7"
 				size="xs"
 				color="green"
 				on:click={acceptDiff}
-			>
-				<Icon data={faCheck} /></Button
-			>
+				iconOnly
+				startIcon={{ icon: Check }}
+			/>
 		</div>
 	{:else}
 		<div class="flex gap-1 px-2">
@@ -189,7 +231,7 @@
 				color="red"
 				on:click={rejectDiff}
 				variant="contained"
-				startIcon={{ icon: faClose }}
+				startIcon={{ icon: X }}
 				{iconOnly}
 			>
 				Discard
@@ -199,7 +241,7 @@
 				size="xs"
 				color="green"
 				on:click={acceptDiff}
-				startIcon={{ icon: faCheck }}
+				startIcon={{ icon: Check }}
 				{iconOnly}
 			>
 				Accept
@@ -222,19 +264,16 @@
 		<svelte:fragment slot="button">
 			{#if inlineScript}
 				<Button
-					size="lg"
+					size="xs"
 					color={genLoading ? 'red' : 'light'}
 					btnClasses={genLoading ? '!px-3' : '!px-2 !bg-surface-secondary hover:!bg-surface-hover'}
 					nonCaptureEvent={!genLoading}
 					on:click={genLoading ? () => abortController?.abort() : undefined}
 					bind:element={button}
-				>
-					{#if genLoading}
-						<Icon scale={0.8} data={faCancel} />
-					{:else}
-						<Icon scale={0.8} data={faMagicWandSparkles} />
-					{/if}
-				</Button>
+					iconOnly
+					title="Generate code from Prompt"
+					startIcon={{ icon: genLoading ? Ban : Wand2 }}
+				/>
 			{:else}
 				<Button
 					title="Generate code from prompt"
@@ -242,7 +281,7 @@
 					size="xs"
 					color={genLoading ? 'red' : 'light'}
 					spacingSize="md"
-					startIcon={genLoading ? undefined : { icon: faMagicWandSparkles }}
+					startIcon={genLoading ? undefined : { icon: Wand2 }}
 					propagateEvent
 					on:click={genLoading
 						? () => abortController?.abort()
@@ -274,7 +313,7 @@
 		</svelte:fragment>
 		<div class="block text-primary">
 			{#if genLoading}
-				<div class="w-[42rem] min-h-[3rem] max-h-[34rem] overflow-y-scroll">
+				<div class="w-[42rem] min-h-[3rem] max-h-[34rem] overflow-y-scroll" bind:this={codeDiv}>
 					{#if $generatedCode.length > 0}
 						<div class="overflow-x-scroll">
 							<HighlightCode language={lang} code={$generatedCode} /></div
@@ -285,10 +324,16 @@
 				</div>
 			{:else if $copilotInfo.exists_openai_resource_path}
 				<div class="flex flex-col gap-4">
-					<ToggleButtonGroup class="w-auto shrink-0" bind:selected={mode}>
-						<ToggleButton value={'gen'} label="Generate from scratch" small light />
-						<ToggleButton value={'edit'} label="Edit existing code" small light />
-					</ToggleButtonGroup>
+					<div class="flex flex-row justify-between items-center">
+						<ToggleButtonGroup class="w-auto shrink-0" bind:selected={mode}>
+							<ToggleButton value={'gen'} label="Generate from scratch" small light />
+							<ToggleButton value={'edit'} label="Edit existing code" small light />
+						</ToggleButtonGroup>
+
+						<div class="text-[0.6rem] text-secondary opacity-60 flex flex-row items-center gap-0.5">
+							GPT-4 Turbo<ZapIcon size={14} />
+						</div>
+					</div>
 					<div class="flex w-96">
 						<input
 							type="text"
@@ -308,44 +353,70 @@
 							color="blue"
 							buttonType="button"
 							btnClasses="!p-1 !w-[38px] !ml-2"
+							title="Generate code from prompt"
 							aria-label="Generate"
 							on:click={() => {
 								onGenerate(() => close(input || null))
 							}}
 							disabled={funcDesc.length <= 0}
-						>
-							<Icon data={faMagicWandSparkles} />
-						</Button>
+							iconOnly
+							startIcon={{ icon: Wand2 }}
+						/>
 					</div>
+					{#if promptHistory.length > 0}
+						<div class="w-96 flex flex-col gap-1">
+							{#each promptHistory as p}
+								<Button
+									size="xs2"
+									color="light"
+									btnClasses="justify-start overflow-x-scroll no-scrollbar"
+									startIcon={{ icon: HistoryIcon, classes: 'shrink-0' }}
+									on:click={() => {
+										funcDesc = p
+									}}>{p}</Button
+								>
+							{/each}
+							<button
+								class="underline text-xs text-start px-2 text-secondary font-normal"
+								on:click={clearPromptHistory}>clear history</button
+							>
+						</div>
+					{/if}
 
-					{#if ['postgresql', 'mysql', 'snowflake', 'bigquery', 'graphql'].includes(lang) && dbSchema?.lang === lang}
+					{#if ['postgresql', 'mysql', 'snowflake', 'bigquery', 'mssql', 'graphql'].includes(lang) && dbSchema?.lang === lang}
 						<div class="flex flex-row items-center justify-between gap-2 w-96">
 							<div class="flex flex-row items-center">
 								<p class="text-xs text-secondary">
 									Context: {lang === 'graphql' ? 'GraphQL' : 'DB'} schema
 								</p>
 								<Tooltip>
-									In order to better generate the script, we pass the selected schema to GPT-4.
+									We pass the selected schema to GPT-4 Turbo for better script generation.
 								</Tooltip>
 							</div>
-							{#if dbSchema.lang !== 'graphql' && (dbSchema.schema?.public || dbSchema.schema?.PUBLIC)}
+							{#if dbSchema.lang !== 'graphql' && (dbSchema.schema?.public || dbSchema.schema?.PUBLIC || dbSchema.schema?.dbo)}
 								<ToggleButtonGroup class="w-auto shrink-0" bind:selected={dbSchema.publicOnly}>
-									<ToggleButton value={true} label="Public schema" small light />
+									<ToggleButton
+										value={true}
+										label={(dbSchema.schema?.dbo ? 'Dbo' : 'Public') + ' schema'}
+										small
+										light
+									/>
 									<ToggleButton value={false} label="All schemas" small light />
 								</ToggleButtonGroup>
 							{/if}
 						</div>
-					{/if}</div
-				>
+					{/if}
+				</div>
 			{:else}
-				<p class="text-sm"
-					>Enable Windmill AI in the <a
+				<p class="text-sm">
+					Enable Windmill AI in the <a
 						href="/workspace_settings?tab=openai"
 						target="_blank"
 						class="inline-flex flex-row items-center gap-1"
-						>workspace settings <ExternalLink size={16} />
-					</a></p
-				>
+					>
+						workspace settings <ExternalLink size={16} />
+					</a>
+				</p>
 			{/if}
 		</div>
 	</Popup>

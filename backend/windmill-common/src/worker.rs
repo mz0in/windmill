@@ -1,13 +1,12 @@
+use itertools::Itertools;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-
-use itertools::Itertools;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use tokio::sync::RwLock;
 
 use crate::{error, global_settings::CUSTOM_TAGS_SETTING, server::ServerConfig, DB};
@@ -28,6 +27,7 @@ lazy_static::lazy_static! {
         "postgresql".to_string(),
         "bigquery".to_string(),
         "snowflake".to_string(),
+        "mssql".to_string(),
         "graphql".to_string(),
         "dependency".to_string(),
         "flow".to_string(),
@@ -42,7 +42,8 @@ lazy_static::lazy_static! {
         cache_clear: Default::default(),
         init_bash: Default::default(),
         additional_python_paths: Default::default(),
-        pip_local_dependencies: Default::default()
+        pip_local_dependencies: Default::default(),
+        env_vars: Default::default(),
     }));
 
     pub static ref SERVER_CONFIG: Arc<RwLock<ServerConfig>> = Arc::new(RwLock::new(ServerConfig { smtp: Default::default(), timeout_wait_result: 20 }));
@@ -89,7 +90,7 @@ pub async fn reload_custom_tags_setting(db: &DB) -> error::Result<()> {
     let custom_tags = process_custom_tags(tags);
 
     tracing::info!(
-        "Loaded setting custom tags, common: {:?}, per-workspace: {:?}",
+        "Loaded setting custom_tags, common: {:?}, per-workspace: {:?}",
         custom_tags.0,
         custom_tags.1,
     );
@@ -135,20 +136,24 @@ pub async fn update_ping(worker_instance: &str, worker_name: &str, ip: &str, db:
         )
     };
     sqlx::query!(
-        "INSERT INTO worker_ping (worker_instance, worker, ip, custom_tags, worker_group, dedicated_worker) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (worker) DO UPDATE set ip = $3, custom_tags = $4, worker_group = $5",
+        "INSERT INTO worker_ping (worker_instance, worker, ip, custom_tags, worker_group, dedicated_worker, wm_version) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (worker) DO UPDATE set ip = $3, custom_tags = $4, worker_group = $5",
         worker_instance,
         worker_name,
         ip,
         tags.as_slice(),
         *WORKER_GROUP,
-        dw
+        dw,
+        crate::utils::GIT_VERSION
     )
     .execute(db)
     .await
     .expect("insert worker_ping initial value");
 }
 
-pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
+pub async fn load_worker_config(
+    db: &DB,
+    killpill_tx: tokio::sync::broadcast::Sender<()>,
+) -> error::Result<WorkerConfig> {
     tracing::info!("Loading config from WORKER_GROUP: {}", *WORKER_GROUP);
     let mut config: WorkerConfigOpt = sqlx::query_scalar!(
         "SELECT config FROM config WHERE name = $1",
@@ -176,16 +181,25 @@ pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
             config.dedicated_worker.as_ref().unwrap()
         );
     }
-    let dedicated_worker = config.dedicated_worker.map(|x| {
-        let splitted = x.split(':').to_owned().collect_vec();
-        if splitted.len() != 2 {
-            panic!("DEDICATED_WORKER setting should be in the form of <workspace>:<script_path>")
-        } else {
-            let workspace = splitted[0];
-            let script_path = splitted[1];
-            WorkspacedPath { workspace_id: workspace.to_string(), path: script_path.to_string() }
-        }
-    });
+    let dedicated_worker = config
+        .dedicated_worker
+        .map(|x| {
+            let splitted = x.split(':').to_owned().collect_vec();
+            if splitted.len() != 2 {
+                killpill_tx.send(()).expect("send");
+                return Err(anyhow::anyhow!(
+                    "Invalid dedicated_worker format. Got {x}, expects <workspace_id>:<path>"
+                ));
+            } else {
+                let workspace = splitted[0];
+                let script_path = splitted[1];
+                Ok(WorkspacedPath {
+                    workspace_id: workspace.to_string(),
+                    path: script_path.to_string(),
+                })
+            }
+        })
+        .transpose()?;
     if *WORKER_GROUP == "default" && dedicated_worker.is_none() {
         let mut all_tags = config
             .worker_tags
@@ -208,10 +222,14 @@ pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
         .worker_tags
         .or_else(|| {
             if let Some(ref dedicated_worker) = dedicated_worker.as_ref() {
-                Some(vec![format!(
+                let mut dedi_tags = vec![format!(
                     "{}:{}",
                     dedicated_worker.workspace_id, dedicated_worker.path
-                )])
+                )];
+                if std::env::var("ADD_FLOW_TAG").is_ok() {
+                    dedi_tags.push("flow".to_string());
+                }
+                Some(dedi_tags)
             } else {
                 std::env::var("WORKER_TAGS")
                     .ok()
@@ -219,6 +237,7 @@ pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
             }
         })
         .unwrap_or_else(|| DEFAULT_TAGS.clone());
+
     let mut priority_tags_sorted: Vec<PriorityTags> = Vec::new();
     let priority_tags_map = config.priority_tags.unwrap_or_else(HashMap::new);
     if priority_tags_map.len() > 0 {
@@ -255,6 +274,33 @@ pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
     }
     tracing::debug!("Custom tags priority set: {:?}", priority_tags_sorted);
 
+    let env_vars_static = config.env_vars_static.unwrap_or_default().clone();
+    let resolved_env_vars: HashMap<String, String> = env_vars_static
+        .keys()
+        .map(|x| x.to_string())
+        .chain(config.env_vars_allowlist.unwrap_or_default())
+        .chain(
+            std::env::var("WHITELIST_ENVS")
+                .ok()
+                .map(|x| x.split(',').map(|x| x.to_string()).collect_vec())
+                .unwrap_or_default()
+                .into_iter(),
+        )
+        .sorted()
+        .unique()
+        .map(|envvar_name| {
+            (
+                envvar_name.clone(),
+                env_vars_static
+                    .get::<String>(&envvar_name)
+                    .map(|v| v.to_owned())
+                    .unwrap_or_else(|| {
+                        std::env::var(envvar_name.clone()).unwrap_or("".to_string())
+                    }),
+            )
+        })
+        .collect();
+
     Ok(WorkerConfig {
         worker_tags,
         priority_tags_sorted,
@@ -279,6 +325,7 @@ pub async fn load_worker_config(db: &DB) -> error::Result<WorkerConfig> {
                 .ok()
                 .map(|x| x.split(':').map(|x| x.to_string()).collect())
         }),
+        env_vars: resolved_env_vars,
     })
 }
 
@@ -297,6 +344,8 @@ pub struct WorkerConfigOpt {
     pub cache_clear: Option<u32>,
     pub additional_python_paths: Option<Vec<String>>,
     pub pip_local_dependencies: Option<Vec<String>>,
+    pub env_vars_static: Option<HashMap<String, String>>,
+    pub env_vars_allowlist: Option<Vec<String>>,
 }
 
 impl Default for WorkerConfigOpt {
@@ -309,6 +358,8 @@ impl Default for WorkerConfigOpt {
             cache_clear: Default::default(),
             additional_python_paths: Default::default(),
             pip_local_dependencies: Default::default(),
+            env_vars_static: Default::default(),
+            env_vars_allowlist: Default::default(),
         }
     }
 }
@@ -322,6 +373,7 @@ pub struct WorkerConfig {
     pub cache_clear: Option<u32>,
     pub additional_python_paths: Option<Vec<String>>,
     pub pip_local_dependencies: Option<Vec<String>>,
+    pub env_vars: HashMap<String, String>,
 }
 
 #[derive(PartialEq, Debug, Clone)]

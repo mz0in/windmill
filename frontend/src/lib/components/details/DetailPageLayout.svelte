@@ -7,15 +7,16 @@
 	export let isOperator: boolean = false
 	export let flow_json: any | undefined = undefined
 	export let hasStepDetails: boolean = false
+	export let selected: string
 
 	let mobileTab: 'form' | 'detail' = 'form'
 
-	let clientWidth = 1000
+	let clientWidth = window.innerWidth
 </script>
 
 <main class="h-screen w-full" bind:clientWidth>
 	{#if clientWidth >= 768}
-		<div class="h-full">
+		<div class="h-full w-full">
 			<slot name="header" />
 			<SplitPanesWrapper>
 				<Splitpanes>
@@ -23,7 +24,7 @@
 						<slot name="form" />
 					</Pane>
 					<Pane size={35} minSize={15}>
-						<DetailPageDetailPanel {isOperator} {flow_json} {hasStepDetails}>
+						<DetailPageDetailPanel bind:selected {isOperator} {flow_json} {hasStepDetails}>
 							<slot slot="webhooks" name="webhooks" />
 							<slot slot="schedule" name="schedule" />
 							<slot slot="cli" name="cli" />
@@ -46,7 +47,7 @@
 						<slot name="form" />
 					</TabContent>
 					<TabContent value="detail" class="flex flex-col flex-1 h-full">
-						<DetailPageDetailPanel {isOperator} {hasStepDetails}>
+						<DetailPageDetailPanel bind:selected {isOperator} {hasStepDetails}>
 							<slot slot="webhooks" name="webhooks" />
 							<slot slot="schedule" name="schedule" />
 							<slot slot="cli" name="cli" />

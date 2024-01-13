@@ -1,34 +1,4 @@
-import * as csstree from 'css-tree'
 import type { ComponentCssProperty } from '../../types'
-
-export function sanitizeCss(css: string, authorizedClassNames: string[]) {
-	const ast = csstree.parse(css)
-	const removedClassNames: string[] = []
-
-	csstree.walk(ast, (node: any, item, list) => {
-		if (node.type === 'Rule') {
-			let shouldRemoveRule = true
-
-			csstree.walk(node, (innerNode: any) => {
-				if (innerNode.type === 'ClassSelector' && authorizedClassNames.includes(innerNode.name)) {
-					shouldRemoveRule = false
-				}
-				if (shouldRemoveRule && innerNode.name) {
-					removedClassNames.push(innerNode.name)
-				}
-			})
-
-			if (shouldRemoveRule) {
-				list.remove(item)
-			}
-		}
-	})
-
-	return {
-		css: csstree.generate(ast),
-		removedClassNames
-	}
-}
 
 export const authorizedClassnames = [
 	'wm-container',
@@ -127,6 +97,7 @@ interface Customisation {
 	variables: Variable[]
 	link?: string | undefined
 	variablesTooltip?: string
+	root?: string
 }
 
 export const customisationByComponent: Customisation[] = [
@@ -307,6 +278,7 @@ export const customisationByComponent: Customisation[] = [
 			},
 			{ variable: '--range-float-text', value: 'white', comment: 'text color on floating label' }
 		],
+		root: '.rangeSlider',
 		link: 'https://simeydotme.github.io/svelte-range-slider-pips/#styling'
 	},
 	{
@@ -379,6 +351,32 @@ export const customisationByComponent: Customisation[] = [
 			{ selector: '.wm-table-row', comment: 'Table row' }
 		],
 		variables: []
+	},
+	{
+		components: ['aggridcomponent', 'aggridcomponentee'],
+		selectors: [
+			{ selector: '.wm-aggrid-container', comment: 'Ag grid container', customCssKey: 'container' }
+		],
+		variables: [
+			{
+				variable: '--ag-alpine-active-color',
+				value: '#4a40d4',
+				comment:
+					'Accent colour used for checked checkboxes, range selections, row hover, row selections, selected tab underlines, and input focus outlines in the Alpine theme'
+			},
+			{
+				variable: '--ag-foreground-color',
+				value: '#ffffff',
+				comment: 'Colour of text and icons in primary UI elements like menus'
+			},
+			{
+				variable: '--ag-background-color',
+				value: '#1e1f20',
+				comment: 'Background colour of the grid'
+			}
+		],
+		link: 'https://www.ag-grid.com/javascript-data-grid/global-style-customisation-variables/',
+		root: '.ag-theme-alpine'
 	},
 	{
 		components: ['steppercomponent'],
@@ -548,6 +546,11 @@ export const customisationByComponent: Customisation[] = [
 	{
 		components: ['chartjscomponent'],
 		selectors: [{ selector: '.wm-chartjs', comment: 'ChartJS', customCssKey: 'container' }],
+		variables: []
+	},
+	{
+		components: ['agchartscomponent'],
+		selectors: [{ selector: '.wm-agchart', comment: 'AgCharts', customCssKey: 'container' }],
 		variables: []
 	},
 	{
@@ -775,7 +778,8 @@ export const customisationByComponent: Customisation[] = [
 				value: '#b8b8b8',
 				comment: 'Text color of disabled option in the dropdown list.'
 			}
-		]
+		],
+		root: '.multiselect'
 	}
 ]
 

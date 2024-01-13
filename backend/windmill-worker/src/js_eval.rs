@@ -6,16 +6,17 @@
  * LICENSE-AGPL for a copy of the license.
  */
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, env, io::{BufReader, self}};
 
 use deno_ast::{ParseParams, SourceTextInfo};
 use deno_core::{
     op, serde_v8,
     v8::IsolateHandle,
     v8::{self},
-    Extension, JsRuntime, Op, OpState, RuntimeOptions, Snapshot,
+    Extension, JsRuntime, Op, OpState, RuntimeOptions, Snapshot, error::AnyError,
 };
 use deno_fetch::FetchPermissions;
+use deno_tls::{rustls::RootCertStore, rustls_pemfile};
 use deno_web::{BlobStore, TimersPermission};
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -36,6 +37,33 @@ pub struct IdContext {
     pub flow_job: Uuid,
     pub steps_results: HashMap<String, JobResult>,
     pub previous_id: String,
+}
+
+pub struct ContainerRootCertStoreProvider {
+    root_cert_store: RootCertStore,
+}
+
+impl ContainerRootCertStoreProvider {
+    fn new() -> ContainerRootCertStoreProvider {
+        return ContainerRootCertStoreProvider {
+            root_cert_store: deno_tls::create_default_root_cert_store(),
+        }
+    }
+
+    fn add_certificate(&mut self, cert_path: String) -> io::Result<()> {
+        let cert_file = std::fs::File::open(cert_path)?;
+        let mut reader = BufReader::new(cert_file);
+        let pem_file = rustls_pemfile::certs(&mut reader)?;
+
+        self.root_cert_store.add_parsable_certificates(&pem_file);
+        Ok(())
+    }
+}
+
+impl deno_tls::RootCertStoreProvider for ContainerRootCertStoreProvider {
+    fn get_or_try_init(&self) -> Result<&RootCertStore, AnyError> {
+        Ok(&self.root_cert_store)
+    }
 }
 
 pub struct PermissionsContainer;
@@ -86,10 +114,10 @@ pub async fn eval_timeout(
         }
     }
 
-    if expr.starts_with("flow_input.") {
+    if expr.starts_with("flow_input.") || expr.starts_with("flow_input[") {
         if let Some(ref flow_input) = flow_input {
             for (k,v) in flow_input.iter() {
-                if &format!("flow_input.{k}") == &expr {
+                if &format!("flow_input.{k}") == &expr || &format!("flow_input[\"{k}\"]") == &expr  {
                     // tracing::error!("FLOW_INPUT");
                     return Ok(v.clone())
                 }
@@ -98,9 +126,14 @@ pub async fn eval_timeout(
     }
 
     let p_id = by_id.as_ref().map(|x| format!("results.{}", x.previous_id));
+    let p_id2 = by_id.as_ref().map(|x| format!("results[\"{}\"]", x.previous_id));
 
     if p_id.is_some() && transform_context.contains_key("previous_result") && &expr == p_id.as_ref().unwrap() {
         // tracing::error!("PREVIOUS_RESULT");
+        return Ok(transform_context.get("previous_result").unwrap().as_ref().clone())
+    }
+
+    if p_id2.is_some() && transform_context.contains_key("previous_result") && &expr == p_id2.as_ref().unwrap() {
         return Ok(transform_context.get("previous_result").unwrap().as_ref().clone())
     }
 
@@ -161,7 +194,7 @@ pub async fn eval_timeout(
                 .map(|x| x.clone())
                 .collect_vec();
 
-            if !context_keys.contains(&"previous_result".to_string()) && (p_id.is_some() && expr.contains(p_id.as_ref().unwrap()))  || expr.contains("error") {
+            if !context_keys.contains(&"previous_result".to_string()) && (p_id.is_some() && expr.contains(p_id.as_ref().unwrap()))  || expr.contains("error") || (p_id2.is_some() && expr.contains(p_id2.as_ref().unwrap())) {
                 context_keys.push("previous_result".to_string());
             }
             let has_flow_input = expr.contains("flow_input");
@@ -237,7 +270,7 @@ fn replace_with_await(expr: String, fn_name: &str) -> String {
     s
 }
 lazy_static! {
-    static ref RE: Regex = Regex::new(r"(?m)(?P<r>results\.(?:[a-z]|[A-Z]|_|[1-9])+)").unwrap();
+    static ref RE: Regex = Regex::new(r#"(?m)(?P<r>results(?:(?:\.(?:[a-z]|[A-Z]|_|[1-9])+)|(?:\[\".*?\"\])))"#).unwrap();
     static ref RE_FULL: Regex = Regex::new(r"(?m)^results((?:\.(?:(?:[a-z]|[A-Z]|_|[1-9])+))+)$").unwrap();
 
 }
@@ -434,8 +467,12 @@ async fn op_get_id(
     if let Some(client) = client {
         let result = client
             .get_result_by_id::<Option<Box<RawValue>>>(flow_job_id, node_id, None)
-            .await?;
-        Ok(result.map(|x| x.get().to_string()))
+            .await.ok();
+        if let Some(result) = result {
+            Ok(result.map(|x| x.get().to_string()))
+        } else {
+            Ok(None)
+        }
     } else {
         anyhow::bail!("No client found in op state");
     }
@@ -523,6 +560,18 @@ pub async fn eval_fetch_timeout(
                   ..Default::default()
                 };
 
+            let deno_fetch_options = if let Some(cert_path) = env::var("DENO_CERT").ok() {
+                let mut cert_store_provider = ContainerRootCertStoreProvider::new();
+                cert_store_provider.add_certificate(cert_path)?;
+
+                deno_fetch::Options {
+                    root_cert_store_provider: Some(Arc::new(cert_store_provider)),
+                    ..Default::default()
+                }
+            } else {
+                Default::default()
+            };
+
             let exts: Vec<Extension> = vec![
                 deno_webidl::deno_webidl::init_ops(),
                 deno_url::deno_url::init_ops(),
@@ -531,9 +580,7 @@ pub async fn eval_fetch_timeout(
                     Arc::new(BlobStore::default()),
                     None,
                 ),
-                deno_fetch::deno_fetch::init_ops::<PermissionsContainer>(
-                    Default::default(),
-                ),
+                deno_fetch::deno_fetch::init_ops::<PermissionsContainer>(deno_fetch_options),
                 ext
             ];
 
@@ -636,8 +683,8 @@ import("file:///eval.ts").then((module) => module.main(...args)).then(JSON.strin
     let local = v8::Local::new(scope, global);
     // Deserialize a `v8` object into a Rust type using `serde_v8`,
     // in this case deserialize to a JSON `Value`.
-    let r = serde_v8::from_v8::<String>(scope, local)?;
-    Ok(unsafe_raw(r))
+    let r = serde_v8::from_v8::<Option<String>>(scope, local)?;
+    Ok(unsafe_raw(r.unwrap_or_else(|| "null".to_string())))
 }
 
 #[op]

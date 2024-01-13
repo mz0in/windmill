@@ -9,8 +9,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
+    u8,
 };
 
+use rand::Rng;
 use serde::{self, Deserialize, Serialize, Serializer};
 
 use crate::{
@@ -35,8 +37,14 @@ pub struct Flow {
     pub extra_perms: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedicated_worker: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_error_handler_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -54,6 +62,7 @@ pub struct ListableFlow {
     pub has_draft: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_error_handler_muted: Option<bool>,
 }
 
@@ -68,6 +77,9 @@ pub struct NewFlow {
     pub draft_only: Option<bool>,
     pub tag: Option<String>,
     pub ws_error_handler_muted: Option<bool>,
+    pub dedicated_worker: Option<bool>,
+    pub timeout: Option<i32>,
+    pub deployment_message: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
@@ -89,7 +101,7 @@ pub struct FlowValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ws_error_handler_muted: Option<bool>,
+    pub early_return: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     // Priority at the flow level
     pub priority: Option<i16>,
@@ -119,7 +131,18 @@ impl Retry {
             Some(Duration::from_secs(constant.seconds as u64))
         } else if previous_attempts - constant.attempts < exponential.attempts {
             let exp = previous_attempts.saturating_add(1) as u32;
-            let secs = exponential.multiplier * exponential.seconds.saturating_pow(exp);
+            let mut secs = exponential.multiplier * exponential.seconds.saturating_pow(exp);
+            if let Some(random_factor) = exponential.random_factor {
+                if random_factor > 0 {
+                    let random_component =
+                        rand::thread_rng().gen_range(0..(std::cmp::min(random_factor, 100) as u16));
+                    secs = match rand::thread_rng().gen_bool(1.0 / 2.0) {
+                        true => secs.saturating_add(secs * random_component / 100),
+                        false => secs.saturating_sub(secs * random_component / 100),
+                    };
+                }
+            }
+            tracing::warn!("Rescheduling job in {} seconds due to failure", secs);
             Some(Duration::from_secs(secs as u64))
         } else {
             None
@@ -150,18 +173,19 @@ pub struct ConstantDelay {
     pub seconds: u16,
 }
 
-/// multiplier * seconds ^ failures
+/// multiplier * seconds ^ failures (+/- jitter of the previous value, if any)
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct ExponentialDelay {
     pub attempts: u16,
     pub multiplier: u16,
     pub seconds: u16,
+    pub random_factor: Option<i8>, // percentage, defaults to 0 for no jitter
 }
 
 impl Default for ExponentialDelay {
     fn default() -> Self {
-        Self { attempts: 0, multiplier: 1, seconds: 0 }
+        Self { attempts: 0, multiplier: 1, seconds: 0, random_factor: None }
     }
 }
 
@@ -210,6 +234,8 @@ pub struct FlowModule {
     #[serde(skip_serializing_if = "Option::is_none")]
     // Priority at the flow step level
     pub priority: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_after_use: Option<bool>,
 }
 
 impl FlowModule {
@@ -266,6 +292,7 @@ pub enum FlowModuleValue {
         path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<ScriptHash>,
+        tag_override: Option<String>,
     },
     Flow {
         #[serde(default)]
@@ -340,4 +367,26 @@ pub struct ListFlowQuery {
     pub order_by: Option<String>,
     pub order_desc: Option<bool>,
     pub starred_only: Option<bool>,
+}
+
+pub fn add_virtual_items_if_necessary(modules: &mut Vec<FlowModule>) {
+    if modules.len() > 0
+        && (modules[modules.len() - 1].sleep.is_some()
+            || modules[modules.len() - 1].suspend.is_some())
+    {
+        modules.push(FlowModule {
+            id: format!("{}-v", modules[modules.len() - 1].id),
+            value: FlowModuleValue::Identity,
+            stop_after_if: None,
+            summary: Some("Virtual module needed for suspend/sleep when last module".to_string()),
+            mock: None,
+            retry: None,
+            sleep: None,
+            suspend: None,
+            cache_ttl: None,
+            timeout: None,
+            priority: None,
+            delete_after_use: None,
+        });
+    }
 }

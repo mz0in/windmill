@@ -18,10 +18,12 @@
 	import FlowBranchesAllWrapper from './FlowBranchesAllWrapper.svelte'
 	import FlowBranchesOneWrapper from './FlowBranchesOneWrapper.svelte'
 
+	export let flowModule: FlowModule
+	export let noEditor: boolean = false
+
 	const { selectedId, schedule, flowStateStore } =
 		getContext<FlowEditorContext>('FlowEditorContext')
 
-	export let flowModule: FlowModule
 	let scriptKind: 'script' | 'trigger' | 'approval' = 'script'
 	let scriptTemplate: 'pgsql' | 'mysql' | 'script' | 'docker' | 'powershell' = 'script'
 
@@ -30,15 +32,43 @@
 	export let parentModule: FlowModule | undefined = undefined
 	// Pointer to previous module, for easy access to testing results
 	export let previousModule: FlowModule | undefined = undefined
+
+	async function createModuleFromScript(
+		path: string,
+		summary: string,
+		kind: string,
+		hash: string | undefined
+	) {
+		const [module, state] = await pickScript(path, summary, flowModule.id, hash)
+
+		if (kind == Script.kind.APPROVAL) {
+			module.suspend = { required_events: 1, timeout: 1800 }
+		}
+
+		if (kind == Script.kind.TRIGGER) {
+			if (!$schedule.cron) {
+				$schedule.cron = '0 */15 * * *'
+			}
+			$schedule.enabled = true
+
+			module.stop_after_if = {
+				expr: 'result == undefined || Array.isArray(result) && result.length == 0',
+				skip_if_stopped: true
+			}
+		}
+
+		flowModule = module
+		$flowStateStore[module.id] = state
+	}
 </script>
 
 {#if flowModule.id === $selectedId}
 	{#if flowModule.value.type === 'forloopflow'}
-		<FlowLoop bind:mod={flowModule} {parentModule} {previousModule} />
+		<FlowLoop {noEditor} bind:mod={flowModule} {parentModule} {previousModule} />
 	{:else if flowModule.value.type === 'branchone'}
-		<FlowBranchesOneWrapper {previousModule} bind:flowModule />
+		<FlowBranchesOneWrapper {noEditor} {previousModule} bind:flowModule />
 	{:else if flowModule.value.type === 'branchall'}
-		<FlowBranchesAllWrapper {previousModule} bind:flowModule />
+		<FlowBranchesAllWrapper {noEditor} {previousModule} bind:flowModule />
 	{:else if flowModule.value.type === 'identity'}
 		{#if $selectedId == 'failure'}
 			<div class="p-4">
@@ -60,41 +90,24 @@
 			/>
 		{:else}
 			<FlowInputs
+				{noEditor}
 				summary={flowModule.summary}
 				shouldDisableTriggerScripts={parentModule !== undefined ||
 					previousModule !== undefined ||
 					$selectedId == 'failure'}
 				on:pick={async ({ detail }) => {
 					const { path, summary, kind, hash } = detail
-					const [module, state] = await pickScript(path, summary, flowModule.id, hash)
-
-					if (kind == Script.kind.APPROVAL) {
-						module.suspend = { required_events: 1, timeout: 1800 }
-					}
-
-					if (kind == Script.kind.TRIGGER) {
-						if (!$schedule.cron) {
-							$schedule.cron = '0 */15 * * *'
-						}
-						$schedule.enabled = true
-
-						module.stop_after_if = {
-							expr: 'result == undefined || Array.isArray(result) && result.length == 0',
-							skip_if_stopped: true
-						}
-					}
-
-					flowModule = module
-					$flowStateStore[module.id] = state
+					createModuleFromScript(path, summary, kind, hash)
 				}}
 				on:new={async ({ detail }) => {
-					const { language, kind, subkind } = detail
+					const { language, kind, subkind, summary } = detail
 
 					const [module, state] = await createInlineScriptModule(
 						language,
 						kind,
 						subkind,
-						flowModule.id
+						flowModule.id,
+						summary
 					)
 					scriptKind = kind
 					scriptTemplate = subkind
@@ -123,6 +136,7 @@
 		{/if}
 	{:else if flowModule.value.type === 'rawscript' || flowModule.value.type === 'script' || flowModule.value.type === 'flow'}
 		<FlowModuleComponent
+			{noEditor}
 			bind:flowModule
 			{parentModule}
 			{previousModule}
@@ -156,7 +170,7 @@
 	{/if}
 	{#each flowModule.value.branches as branch, branchIndex (branchIndex)}
 		{#if $selectedId === `${flowModule?.id}-branch-${branchIndex}`}
-			<FlowBranchOneWrapper bind:branch parentModule={flowModule} {previousModule} />
+			<FlowBranchOneWrapper {noEditor} bind:branch parentModule={flowModule} {previousModule} />
 		{:else}
 			{#each branch.modules as submodule, index}
 				<svelte:self
@@ -170,7 +184,7 @@
 {:else if flowModule.value.type === 'branchall'}
 	{#each flowModule.value.branches as branch, branchIndex (branchIndex)}
 		{#if $selectedId === `${flowModule?.id}-branch-${branchIndex}`}
-			<FlowBranchAllWrapper bind:branch />
+			<FlowBranchAllWrapper {noEditor} bind:branch />
 		{:else}
 			{#each branch.modules as submodule, index}
 				<svelte:self

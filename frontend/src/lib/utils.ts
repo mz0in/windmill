@@ -8,8 +8,11 @@
 // import { get } from 'svelte/store'
 
 import { deepEqual } from 'fast-equals'
+import YAML from 'yaml'
 import type { UserExt } from './stores'
 import { sendUserToast } from './toast'
+import type { Script } from './gen'
+import { cloneDeep } from 'lodash'
 export { sendUserToast }
 
 export function validateUsername(username: string): string {
@@ -46,9 +49,39 @@ export function displayDate(dateString: string | Date | undefined, displaySecond
 	}
 }
 
+export function displayTime(dateString: string | Date | undefined): string {
+	const date = new Date(dateString ?? '')
+	if (date.toString() === 'Invalid Date') {
+		return ''
+	} else {
+		return `${date.toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit'
+		})}.${date.getMilliseconds()}`
+	}
+}
+
+export function displaySize(sizeInBytes: number | undefined): string | undefined {
+	if (sizeInBytes === undefined) {
+		return undefined
+	}
+	const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB']
+	let size = sizeInBytes
+	let unit_idx = 0
+	while (unit_idx < units.length - 1 && size > 1024) {
+		size /= 1024
+		unit_idx += 1
+	}
+	return `${size.toFixed(1)}${units[unit_idx]}`
+}
+
 export function msToSec(ms: number | undefined, maximumFractionDigits?: number): string {
 	if (ms === undefined) return '?'
-	return (ms / 1000).toLocaleString(undefined, { maximumFractionDigits: maximumFractionDigits ?? 3, minimumFractionDigits: maximumFractionDigits })
+	return (ms / 1000).toLocaleString(undefined, {
+		maximumFractionDigits: maximumFractionDigits ?? 3,
+		minimumFractionDigits: maximumFractionDigits
+	})
 }
 
 export function getToday() {
@@ -305,6 +338,7 @@ export function isString(value: any) {
 
 export type InputCat =
 	| 'string'
+	| 'email'
 	| 'number'
 	| 'boolean'
 	| 'list'
@@ -316,6 +350,7 @@ export type InputCat =
 	| 'object'
 	| 'sql'
 	| 'yaml'
+	| 'currency'
 
 export function setInputCat(
 	type: string | undefined,
@@ -344,6 +379,10 @@ export function setInputCat(
 		return 'yaml'
 	} else if (type == 'string' && contentEncoding == 'base64') {
 		return 'base64'
+	} else if (type == 'string' && format == 'email') {
+		return 'email'
+	} else if (type == 'string' && format == 'currency') {
+		return 'currency'
 	} else {
 		return 'string'
 	}
@@ -488,9 +527,14 @@ export function deepMergeWithPriority<T>(target: T, source: T): T {
 
 	for (const key in source) {
 		if (source.hasOwnProperty(key) && merged?.hasOwnProperty(key)) {
+			console.log(target)
 			if (target?.hasOwnProperty(key)) {
 				merged[key] = deepMergeWithPriority(target[key], source[key])
 			} else {
+				merged[key] = source[key]
+			}
+		} else {
+			if (merged) {
 				merged[key] = source[key]
 			}
 		}
@@ -630,38 +674,149 @@ export async function tryEvery({
 	}
 }
 
-
 export function roughSizeOfObject(object: object | string) {
 	if (typeof object == 'string') {
-		return object.length * 2;
+		return object.length * 2
 	}
-    var objectList: any[] = [];
-    var stack = [ object ];
-    var bytes = 0;
+	var objectList: any[] = []
+	var stack = [object]
+	var bytes = 0
 
-    while ( stack.length ) {
-        let value: any = stack.pop();
+	while (stack.length) {
+		let value: any = stack.pop()
 
-        if ( typeof value === 'boolean' ) {
-            bytes += 4;
-        }
-        else if (typeof value === 'string' ) {
-            bytes += value.length * 2;
-        }
-        else if ( typeof value === 'number' ) {
-            bytes += 8;
-        }
-        else if (
-            typeof value === 'object'
-            && objectList.indexOf(value) === -1
-        )
-        {
-            objectList.push(value);
+		if (typeof value === 'boolean') {
+			bytes += 4
+		} else if (typeof value === 'string') {
+			bytes += value.length * 2
+		} else if (typeof value === 'number') {
+			bytes += 8
+		} else if (typeof value === 'object' && objectList.indexOf(value) === -1) {
+			objectList.push(value)
 
-            for( var i in value ) {
-                stack.push( value[ i ] );
-            }
-        }
-    }
-    return bytes;
+			for (var i in value) {
+				stack.push(value[i])
+			}
+		}
+	}
+	return bytes
+}
+
+export type Value = {
+	language?: Script.language
+	content?: string
+	path?: string
+	draft_only?: boolean
+	value?: any
+	draft?: Value
+	[key: string]: any
+}
+
+export function cleanValueProperties(obj: Value) {
+	if (typeof obj !== 'object') {
+		return obj
+	} else {
+		let newObj: any = {}
+		for (const key of Object.keys(obj)) {
+			if (key !== 'parent_hash' && key !== 'draft' && key !== 'draft_only') {
+				newObj[key] = cloneDeep(obj[key])
+			}
+		}
+		return newObj
+	}
+}
+
+export function orderedJsonStringify(obj: any, space?: string | number) {
+	const allKeys = new Set()
+	JSON.stringify(obj, (key, value) => (allKeys.add(key), value))
+	return JSON.stringify(obj, (Array.from(allKeys) as string[]).sort(), space)
+}
+
+function sortObjectKeys(obj: any): any {
+	if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+		const sortedObj: any = {}
+		Object.keys(obj)
+			.sort()
+			.forEach((key) => {
+				sortedObj[key] = sortObjectKeys(obj[key])
+			})
+		return sortedObj
+	} else if (Array.isArray(obj)) {
+		return obj.map((item) => sortObjectKeys(item))
+	} else {
+		return obj
+	}
+}
+
+export function orderedYamlStringify(obj: any) {
+	const sortedObj = sortObjectKeys(obj)
+	return YAML.stringify(sortedObj)
+}
+
+function evalJs(expr: string) {
+	let template = `
+return function (fields) {
+"use strict";
+return ${expr.startsWith('return ') ? expr.substring(7) : expr}
+}
+`
+	let functor = Function(template)
+	return functor()
+}
+export function computeShow(argName: string, expr: string | undefined, args: any) {
+	if (expr) {
+		try {
+			let r = evalJs(expr)(args ?? {})
+			if (!r && args[argName] !== undefined) {
+				delete args[argName]
+			}
+			return r
+		} catch (e) {
+			console.error(`Impossible to eval ${expr}:`, e)
+			return true
+		}
+	}
+	return true
+}
+
+function urlizeTokenInternal(token: string, formatter: 'html' | 'md'): string {
+	if (token.startsWith('http://') || token.startsWith('https://')) {
+		if (formatter == 'html') {
+			return `<a href="${token}" target="_blank" rel="noopener noreferrer">${token}</a>`
+		} else {
+			return `[${token}](${token})`
+		}
+	} else {
+		return token
+	}
+}
+
+export function urlize(input: string, formatter: 'html' | 'md'): string {
+	if (!input) return ''
+
+	return input
+		.split('\n')
+		.map((line) => {
+			return line
+				.split(' ')
+				.map((word) => urlizeTokenInternal(word, formatter))
+				.join(' ')
+		})
+		.join('\n')
+}
+
+export function storeLocalSetting(name: string, value: string | undefined) {
+	if (value != undefined) {
+		localStorage.setItem(name, value)
+	} else {
+		localStorage.removeItem(name)
+	}
+}
+
+export function getLocalSetting(name: string) {
+	try {
+		return localStorage.getItem(name)
+	} catch (e) {
+		return undefined
+	}
 }

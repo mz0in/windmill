@@ -5,16 +5,6 @@
 <script lang="ts">
 	import { ResourceService, VariableService } from '$lib/gen'
 
-	import {
-		faBook,
-		faCube,
-		faDollarSign,
-		faHistory,
-		faPlus,
-		faRotate,
-		faRotateLeft
-	} from '@fortawesome/free-solid-svg-icons'
-
 	import { workspaceStore } from '$lib/stores'
 	import type Editor from './Editor.svelte'
 	import ItemPicker from './ItemPicker.svelte'
@@ -33,7 +23,19 @@
 	import { sendUserToast } from '$lib/toast'
 	import { getScriptByPath, scriptLangToEditorLang } from '$lib/scripts'
 	import Toggle from './Toggle.svelte'
-	import { Link, Users } from 'lucide-svelte'
+	import FormatOnSave from './FormatOnSave.svelte'
+
+	import {
+		DollarSign,
+		History,
+		Library,
+		Link,
+		Package,
+		Plus,
+		RotateCw,
+		Save,
+		Users
+	} from 'lucide-svelte'
 	import { capitalize, toCamel } from '$lib/utils'
 	import type { Schema, SchemaProperty, SupportedLanguage } from '$lib/common'
 	import ScriptVersionHistory from './ScriptVersionHistory.svelte'
@@ -41,6 +43,8 @@
 	import type DiffEditor from './DiffEditor.svelte'
 	import { getResetCode } from '$lib/script_helpers'
 	import type { Script } from '$lib/gen'
+	import CodeCompletionStatus from './copilot/CodeCompletionStatus.svelte'
+	import Popover from './Popover.svelte'
 
 	export let lang: SupportedLanguage
 	export let editor: Editor | undefined
@@ -51,7 +55,6 @@
 		deno: boolean
 		go: boolean
 		shellcheck: boolean
-		bun: boolean
 	}
 	export let iconOnly: boolean = false
 	export let validCode: boolean = true
@@ -59,10 +62,13 @@
 	export let template: 'pgsql' | 'mysql' | 'script' | 'docker' | 'powershell' = 'script'
 	export let collabMode = false
 	export let collabLive = false
+	export let formatOnSave = false
 	export let collabUsers: { name: string }[] = []
 	export let scriptPath: string | undefined = undefined
 	export let diffEditor: DiffEditor | undefined = undefined
 	export let args: Record<string, any>
+	export let noHistory = false
+	export let saveToWorkspace = false
 
 	let contextualVariablePicker: ItemPicker
 	let variablePicker: ItemPicker
@@ -75,9 +81,9 @@
 	let showResourcePicker = false
 	let showResourceTypePicker = false
 
-	$: showContextVarPicker = ['python3', 'bash', 'go', 'deno', 'bun'].includes(lang)
-	$: showVarPicker = ['python3', 'bash', 'go', 'deno', 'bun'].includes(lang)
-	$: showResourcePicker = ['python3', 'bash', 'go', 'deno', 'bun'].includes(lang)
+	$: showContextVarPicker = ['python3', 'bash', 'powershell', 'go', 'deno', 'bun'].includes(lang)
+	$: showVarPicker = ['python3', 'bash', 'powershell', 'go', 'deno', 'bun'].includes(lang)
+	$: showResourcePicker = ['python3', 'bash', 'powershell', 'go', 'deno', 'bun'].includes(lang)
 	$: showResourceTypePicker = scriptLangToEditorLang(lang) === 'typescript' || lang === 'python3'
 
 	let codeViewer: Drawer
@@ -239,6 +245,8 @@
 			editor.insertAtCursor(`os.Getenv("${name}")`)
 		} else if (lang == 'bash') {
 			editor.insertAtCursor(`$${name}`)
+		} else if (lang == 'powershell') {
+			editor.insertAtCursor(`$Env:${name}`)
 		}
 		sendUserToast(`${name} inserted at cursor`)
 	}}
@@ -278,6 +286,12 @@
 		} else if (lang == 'bash') {
 			editor.insertAtCursor(`curl -s -H "Authorization: Bearer $WM_TOKEN" \\
   "$BASE_INTERNAL_URL/api/w/$WM_WORKSPACE/variables/get_value/${path}" | jq -r .`)
+		} else if (lang == 'powershell') {
+			editor.insertAtCursor(`$Headers = @{\n"Authorization" = "Bearer $Env:WM_TOKEN"`)
+			editor.arrowDown()
+			editor.insertAtCursor(
+				`\nInvoke-RestMethod -Headers $Headers -Uri "$Env:BASE_INTERNAL_URL/api/w/$Env:WM_WORKSPACE/variables/get_value/${path}"`
+			)
 		}
 		sendUserToast(`${name} inserted at cursor`)
 	}}
@@ -293,7 +307,7 @@
 			variant="border"
 			color="blue"
 			size="sm"
-			startIcon={{ icon: faPlus }}
+			startIcon={{ icon: Plus }}
 			on:click={() => {
 				variableEditor.initNew()
 			}}
@@ -331,6 +345,12 @@
 		} else if (lang == 'bash') {
 			editor.insertAtCursor(`curl -s -H "Authorization: Bearer $WM_TOKEN" \\
   "$BASE_INTERNAL_URL/api/w/$WM_WORKSPACE/resources/get_value_interpolated/${path}" | jq`)
+		} else if (lang == 'powershell') {
+			editor.insertAtCursor(`$Headers = @{\n"Authorization" = "Bearer $Env:WM_TOKEN"`)
+			editor.arrowDown()
+			editor.insertAtCursor(
+				`\nInvoke-RestMethod -Headers $Headers -Uri "$Env:BASE_INTERNAL_URL/api/w/$Env:WM_WORKSPACE/resources/get_value_interpolated/${path}"`
+			)
 		}
 		sendUserToast(`${path} inserted at cursor`)
 	}}
@@ -345,7 +365,7 @@
 >
 	<div slot="submission" class="flex flex-row gap-x-1 mr-2">
 		<Button
-			startIcon={{ icon: faPlus }}
+			startIcon={{ icon: Plus }}
 			target="_blank"
 			variant="border"
 			color="blue"
@@ -407,7 +427,7 @@
 					size="xs"
 					btnClasses="!font-medium text-tertiary"
 					spacingSize="md"
-					startIcon={{ icon: faDollarSign }}
+					startIcon={{ icon: DollarSign }}
 					{iconOnly}
 					>+Context Var
 				</Button>
@@ -420,7 +440,7 @@
 					on:click={variablePicker.openDrawer}
 					size="xs"
 					spacingSize="md"
-					startIcon={{ icon: faDollarSign }}
+					startIcon={{ icon: DollarSign }}
 					{iconOnly}
 				>
 					+Variable
@@ -436,7 +456,7 @@
 					color="light"
 					on:click={resourcePicker.openDrawer}
 					{iconOnly}
-					startIcon={{ icon: faCube }}
+					startIcon={{ icon: Package }}
 				>
 					+Resource
 				</Button>
@@ -444,14 +464,14 @@
 
 			{#if showResourceTypePicker}
 				<Button
-					title="Add resource"
+					title="Add resource type"
 					btnClasses="!font-medium text-tertiary"
 					size="xs"
 					spacingSize="md"
 					color="light"
 					on:click={resourceTypePicker.openDrawer}
 					{iconOnly}
-					startIcon={{ icon: faCube }}
+					startIcon={{ icon: Package }}
 				>
 					+Type
 				</Button>
@@ -465,60 +485,61 @@
 				color="light"
 				on:click={clearContent}
 				{iconOnly}
-				startIcon={{ icon: faRotateLeft }}
+				startIcon={{ icon: RotateCw }}
 			>
 				Reset
 			</Button>
 
-			<Button
-				btnClasses="!font-medium text-tertiary"
-				size="xs"
-				spacingSize="md"
-				color="light"
-				on:click={() => editor?.reloadWebsocket()}
-				startIcon={{
-					icon: faRotate,
-					classes: websocketAlive[lang] == false ? 'animate-spin' : ''
-				}}
-				title="Reload assistants"
-			>
-				{#if !iconOnly}
-					Assistants
-				{/if}
-				<span class="ml-1 -my-1">
-					{#if lang == 'deno'}
-						(<span class={websocketAlive.deno ? 'green' : 'text-red-700'}>Deno</span>)
-					{:else if lang == 'bun'}
-						(<span class={websocketAlive.bun ? 'green' : 'text-red-700'}>Bun</span>)
-					{:else if lang == 'go'}
-						(<span class={websocketAlive.go ? 'green' : 'text-red-700'}>Go</span>)
-					{:else if lang == 'python3'}
-						(<span class={websocketAlive.pyright ? 'green' : 'text-red-700'}>Pyright</span>
-						<span class={websocketAlive.black ? 'green' : 'text-red-700'}>Black</span>
-						<span class={websocketAlive.ruff ? 'green' : 'text-red-700'}>Ruff</span>)
-					{:else if lang == 'bash'}
-						(<span class={websocketAlive.shellcheck ? 'green' : 'text-red-700'}>Shellcheck</span>)
+			{#if lang == 'deno' || lang == 'python3' || lang == 'go' || lang == 'bash'}
+				<Button
+					btnClasses="!font-medium text-tertiary"
+					size="xs"
+					spacingSize="md"
+					color="light"
+					on:click={() => editor?.reloadWebsocket()}
+					startIcon={{
+						icon: RotateCw,
+						classes: websocketAlive[lang] == false ? 'animate-spin' : ''
+					}}
+					title="Reload assistants"
+				>
+					{#if !iconOnly}
+						Assistants
 					{/if}
-				</span>
-			</Button>
+					<span class="ml-1 -my-1">
+						{#if lang == 'deno'}
+							(<span class={websocketAlive.deno ? 'green' : 'text-red-700'}>Deno</span>)
+						{:else if lang == 'go'}
+							(<span class={websocketAlive.go ? 'green' : 'text-red-700'}>Go</span>)
+						{:else if lang == 'python3'}
+							(<span class={websocketAlive.pyright ? 'green' : 'text-red-700'}>Pyright</span>
+							<span class={websocketAlive.black ? 'green' : 'text-red-700'}>Black</span>
+							<span class={websocketAlive.ruff ? 'green' : 'text-red-700'}>Ruff</span>)
+						{:else if lang == 'bash'}
+							(<span class={websocketAlive.shellcheck ? 'green' : 'text-red-700'}>Shellcheck</span>)
+						{/if}
+					</span>
+				</Button>
+			{/if}
 			{#if collabMode}
 				<div class="flex items-center px-1">
 					<Toggle
-						options={{ right: iconOnly ? '' : 'Multiplayer' }}
+						options={{ right: '' }}
 						size="xs"
 						checked={collabLive}
 						on:change={() => dispatch('toggleCollabMode')}
 					/>
-					{#if iconOnly}
+					<Popover>
+						<svelte:fragment slot="text">Multiplayer</svelte:fragment>
 						<Users class="ml-1" size={12} />
-					{/if}
+					</Popover>
 					{#if collabLive}
 						<button
 							title="Show invite link"
 							class="p-1 rounded hover:bg-gray-400 mx-1 border"
 							on:click={() => dispatch('collabPopup')}><Link size={12} /></button
 						>
-						<div class="isolate flex -space-x-2 overflow-hidden pl-2">
+						<div class="isolate flex -space-x-2 pl-2">
 							{#each collabUsers as user}
 								<span
 									class="inline-flex h-6 w-6 items-center justify-center rounded-full ring-2 ring-white bg-gray-600"
@@ -536,6 +557,9 @@
 
 			<ScriptGen {editor} {diffEditor} {lang} {iconOnly} {args} />
 
+			<CodeCompletionStatus />
+
+			<FormatOnSave />
 			<!-- <Popover
 				notClickable
 				placement="bottom"
@@ -564,7 +588,7 @@
 	</div>
 
 	<div class="flex flex-row items-center gap-2">
-		{#if scriptPath}
+		{#if scriptPath && !noHistory}
 			<Button
 				btnClasses="!font-medium text-tertiary"
 				size="xs"
@@ -572,7 +596,7 @@
 				color="light"
 				on:click={() => (historyBrowserDrawerOpen = true)}
 				{iconOnly}
-				startIcon={{ icon: faHistory }}
+				startIcon={{ icon: History }}
 				title="See history"
 			>
 				History
@@ -586,10 +610,21 @@
 				color="light"
 				on:click={scriptPicker.openDrawer}
 				{iconOnly}
-				startIcon={{ icon: faBook }}
+				startIcon={{ icon: Library }}
 				title="Explore other scripts"
 			>
 				Library
+			</Button>
+		{/if}
+		{#if saveToWorkspace}
+			<Button
+				size="xs"
+				color="light"
+				startIcon={{ icon: Save }}
+				on:click={() => dispatch('createScriptFromInlineScript')}
+				iconOnly={false}
+			>
+				Save to workspace
 			</Button>
 		{/if}
 	</div>

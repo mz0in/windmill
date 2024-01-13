@@ -3,15 +3,22 @@
 	import LanguageIcon from '$lib/components/common/languageIcons/LanguageIcon.svelte'
 	import IconedResourceType from '$lib/components/IconedResourceType.svelte'
 	import type { FlowModule } from '$lib/gen'
-	import { faBarsStaggered, faCodeBranch, faLongArrowDown } from '@fortawesome/free-solid-svg-icons'
-	import { Building, ClipboardCopy, GitBranchPlus, Repeat, Square } from 'lucide-svelte'
+	import {
+		Building,
+		ClipboardCopy,
+		GitBranchPlus,
+		Repeat,
+		Square,
+		ArrowDown,
+		GitBranch
+	} from 'lucide-svelte'
 	import { createEventDispatcher, getContext } from 'svelte'
-	import Icon from 'svelte-awesome'
 	import type { Writable } from 'svelte/store'
 	import FlowModuleSchemaItem from './FlowModuleSchemaItem.svelte'
 	import InsertModuleButton from './InsertModuleButton.svelte'
 	import { prettyLanguage } from '$lib/common'
 	import { msToSec } from '$lib/utils'
+	import BarsStaggered from '$lib/components/icons/BarsStaggered.svelte'
 
 	export let mod: FlowModule
 	export let trigger: boolean
@@ -34,6 +41,7 @@
 			modules: FlowModule[]
 			index: number
 			detail: 'script' | 'forloop' | 'branchone' | 'branchall' | 'move'
+			script?: { path: string; summary: string; hash: string | undefined }
 		}
 		select: string
 		newBranch: { module: FlowModule }
@@ -61,7 +69,9 @@
 {#if mod}
 	{#if insertable}
 		<div
-			class="{openMenu ? 'z-10' : ''} w-7 absolute -top-9 left-[50%] right-[50%] -translate-x-1/2"
+			class="{openMenu
+				? 'z-20'
+				: ''} w-[27px] absolute -top-[35px] left-[50%] right-[50%] -translate-x-1/2"
 		>
 			{#if moving}
 				<button
@@ -70,15 +80,18 @@
 						dispatch('insert', { modules, index: idx, detail: 'move' })
 					}}
 					type="button"
-					class=" text-primary bg-surface border mx-0.5 border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-6 h-6 flex items-center justify-center"
+					class=" text-primary bg-surface border mx-[1px] border-gray-300 dark:border-gray-500 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-[25px] h-[25px] flex items-center justify-center"
 				>
-					<ClipboardCopy size={12} />
+					<ClipboardCopy class="m-[5px]" size={15} />
 				</button>
 			{:else}
 				<InsertModuleButton
 					{disableAi}
 					bind:open={openMenu}
 					{trigger}
+					on:insert={(e) => {
+						dispatch('insert', { modules, index: idx + 1, detail: 'script', script: e.detail })
+					}}
 					on:new={(e) => {
 						dispatch('insert', { modules, index: idx, detail: e.detail })
 					}}
@@ -139,7 +152,7 @@
 					{bgColor}
 				>
 					<div slot="icon">
-						<Icon data={faCodeBranch} scale={1} />
+						<GitBranch size={16} />
 					</div>
 				</FlowModuleSchemaItem>
 			{:else if mod.value.type === 'branchall'}
@@ -154,7 +167,7 @@
 					{bgColor}
 				>
 					<div slot="icon">
-						<Icon data={faCodeBranch} scale={1} />
+						<GitBranch size={16} />
 					</div>
 				</FlowModuleSchemaItem>
 			{:else}
@@ -179,9 +192,9 @@
 						{:else if mod.summary == 'Terminate flow'}
 							<Square size={16} />
 						{:else if mod.value.type === 'identity'}
-							<Icon data={faLongArrowDown} scale={1.1} />
+							<ArrowDown size={16} />
 						{:else if mod.value.type === 'flow'}
-							<Icon data={faBarsStaggered} scale={1.0} />
+							<BarsStaggered size={16} />
 						{:else if mod.value.type === 'script'}
 							{#if mod.value.path.startsWith('hub/')}
 								<div>
@@ -203,7 +216,9 @@
 	</div>
 	{#if insertable && insertableEnd}
 		<div
-			class="{openMenu2 ? 'z-10' : ''} w-7 absolute top-11 left-[50%] right-[50%] -translate-x-1/2"
+			class="{openMenu2
+				? 'z-20'
+				: ''} w-[27px] absolute top-[49px] left-[50%] right-[50%] -translate-x-1/2"
 		>
 			{#if moving}
 				<button
@@ -212,15 +227,18 @@
 						dispatch('insert', { modules, index: idx + 1, detail: 'move' })
 					}}
 					type="button"
-					class=" text-primary bg-surface border mx-0.5 border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-6 h-6 flex items-center justify-center"
+					class=" text-primary bg-surface border mx-[1px] border-gray-300 dark:border-gray-500 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-[25px] h-[25px] flex items-center justify-center"
 				>
-					<ClipboardCopy size={12} />
+					<ClipboardCopy class="m-[5px]" size={15} />
 				</button>
 			{:else}
 				<InsertModuleButton
 					{disableAi}
 					bind:open={openMenu2}
 					{trigger}
+					on:insert={(e) => {
+						dispatch('insert', { modules, index: idx + 1, detail: 'script', script: e.detail })
+					}}
 					on:new={(e) => {
 						dispatch('insert', { modules, index: idx + 1, detail: e.detail })
 					}}
@@ -232,7 +250,7 @@
 	{/if}
 
 	{#if insertable && branchable}
-		<div class="w-7 absolute top-11 left-[60%] right-[40%] -translate-x-1/2">
+		<div class="w-[27px] absolute top-[45px] left-[60%] right-[40%] -translate-x-1/2">
 			<button
 				title="Add branch"
 				on:click={() => {
@@ -240,9 +258,9 @@
 				}}
 				type="button"
 				id="add-branch-button"
-				class=" text-primary bg-surface border mx-0.5 rotate-180 border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-6 h-6 flex items-center justify-center"
+				class=" text-primary bg-surface border mx-[1px] rotate-180 dark:border-gray-500 border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 font-medium rounded-full text-sm w-[25px] h-[25px] flex items-center justify-center"
 			>
-				<GitBranchPlus size={12} />
+				<GitBranchPlus class="m-[5px]" size={15} />
 			</button>
 		</div>
 	{/if}

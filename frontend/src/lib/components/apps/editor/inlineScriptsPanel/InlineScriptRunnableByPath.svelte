@@ -11,14 +11,6 @@
 		StaticAppInput,
 		UserAppInput
 	} from '../../inputType'
-	import {
-		faCodeBranch,
-		faExternalLinkAlt,
-		faEye,
-		faPen,
-		faRefresh,
-		faTrashAlt
-	} from '@fortawesome/free-solid-svg-icons'
 	import type { AppViewerContext } from '../../types'
 	import { workspaceStore } from '$lib/stores'
 	import { createEventDispatcher } from 'svelte'
@@ -29,6 +21,7 @@
 	import { getScriptByPath } from '$lib/scripts'
 	import { sendUserToast } from '$lib/toast'
 	import { autoPlacement } from '@floating-ui/core'
+	import { ExternalLink, Eye, GitFork, Pen, RefreshCw, Trash } from 'lucide-svelte'
 
 	export let runnable: RunnableByPath
 	export let fields: Record<string, StaticAppInput | ConnectedAppInput | RowAppInput | UserAppInput>
@@ -115,21 +108,20 @@
 		<Button
 			variant="border"
 			size="xs"
-			startIcon={{ icon: faRefresh }}
+			color="light"
+			startIcon={{ icon: RefreshCw }}
 			on:click={async () => {
 				sendUserToast('Refreshing inputs')
 				refresh(runnable)
 				$stateId = $stateId + 1
 				await tick()
 			}}
-		>
-			Refresh
-		</Button>
+		/>
 		<Button
 			size="xs"
 			variant="border"
 			color="red"
-			startIcon={{ icon: faTrashAlt }}
+			startIcon={{ icon: Trash }}
 			on:click={() => {
 				dispatch('delete')
 			}}
@@ -140,7 +132,8 @@
 			<Button
 				variant="border"
 				size="xs"
-				startIcon={{ icon: faEye }}
+				color="light"
+				startIcon={{ icon: Eye }}
 				on:click={() => {
 					flowPath = runnable.path
 					drawerFlowViewer.openDrawer()
@@ -151,26 +144,28 @@
 			<Button
 				variant="border"
 				size="xs"
-				startIcon={{ icon: faPen }}
-				endIcon={{ icon: faExternalLinkAlt }}
+				color="light"
+				startIcon={{ icon: Pen }}
+				endIcon={{ icon: ExternalLink }}
 				target="_blank"
 				href="/flows/edit/{runnable.path}?nodraft=true">Edit</Button
 			>
 			<Button
 				variant="border"
 				size="xs"
-				startIcon={{ icon: faEye }}
-				endIcon={{ icon: faExternalLinkAlt }}
+				color="light"
+				startIcon={{ icon: Eye }}
+				endIcon={{ icon: ExternalLink }}
 				target="_blank"
 				href="/flows/get/{runnable.path}?workspace={$workspaceStore}"
 			>
-				Details page
+				Details
 			</Button>
 		{:else}
 			<Button
 				size="xs"
 				variant="border"
-				startIcon={{ icon: faCodeBranch }}
+				startIcon={{ icon: GitFork }}
 				on:click={() => {
 					fork(runnable.path)
 				}}

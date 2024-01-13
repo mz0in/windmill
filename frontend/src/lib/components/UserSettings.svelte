@@ -3,10 +3,17 @@
 	import type { TruncatedToken, NewToken } from '$lib/gen'
 	import { UserService } from '$lib/gen'
 	import { displayDate, copyToClipboard } from '$lib/utils'
-	import { faClipboard, faPlus } from '@fortawesome/free-solid-svg-icons'
 	import TableCustom from '$lib/components/TableCustom.svelte'
 	import { Button } from '$lib/components/common'
-	import Icon from 'svelte-awesome'
+	import Drawer from '$lib/components/common/drawer/Drawer.svelte'
+	import DrawerContent from '$lib/components/common/drawer/DrawerContent.svelte'
+	import { page } from '$app/stores'
+	import { goto } from '$app/navigation'
+	import { sendUserToast } from '$lib/toast'
+	import Tooltip from './Tooltip.svelte'
+	import Version from './Version.svelte'
+	import { Clipboard, Plus } from 'lucide-svelte'
+	import DarkModeToggle from './sidebar/DarkModeToggle.svelte'
 
 	export let scopes: string[] | undefined = undefined
 
@@ -18,15 +25,6 @@
 	let newTokenExpiration: number | undefined
 	let displayCreateToken = scopes != undefined
 	let login_type = 'none'
-
-	import Drawer from '$lib/components/common/drawer/Drawer.svelte'
-	import DrawerContent from '$lib/components/common/drawer/DrawerContent.svelte'
-	import { page } from '$app/stores'
-	import { goto } from '$app/navigation'
-	import { sendUserToast } from '$lib/toast'
-	import Tooltip from './Tooltip.svelte'
-	import Version from './Version.svelte'
-
 	let drawer: Drawer
 
 	export function openDrawer() {
@@ -78,7 +76,7 @@
 	}
 
 	async function listTokens(): Promise<void> {
-		tokens = await UserService.listTokens()
+		tokens = await UserService.listTokens({ excludeEphemeral: true })
 	}
 
 	async function deleteToken(tokenPrefix: string) {
@@ -88,14 +86,16 @@
 	}
 </script>
 
-<Drawer bind:this={drawer} size="800px" on:clickAway={removeHash}>
+<Drawer bind:this={drawer} size="800px" on:close={removeHash}>
 	<DrawerContent title="User Settings" on:close={closeDrawer}>
 		<div class="flex flex-col h-full">
 			<div>
 				<div class="text-xs pt-1 pb-2 text-tertiary flex-col flex">
 					Windmill <Version />
 				</div>
-
+				<div class="font-semibold flex items-baseline">
+					Theme: <DarkModeToggle forcedDarkMode={false} />
+				</div>
 				{#if scopes == undefined}
 					<h2 class="border-b mt-4">User info</h2>
 					<div class="">
@@ -145,11 +145,11 @@
 				{/if}
 
 				<div class="grid grid-cols-2 pt-8 pb-1">
-					<h2 class="py-0 my-0 border-b">Tokens</h2>
+					<h2 class="py-0 my-0 border-b pt-3">Tokens</h2>
 					<div class="flex justify-end border-b pb-1">
 						<Button
 							size="sm"
-							startIcon={{ icon: faPlus }}
+							startIcon={{ icon: Plus }}
 							btnClasses={displayCreateToken ? 'hidden' : ''}
 							on:click={() => {
 								displayCreateToken = !displayCreateToken
@@ -173,8 +173,12 @@
 							: 'hidden'} border rounded-md mb-6 px-2 py-2 bg-green-50 dark:bg-green-200 dark:text-green-800 flex flex-row flex-wrap"
 					>
 						<div>
-							Added token: <button on:click={() => copyToClipboard(newToken ?? '')} class="inline"
-								>{newToken} <Icon data={faClipboard} />
+							Added token: <button
+								on:click={() => copyToClipboard(newToken ?? '')}
+								class="inline-flex gap-2 items-center"
+							>
+								{newToken}
+								<Clipboard size={12} />
 							</button>
 						</div>
 						<div class="pt-1 text-xs ml-2">

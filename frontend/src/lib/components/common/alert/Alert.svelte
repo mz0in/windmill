@@ -1,14 +1,8 @@
 <script lang="ts">
 	import { classNames } from '$lib/utils'
-	import {
-		faCheckCircle,
-		faInfoCircle,
-		faWarning,
-		type IconDefinition
-	} from '@fortawesome/free-solid-svg-icons'
-	import Icon from 'svelte-awesome'
 	import type { AlertType } from './model'
 	import Tooltip from '$lib/components/Tooltip.svelte'
+	import { AlertCircle, AlertTriangle, CheckCircle2, Info } from 'lucide-svelte'
 
 	export let type: AlertType = 'info'
 	export let title: string
@@ -18,11 +12,11 @@
 
 	export let size: 'xs' | 'sm' = 'sm'
 
-	const icons: Record<AlertType, IconDefinition> = {
-		info: faInfoCircle,
-		warning: faWarning,
-		error: faWarning,
-		success: faCheckCircle
+	const icons: Record<AlertType, any> = {
+		info: Info,
+		warning: AlertCircle,
+		error: AlertTriangle,
+		success: CheckCircle2
 	}
 
 	const classes: Record<AlertType, Record<string, string>> = {
@@ -63,10 +57,10 @@
 >
 	<div class="flex">
 		<div class="flex h-8 w-8 items-center justify-center rounded-full">
-			<Icon data={icons[type]} class={classes[type].iconClass} />
+			<svelte:component this={icons[type]} class={classes[type].iconClass} size={16} />
 		</div>
 
-		<div class="ml-2 w-full">
+		<div class="ml-2 pt-[0.15rem] w-full">
 			<span
 				class={classNames(
 					size === 'sm' ? 'text-sm' : 'text-xs ',
@@ -78,15 +72,17 @@
 					<Tooltip {documentationLink} scale={0.9}>{tooltip}</Tooltip>
 				{/if}
 			</span>
-			<div
-				class={classNames(
-					size === 'sm' ? 'text-sm' : 'text-xs ',
-					'mt-2',
-					classes[type].descriptionClass
-				)}
-			>
-				<slot />
-			</div>
+			{#if $$slots.default}
+				<div
+					class={classNames(
+						size === 'sm' ? 'text-sm' : 'text-xs ',
+						'mt-2',
+						classes[type].descriptionClass
+					)}
+				>
+					<slot />
+				</div>
+			{/if}
 		</div>
 	</div>
 </div>

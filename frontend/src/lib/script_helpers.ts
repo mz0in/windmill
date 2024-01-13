@@ -37,7 +37,7 @@ export async function main() {
 export const DENO_INIT_CODE = `// Ctrl/CMD+. to cache dependencies on imports hover.
 
 // Deno uses "npm:" prefix to import from npm (https://deno.land/manual@v1.36.3/node/npm_specifiers)
-// import * as wmill from "npm:windmill-client@1"
+// import * as wmill from "npm:windmill-client@${__pkg__.version}"
 
 // fill the type, or use the +Resource type to get a type-safe reference to a resource
 // type Postgresql = object
@@ -114,7 +114,7 @@ func main(message string, name string) (interface{}, error) {
 }
 `
 
-export const DENO_INIT_CODE_CLEAR = `// import * as wmill from "npm:windmill-client@1"
+export const DENO_INIT_CODE_CLEAR = `// import * as wmill from "npm:windmill-client@${__pkg__.version}"
 
 export async function main(x: string) {
   return x
@@ -139,12 +139,13 @@ export async function main(message: string, name: string) {
 
 export const POSTGRES_INIT_CODE = `-- $1 name1 = default arg
 -- $2 name2
-INSERT INTO demo VALUES (\$1::TEXT, \$2::INT) RETURNING *
+-- $3 name3
+INSERT INTO demo VALUES (\$1::TEXT, \$2::INT, \$3::TEXT[]) RETURNING *
 `
 
-export const MYSQL_INIT_CODE = `-- ? name1 (text) = default arg
--- ? name2 (int)
-INSERT INTO demo VALUES (?, ?)
+export const MYSQL_INIT_CODE = `-- :name1 (text) = default arg
+-- :name2 (int)
+INSERT INTO demo VALUES (:name1, :name2)
 `
 
 export const BIGQUERY_INIT_CODE = `-- @name1 (string) = default arg
@@ -156,6 +157,11 @@ INSERT INTO \`demodb.demo\` VALUES (@name1, @name2, @name3)
 export const SNOWFLAKE_INIT_CODE = `-- ? name1 (varchar) = default arg
 -- ? name2 (int)
 INSERT INTO demo VALUES (?, ?)
+`
+
+export const MSSQL_INIT_CODE = `-- @p1 name1 (varchar) = default arg
+-- @p2 name2 (int)
+INSERT INTO demo VALUES (@p1, @p2)
 `
 
 export const GRAPHQL_INIT_CODE = `query($name4: String, $name2: Int, $name3: [String]) {
@@ -208,7 +214,7 @@ dflt="\${2:-default value}"
 echo "Hello $msg"
 `
 
-export const DENO_INIT_CODE_TRIGGER = `import * as wmill from "npm:windmill-client@1"
+export const DENO_INIT_CODE_TRIGGER = `import * as wmill from "npm:windmill-client@${__pkg__.version}"
 
 export async function main() {
 
@@ -280,6 +286,8 @@ docker run --rm $IMAGE $COMMAND
 
 export const POWERSHELL_INIT_CODE = `param($Msg, $Dflt = "default value", [int]$Nb = 3)
 
+# Import-Module MyModule
+
 # the last line of the stdout is the return value
 Write-Output "Hello $Msg"`
 
@@ -291,12 +299,16 @@ const ALL_INITIAL_CODE = [
 	MYSQL_INIT_CODE,
 	BIGQUERY_INIT_CODE,
 	SNOWFLAKE_INIT_CODE,
+	MSSQL_INIT_CODE,
 	GRAPHQL_INIT_CODE,
 	DENO_INIT_CODE_TRIGGER,
 	DENO_INIT_CODE_CLEAR,
 	PYTHON_INIT_CODE_CLEAR,
 	DENO_INIT_CODE_APPROVAL,
 	DENO_FAILURE_MODULE_CODE,
+	BUN_INIT_CODE,
+	BUN_INIT_CODE_CLEAR,
+	BUN_INIT_CODE_APPROVAL,
 	BASH_INIT_CODE,
 	POWERSHELL_INIT_CODE
 ]
@@ -368,6 +380,8 @@ export function initialCode(
 		return BIGQUERY_INIT_CODE
 	} else if (language == 'snowflake') {
 		return SNOWFLAKE_INIT_CODE
+	} else if (language == 'mssql') {
+		return MSSQL_INIT_CODE
 	} else if (language == 'graphql') {
 		return GRAPHQL_INIT_CODE
 	} else if (language == 'bun') {

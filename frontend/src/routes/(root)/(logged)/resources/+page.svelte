@@ -8,7 +8,7 @@
 	import DrawerContent from '$lib/components/common/drawer/DrawerContent.svelte'
 	import Tabs from '$lib/components/common/tabs/Tabs.svelte'
 	import DeployWorkspaceDrawer from '$lib/components/DeployWorkspaceDrawer.svelte'
-	import Dropdown from '$lib/components/Dropdown.svelte'
+	import Dropdown from '$lib/components/DropdownV2.svelte'
 	import ListFilters from '$lib/components/home/ListFilters.svelte'
 	import IconedResourceType from '$lib/components/IconedResourceType.svelte'
 	import PageHeader from '$lib/components/PageHeader.svelte'
@@ -23,7 +23,10 @@
 	import ShareModal from '$lib/components/ShareModal.svelte'
 	import SimpleEditor from '$lib/components/SimpleEditor.svelte'
 	import SupabaseConnect from '$lib/components/SupabaseConnect.svelte'
-	import TableCustom from '$lib/components/TableCustom.svelte'
+	import Cell from '$lib/components/table/Cell.svelte'
+	import DataTable from '$lib/components/table/DataTable.svelte'
+	import Head from '$lib/components/table/Head.svelte'
+	import Row from '$lib/components/table/Row.svelte'
 	import Toggle from '$lib/components/Toggle.svelte'
 	import Tooltip from '$lib/components/Tooltip.svelte'
 	import type { ResourceType } from '$lib/gen'
@@ -31,29 +34,29 @@
 	import { oauthStore, userStore, workspaceStore } from '$lib/stores'
 	import { sendUserToast } from '$lib/toast'
 	import { canWrite, classNames, emptySchema, removeMarkdown, truncate } from '$lib/utils'
-	import {
-		faChain,
-		faCircle,
-		faEdit,
-		faFileExport,
-		faPen,
-		faPlus,
-		faRefresh,
-		faRotateRight,
-		faSave,
-		faShare,
-		faTrash
-	} from '@fortawesome/free-solid-svg-icons'
 	import { convert } from '@redocly/json-to-json-schema'
-	import { Building } from 'lucide-svelte'
+	import {
+		Braces,
+		Building,
+		Circle,
+		FileUp,
+		Link,
+		Pen,
+		Plus,
+		RotateCw,
+		Save,
+		Share,
+		Trash
+	} from 'lucide-svelte'
 	import { onMount } from 'svelte'
 	import autosize from 'svelte-autosize'
-	import Icon from 'svelte-awesome'
 	import Portal from 'svelte-portal'
 
-	type ResourceW = ListableResource & { canWrite: boolean }
+	type ResourceW = ListableResource & { canWrite: boolean; marked?: string }
 	type ResourceTypeW = ResourceType & { canWrite: boolean }
 
+	let cacheResources: ResourceW[] | undefined
+	let stateResources: ResourceW[] | undefined
 	let resources: ResourceW[] | undefined
 	let resourceTypes: ResourceTypeW[] | undefined
 
@@ -103,18 +106,21 @@
 
 	let typeFilter: string | undefined = undefined
 
+	$: currentResources =
+		tab == 'cache' ? cacheResources : tab == 'states' ? stateResources : resources
+
 	$: preFilteredItemsOwners =
 		ownerFilter == undefined
-			? resources
-			: resources?.filter((x) => x.path.startsWith(ownerFilter ?? ''))
+			? currentResources
+			: currentResources?.filter((x) => x.path.startsWith(ownerFilter ?? ''))
 
 	$: preFilteredType =
 		typeFilter == undefined
-			? preFilteredItemsOwners?.filter((x) =>
-					tab === 'workspace'
+			? preFilteredItemsOwners?.filter((x) => {
+					return tab === 'workspace'
 						? x.resource_type !== 'app_theme' &&
-						  x.resource_type !== 'state' &&
-						  x.resource_type !== 'cache'
+								x.resource_type !== 'state' &&
+								x.resource_type !== 'cache'
 						: tab === 'states'
 						? x.resource_type === 'state'
 						: tab === 'cache'
@@ -122,21 +128,42 @@
 						: tab === 'theme'
 						? x.resource_type === 'app_theme'
 						: true
-			  )
-			: preFilteredItemsOwners?.filter(
-					(x) =>
+			  })
+			: preFilteredItemsOwners?.filter((x) => {
+					return (
 						x.resource_type === typeFilter &&
 						(tab === 'workspace'
 							? x.resource_type !== 'app_theme' &&
 							  x.resource_type !== 'state' &&
 							  x.resource_type !== 'cache'
 							: true)
-			  )
+					)
+			  })
 
 	async function loadResources(): Promise<void> {
-		resources = (
+		resources = await loadResourceInternal(undefined, 'cache,state')
+		loading.resources = false
+	}
+
+	async function loadCache(): Promise<void> {
+		cacheResources = await loadResourceInternal('cache', undefined)
+		loading.resources = false
+	}
+
+	async function loadState(): Promise<void> {
+		stateResources = await loadResourceInternal('state', undefined)
+		loading.resources = false
+	}
+
+	async function loadResourceInternal(
+		resourceType: string | undefined,
+		resourceTypeExclude: string | undefined
+	): Promise<ResourceW[]> {
+		return (
 			await ResourceService.listResource({
-				workspace: $workspaceStore!
+				workspace: $workspaceStore!,
+				resourceTypeExclude,
+				resourceType
 			})
 		).map((x) => {
 			return {
@@ -145,8 +172,6 @@
 				...x
 			}
 		})
-
-		loading.resources = false
 	}
 
 	async function loadResourceTypes(): Promise<void> {
@@ -166,7 +191,7 @@
 			OauthService.disconnectAccount({ workspace: $workspaceStore!, id: account })
 		}
 		await ResourceService.deleteResource({ workspace: $workspaceStore!, path })
-		loadResources()
+		reload()
 	}
 
 	async function addResourceType(): Promise<void> {
@@ -286,7 +311,52 @@
 		inferrer?.closeDrawer?.()
 	}
 	let deploymentDrawer: DeployWorkspaceDrawer
+
+	async function reload() {
+		loading = {
+			resources: true,
+			types: true
+		}
+		if (tab == 'cache') {
+			await loadCache()
+		} else if (tab == 'states') {
+			await loadState()
+		} else {
+			await loadResources()
+		}
+		await loadResourceTypes()
+		loading = {
+			resources: false,
+			types: false
+		}
+	}
 </script>
+
+<ConfirmationModal
+	open={Boolean(deleteConfirmedCallback)}
+	title="Remove resource"
+	confirmationText="Remove"
+	on:canceled={() => {
+		deleteConfirmedCallback = undefined
+	}}
+	on:confirmed={() => {
+		if (deleteConfirmedCallback) {
+			deleteConfirmedCallback()
+		}
+		deleteConfirmedCallback = undefined
+	}}
+>
+	<div class="flex flex-col w-full space-y-4">
+		<span>Are you sure you want to remove this resource?</span>
+		<Alert type="info" title="Bypass confirmation">
+			<div>
+				You can press
+				<Badge color="dark-gray">SHIFT</Badge>
+				while removing a resource to bypass confirmation.
+			</div>
+		</Alert>
+	</div>
+</ConfirmationModal>
 
 <DeployWorkspaceDrawer bind:this={deploymentDrawer} />
 
@@ -321,7 +391,7 @@
 <Drawer bind:this={editResourceTypeDrawer} size="800px">
 	<DrawerContent title="Edit resource type" on:close={editResourceTypeDrawer.closeDrawer}>
 		<svelte:fragment slot="actions">
-			<Button startIcon={{ icon: faSave }} on:click={updateResourceType}>Update</Button>
+			<Button startIcon={{ icon: Save }} on:click={updateResourceType}>Update</Button>
 		</svelte:fragment>
 		<div class="flex flex-col gap-6">
 			<label for="inp">
@@ -362,7 +432,7 @@
 <Drawer bind:this={resourceTypeDrawer} size="800px">
 	<DrawerContent title="Create resource type" on:close={resourceTypeDrawer.closeDrawer}>
 		<svelte:fragment slot="actions">
-			<Button startIcon={{ icon: faSave }} on:click={addResourceType}>Save</Button>
+			<Button startIcon={{ icon: Save }} on:click={addResourceType}>Save</Button>
 		</svelte:fragment>
 		<div class="flex flex-col gap-6">
 			<label for="inp">
@@ -412,7 +482,13 @@
 				<div class="flex justify-between w-full items-center">
 					<div class="mb-1 font-semibold text-secondary">Schema</div>
 					<div class="mb-2 w-full flex flex-row-reverse">
-						<Button on:click={openInferrer} size="sm" color="dark" variant="border">
+						<Button
+							on:click={openInferrer}
+							size="sm"
+							color="light"
+							variant="border"
+							startIcon={{ icon: Braces }}
+						>
 							Infer schema from a json value
 						</Button>
 					</div>
@@ -437,16 +513,28 @@
 		documentationLink="https://www.windmill.dev/docs/core_concepts/resources_and_types"
 	>
 		<div class="flex flex-row justify-end gap-4">
-			<Button variant="border" size="md" startIcon={{ icon: faPlus }} on:click={startNewType}>
+			<Button variant="border" size="md" startIcon={{ icon: Plus }} on:click={startNewType}>
 				Add Resource Type
 			</Button>
-			<Button size="md" startIcon={{ icon: faChain }} on:click={() => appConnect.open?.()}>
+			<Button size="md" startIcon={{ icon: Link }} on:click={() => appConnect.open?.()}>
 				Add Resource
 			</Button>
 		</div>
 	</PageHeader>
 	<div class="flex justify-between">
-		<Tabs class="w-full" bind:selected={tab}>
+		<Tabs
+			class="w-full"
+			bind:selected={tab}
+			on:selected={(e) => {
+				if (e.detail == 'cache') {
+					loading.resources = true
+					loadCache()
+				} else if (e.detail == 'states') {
+					loading.resources = true
+					loadState()
+				}
+			}}
+		>
 			<Tab size="md" value="workspace">
 				<div class="flex gap-2 items-center my-1">
 					<Building size={18} />
@@ -497,24 +585,12 @@
 			<Button
 				variant="border"
 				color="light"
-				on:click={async () => {
-					loading = {
-						resources: true,
-						types: true
-					}
-					await loadResources()
-					await loadResourceTypes()
-					loading = {
-						resources: false,
-						types: false
-					}
+				on:click={reload}
+				startIcon={{
+					icon: RotateCw,
+					classes: loading.resources || loading.types ? 'animate-spin' : ''
 				}}
-				><Icon
-					scale={0.8}
-					data={faRotateRight}
-					class={loading.resources || loading.types ? 'animate-spin' : ''}
-				/></Button
-			>
+			/>
 		</div>
 	</div>
 	{#if tab == 'workspace' || tab == 'states' || tab == 'cache' || tab == 'theme'}
@@ -533,38 +609,47 @@
 			<div class="h-4" />
 		{/if}
 
-		<div class="overflow-x-auto pb-40">
+		<div class="overflow-x-auto pb-40 mt-4">
 			{#if loading.resources}
 				<Skeleton layout={[0.5, [2], 1]} />
 				{#each new Array(6) as _}
 					<Skeleton layout={[[4], 0.7]} />
 				{/each}
+			{:else if filteredItems?.length == 0}
+				<div class="flex flex-col items-center justify-center h-full">
+					<div class="text-md font-medium">No resources found</div>
+					<div class="text-sm text-secondary">
+						Try changing the filters or creating a new resource
+					</div>
+				</div>
 			{:else}
-				<TableCustom>
-					<tr slot="header-row">
-						<th />
-						<th>path</th>
-						<th>resource type</th>
-						<th>description</th>
-						<th />
-						<th />
-					</tr>
-					<tbody slot="body">
+				<DataTable>
+					<Head>
+						<Row>
+							<Cell head first />
+							<Cell head>Path</Cell>
+							<Cell head>Resource type</Cell>
+							<Cell head>Description</Cell>
+							<Cell head />
+							<Cell head last />
+						</Row>
+					</Head>
+					<tbody class="divide-y bg-surface">
 						{#if filteredItems}
 							{#each filteredItems as { path, description, resource_type, extra_perms, canWrite, is_oauth, is_linked, account, refresh_error, is_expired, marked, is_refreshed }}
-								<tr>
-									<td class="!px-0 text-center">
+								<Row>
+									<Cell first>
 										<SharedBadge {canWrite} extraPerms={extra_perms} />
-									</td>
-									<td>
+									</Cell>
+									<Cell>
 										<a
 											class="break-all"
 											href="#{path}"
 											on:click={() => resourceEditor?.initEdit?.(path)}
 											>{#if marked}{@html marked}{:else}{path}{/if}</a
 										>
-									</td>
-									<td class="px-2">
+									</Cell>
+									<Cell>
 										<a
 											href="#{name}"
 											on:click={() => {
@@ -586,18 +671,18 @@
 										>
 											<IconedResourceType name={resource_type} after={true} />
 										</a>
-									</td>
-									<td>
+									</Cell>
+									<Cell>
 										<span class="text-tertiary text-xs">
 											{removeMarkdown(truncate(description ?? '', 30))}
 										</span>
-									</td>
-									<td class="text-center">
-										<div class="flex flex-row">
+									</Cell>
+									<Cell>
+										<div class="flex flex-row text-center">
 											<div class="w-10">
 												{#if is_linked}
 													<Popover>
-														<Icon data={faChain} />
+														<Link />
 														<div slot="text">
 															This resource is linked with a variable of the same path. They are
 															deleted and renamed together.
@@ -608,7 +693,7 @@
 											<div class="w-10">
 												{#if is_refreshed}
 													<Popover>
-														<Icon data={faRefresh} />
+														<RotateCw />
 														<div slot="text">
 															The OAuth token will be kept up-to-date in the background by Windmill
 															using its refresh token
@@ -621,11 +706,9 @@
 												<div class="w-10">
 													{#if refresh_error}
 														<Popover>
-															<Icon
-																class="text-red-600 animate-[pulse_5s_linear_infinite]"
-																data={faCircle}
-																scale={0.7}
-																label="Error during exchange of the refresh token"
+															<Circle
+																class="text-red-600 animate-[pulse_5s_linear_infinite] fill-current"
+																size={12}
 															/>
 															<div slot="text">
 																Latest exchange of the refresh token did not succeed. Error: {refresh_error}
@@ -633,12 +716,11 @@
 														</Popover>
 													{:else if is_expired}
 														<Popover>
-															<Icon
-																class="text-yellow-600 animate-[pulse_5s_linear_infinite]"
-																data={faCircle}
-																scale={0.7}
-																label="Variable is expired"
+															<Circle
+																class="text-yellow-600 animate-[pulse_5s_linear_infinite] fill-current"
+																size={12}
 															/>
+
 															<div slot="text">
 																The access_token is expired, it will get renewed the next time this
 																variable is fetched or you can request is to be refreshed in the
@@ -647,11 +729,9 @@
 														</Popover>
 													{:else}
 														<Popover>
-															<Icon
-																class="text-green-600 animate-[pulse_5s_linear_infinite]"
-																data={faCircle}
-																scale={0.7}
-																label="Variable is tied to an OAuth app"
+															<Circle
+																class="text-green-600 animate-[pulse_5s_linear_infinite] fill-current"
+																size={12}
 															/>
 															<div slot="text">
 																The resource was connected through OAuth and the token is not
@@ -662,21 +742,20 @@
 												</div>
 											{/if}
 										</div>
-									</td>
-									<td>
+									</Cell>
+									<Cell>
 										<Dropdown
-											placement="bottom-end"
-											dropdownItems={[
+											items={[
 												{
 													displayName: !canWrite ? 'View Permissions' : 'Share',
-													icon: faShare,
+													icon: Share,
 													action: () => {
 														shareModal.openDrawer?.(path, 'resource')
 													}
 												},
 												{
 													displayName: 'Edit',
-													icon: faEdit,
+													icon: Pen,
 													disabled: !canWrite,
 													action: () => {
 														resourceEditor?.initEdit?.(path)
@@ -684,7 +763,7 @@
 												},
 												{
 													displayName: 'Deploy to prod/staging',
-													icon: faFileExport,
+													icon: FileUp,
 													action: () => {
 														deploymentDrawer.openDrawer(path, 'resource')
 													}
@@ -692,9 +771,11 @@
 												{
 													displayName: 'Delete',
 													disabled: !canWrite,
-													icon: faTrash,
+													icon: Trash,
 													type: 'delete',
 													action: (event) => {
+														// TODO
+														// @ts-ignore
 														if (event?.shiftKey) {
 															deleteResource(path, account)
 														} else {
@@ -708,7 +789,7 @@
 													? [
 															{
 																displayName: 'Refresh token',
-																icon: faRefresh,
+																icon: RotateCw,
 																action: async () => {
 																	await OauthService.refreshToken({
 																		workspace: $workspaceStore ?? '',
@@ -725,16 +806,12 @@
 													: [])
 											]}
 										/>
-									</td>
-								</tr>
+									</Cell>
+								</Row>
 							{/each}
-						{:else if resources}
-							<tr> No resources to display</tr>
-						{:else}
-							<tr>Loading...</tr>
 						{/if}
 					</tbody>
-				</TableCustom>
+				</DataTable>
 			{/if}
 		</div>
 	{:else if tab == 'types'}
@@ -744,18 +821,20 @@
 				<Skeleton layout={[[4], 0.7]} />
 			{/each}
 		{:else}
-			<div class="overflow-auto">
-				<TableCustom>
-					<tr slot="header-row">
-						<th>name</th>
-						<th>description</th>
-						<th />
-					</tr>
-					<tbody slot="body">
+			<div class="overflow-auto mt-4">
+				<DataTable>
+					<Head>
+						<Row>
+							<Cell head first>Name</Cell>
+							<Cell head>Description</Cell>
+							<Cell head last />
+						</Row>
+					</Head>
+					<tbody class="divide-y bg-surface">
 						{#if resourceTypes}
 							{#each resourceTypes as { name, description, schema, canWrite }}
-								<tr>
-									<td>
+								<Row>
+									<Cell first>
 										<a
 											href="#{name}"
 											on:click={() => {
@@ -770,13 +849,13 @@
 										>
 											<IconedResourceType after={true} {name} />
 										</a>
-									</td>
-									<td>
-										<span class="text-tertiary text-xs">
+									</Cell>
+									<Cell>
+										<span class="text-tertiary text-xs w-96 flex flex-wrap whitespace-pre-wrap">
 											{removeMarkdown(truncate(description ?? '', 200))}
 										</span>
-									</td>
-									<td>
+									</Cell>
+									<Cell last>
 										{#if !canWrite}
 											<Badge>
 												Shared globally
@@ -788,19 +867,19 @@
 										{:else if $userStore?.is_admin || $userStore?.is_super_admin}
 											<div class="flex flex-row-reverse gap-2">
 												<Button
-													size="sm"
+													size="xs"
 													color="red"
 													variant="border"
-													startIcon={{ icon: faTrash }}
+													btnClasses="border-0"
+													startIcon={{ icon: Trash }}
 													on:click={() => handleDeleteResourceType(name)}
 												>
 													Delete
 												</Button>
 												<Button
-													size="sm"
-													variant="border"
-													color="dark"
-													startIcon={{ icon: faPen }}
+													size="xs"
+													color="light"
+													startIcon={{ icon: Pen }}
 													on:click={() => startEditResourceType(name)}
 												>
 													Edit
@@ -815,16 +894,12 @@
 												</Tooltip>
 											</Badge>
 										{/if}
-									</td>
-								</tr>
+									</Cell>
+								</Row>
 							{/each}
-						{:else if resources}
-							<tr> No resources types to display</tr>
-						{:else}
-							<tr>Loading...</tr>
 						{/if}
 					</tbody>
-				</TableCustom>
+				</DataTable>
 			</div>
 		{/if}
 	{/if}
@@ -840,29 +915,3 @@
 		loadResources()
 	}}
 />
-
-<ConfirmationModal
-	open={Boolean(deleteConfirmedCallback)}
-	title="Remove resource"
-	confirmationText="Remove"
-	on:canceled={() => {
-		deleteConfirmedCallback = undefined
-	}}
-	on:confirmed={() => {
-		if (deleteConfirmedCallback) {
-			deleteConfirmedCallback()
-		}
-		deleteConfirmedCallback = undefined
-	}}
->
-	<div class="flex flex-col w-full space-y-4">
-		<span>Are you sure you want to remove this resource?</span>
-		<Alert type="info" title="Bypass confirmation">
-			<div>
-				You can press
-				<Badge color="dark-gray">SHIFT</Badge>
-				while removing a resource to bypass confirmation.
-			</div>
-		</Alert>
-	</div>
-</ConfirmationModal>

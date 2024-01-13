@@ -41,6 +41,28 @@
 		z-index: 5000 !important;
 	}
 
+	.foo {
+		color: red !important;
+	}
+	.autocomplete-list-item-create {
+		@apply !text-primary-inverse !bg-surface-inverse;
+	}
+
+	.autocomplete-list-item {
+		@apply !text-primary !bg-surface text-xs;
+	}
+
+	.autocomplete-list-item.selected {
+		@apply !text-primary-inverse !bg-surface-inverse;
+	}
+
+	.autocomplete-list-item.selected.confirmed {
+		@apply !text-primary-inverse !bg-surface-inverse;
+	}
+
+	.autocomplete-list {
+		@apply !bg-surface;
+	}
 	pre code.hljs {
 		overflow: visible !important;
 	}
@@ -53,7 +75,6 @@
 		border-top-width: 1px !important;
 		border-bottom-width: 0px !important;
 	}
-
 
 	.monaco-editor textarea:focus {
 		box-shadow: none !important;
@@ -80,5 +101,19 @@
 	/* Flow graph viewer -> Svelvet library internal class overwrite */
 	.Node {
 		display: flex !important;
+	}
+}
+@layer utilities {
+	@variants responsive {
+		/* Hide scrollbar for Chrome, Safari and Opera */
+		.no-scrollbar::-webkit-scrollbar {
+			display: none;
+		}
+
+		/* Hide scrollbar for IE, Edge and Firefox */
+		.no-scrollbar {
+			-ms-overflow-style: none; /* IE and Edge */
+			scrollbar-width: none; /* Firefox */
+		}
 	}
 }

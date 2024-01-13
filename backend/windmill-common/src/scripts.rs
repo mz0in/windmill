@@ -42,6 +42,7 @@ pub enum ScriptLang {
     Bigquery,
     Snowflake,
     Graphql,
+    Mssql,
 }
 
 impl ScriptLang {
@@ -58,6 +59,7 @@ impl ScriptLang {
             ScriptLang::Mysql => "mysql",
             ScriptLang::Bigquery => "bigquery",
             ScriptLang::Snowflake => "snowflake",
+            ScriptLang::Mssql => "mssql",
             ScriptLang::Graphql => "graphql",
         }
     }
@@ -166,11 +168,20 @@ pub struct Script {
     pub concurrent_limit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub concurrency_time_window_s: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dedicated_worker: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_error_handler_muted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_ttl: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_after_use: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_unless_cancelled: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -191,6 +202,18 @@ pub struct ListableScript {
     pub draft_only: Option<bool>,
     pub has_deploy_errors: bool,
     pub ws_error_handler_muted: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ScriptHistory {
+    pub script_hash: ScriptHash,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_msg: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ScriptHistoryUpdate {
+    pub deployment_msg: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -229,6 +252,10 @@ pub struct NewScript {
     pub dedicated_worker: Option<bool>,
     pub ws_error_handler_muted: Option<bool>,
     pub priority: Option<i16>,
+    pub timeout: Option<i32>,
+    pub delete_after_use: Option<bool>,
+    pub restart_unless_cancelled: Option<bool>,
+    pub deployment_message: Option<String>,
 }
 
 #[derive(Deserialize)]

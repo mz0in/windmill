@@ -20,6 +20,7 @@
 	import Cell from '../table/Cell.svelte'
 	import Row from '../table/Row.svelte'
 	import ConfirmationModal from '../common/confirmationModal/ConfirmationModal.svelte'
+	import { isCloudHosted } from '$lib/cloud'
 
 	let users: User[] | undefined = undefined
 	let invites: WorkspaceInvite[] = []
@@ -65,7 +66,7 @@
 	async function removeAllInvitesFromDomain() {
 		await Promise.all(
 			invites
-				.filter((x) => x.email.endsWith('@' + auto_invite_domain ?? ''))
+				.filter((x) => (isCloudHosted() ? x.email.endsWith('@' + auto_invite_domain ?? '') : true))
 				.map(({ email, is_admin, operator }) =>
 					WorkspaceService.deleteInvite({
 						workspace: $workspaceStore ?? '',
@@ -78,6 +79,8 @@
 				)
 		)
 	}
+
+	let nbInviteDisplayed = 50
 </script>
 
 <SearchItems
@@ -149,7 +152,7 @@
 						<Cell>
 							<div>
 								<ToggleButtonGroup
-									selected={is_admin ? 'admin' : operator ? 'operator' : 'author'}
+									selected={is_admin ? 'admin' : operator ? 'operator' : 'developer'}
 									on:selected={async (e) => {
 										if (is_admin && email == $userStore?.email && e.detail != 'admin') {
 											sendUserToast(
@@ -182,10 +185,10 @@
 									/>
 
 									<ToggleButton
-										value="author"
+										value="developer"
 										size="xs"
-										label="Author"
-										tooltip="An Author can execute and view scripts/flows/apps, but they can also create new ones."
+										label="Developer"
+										tooltip="A Developer can execute and view scripts/flows/apps, but they can also create new ones and edit those they are allowed to by their path (either u/ or Writer or Admin of their folder found at /f)."
 									/>
 
 									<ToggleButton
@@ -253,13 +256,61 @@
 		</tbody>
 	</DataTable>
 </div>
+
 <PageHeader
 	title="Invites ({invites.length ?? ''})"
 	primary={false}
 	tooltip="Manage invites on your workspace."
 	documentationLink="https://www.windmill.dev/docs/core_concepts/authentification#adding-users-to-a-workspace"
 >
-	<InviteUser on:new={listInvites} />
+	<div class="flex gap-8 items-center">
+		{#if auto_invite_domain != undefined}
+			<Toggle
+				size="sm"
+				bind:checked={operatorOnly}
+				options={{
+					right: `Auto-invited users to join as operators`
+				}}
+				on:change={async (e) => {
+					console.log(e.detail)
+					await removeAllInvitesFromDomain()
+					await WorkspaceService.editAutoInvite({
+						workspace: $workspaceStore ?? '',
+						requestBody: { operator: e.detail, invite_all: !isCloudHosted() }
+					})
+					loadSettings()
+					listInvites()
+				}}
+			/>
+		{/if}
+		<Toggle
+			size="sm"
+			checked={auto_invite_domain != undefined}
+			on:change={async (e) => {
+				await removeAllInvitesFromDomain()
+				await WorkspaceService.editAutoInvite({
+					workspace: $workspaceStore ?? '',
+					requestBody: e.detail
+						? { operator: operatorOnly ?? false, invite_all: !isCloudHosted() }
+						: { operator: undefined }
+				})
+				loadSettings()
+				listInvites()
+			}}
+			disabled={!allowedAutoDomain}
+			options={{
+				right: isCloudHosted()
+					? `Auto-invite anyone from ${
+							auto_invite_domain != undefined ? auto_invite_domain : domain
+					  }`
+					: 'Auto-invite anyone joining the instance'
+			}}
+		/>
+		{#if !allowedAutoDomain}
+			<div class="text-red-400 text-xs mb-2">{domain} domain not allowed for auto-invite</div>
+		{/if}
+		<InviteUser on:new={listInvites} />
+	</div>
 </PageHeader>
 
 <div>
@@ -273,17 +324,52 @@
 		</Head>
 		<tbody class="divide-y bg-surface">
 			{#if invites?.length > 0}
-				{#each invites as { email, is_admin, operator }}
+				{#each invites.slice(0, nbInviteDisplayed) as { email, is_admin, operator }}
 					<Row>
 						<Cell first>{email}</Cell>
 						<Cell>
-							{#if operator}
-								<Badge>Operator</Badge>
-							{:else if is_admin}
-								<Badge>Admin</Badge>
-							{:else}
-								<Badge>Author</Badge>
-							{/if}
+							<div>
+								<ToggleButtonGroup
+									selected={is_admin ? 'admin' : operator ? 'operator' : 'developer'}
+									on:selected={async (e) => {
+										const body =
+											e.detail == 'admin'
+												? { is_admin: true, operator: false }
+												: e.detail == 'operator'
+												? { is_admin: false, operator: true }
+												: { is_admin: false, operator: false }
+										await WorkspaceService.inviteUser({
+											workspace: $workspaceStore ?? '',
+											requestBody: {
+												email,
+												...body
+											}
+										})
+										listUsers()
+									}}
+								>
+									<ToggleButton
+										value="operator"
+										size="xs"
+										label="Operator"
+										tooltip="An operator can only execute and view scripts/flows/apps from your workspace, and only those that he has visibility on."
+									/>
+
+									<ToggleButton
+										value="developer"
+										size="xs"
+										label="Developer"
+										tooltip="A Developer can execute and view scripts/flows/apps, but they can also create new ones and edit those they are allowed to by their path (either u/ or Writer or Admin of their folder found at /f)."
+									/>
+
+									<ToggleButton
+										value="admin"
+										size="xs"
+										label="Admin"
+										tooltip="An admin has full control over a specific Windmill workspace, including the ability to manage users, edit entities, and control permissions within the workspace."
+									/>
+								</ToggleButtonGroup>
+							</div>
 						</Cell>
 						<Cell last>
 							<button
@@ -314,68 +400,13 @@
 			{/if}
 		</tbody>
 	</DataTable>
-</div>
-
-<PageHeader
-	title="Auto Invite"
-	tooltip="Auto invite to the workspace users from your domain."
-	documentationLink="https://www.windmill.dev/docs/core_concepts/authentification#auto-invite"
-	primary={false}
-/>
-<div class="flex gap-2">
-	{#if auto_invite_domain != domain}
-		<div>
-			<Button
-				disabled={!allowedAutoDomain}
-				on:click={async () => {
-					await WorkspaceService.editAutoInvite({
-						workspace: $workspaceStore ?? '',
-						requestBody: { operator: false }
-					})
-					loadSettings()
-					listInvites()
-				}}>Set auto-invite to {domain}</Button
-			>
-		</div>
-	{/if}
-	{#if auto_invite_domain}
-		<div class="flex flex-col gap-y-2">
-			<Toggle
-				bind:checked={operatorOnly}
-				options={{
-					right: `Auto-invited users to join as operators`
-				}}
-				on:change={async (e) => {
-					await removeAllInvitesFromDomain()
-					await WorkspaceService.editAutoInvite({
-						workspace: $workspaceStore ?? '',
-						requestBody: { operator: e.detail }
-					})
-					loadSettings()
-					listInvites()
-				}}
-			/>
-			<div>
-				<Button
-					on:click={async () => {
-						await removeAllInvitesFromDomain()
-						await WorkspaceService.editAutoInvite({
-							workspace: $workspaceStore ?? '',
-							requestBody: { operator: undefined }
-						})
-						loadSettings()
-						listInvites()
-					}}
-				>
-					Unset auto-invite from {auto_invite_domain} domain
-				</Button>
-			</div>
-		</div>
+	{#if invites && invites?.length > 50 && nbInviteDisplayed < invites.length}
+		<span class="text-xs"
+			>{nbInviteDisplayed} invites out of {invites.length}
+			<button class="ml-4" on:click={() => (nbInviteDisplayed += 50)}>load 50 more</button></span
+		>
 	{/if}
 </div>
-{#if !allowedAutoDomain}
-	<div class="text-red-400 text-xs mb-2">{domain} domain not allowed for auto-invite</div>
-{/if}
 
 <ConfirmationModal
 	open={Boolean(deleteConfirmedCallback)}

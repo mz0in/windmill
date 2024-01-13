@@ -30,6 +30,7 @@
 	export let extraKey: string | undefined = undefined
 	export let preclickAction: (() => Promise<void>) | undefined = undefined
 	export let recomputeIds: string[] | undefined = undefined
+	export let noInitialize = false
 	export let controls: { left: () => boolean; right: () => boolean | string } | undefined =
 		undefined
 
@@ -77,8 +78,8 @@
 		listItems = Array.isArray(resolvedConfig.items)
 			? resolvedConfig.items.map((item) => {
 					return {
-						label: item.label,
-						value: JSON.stringify(item.value)
+						label: item?.label ?? 'undefined',
+						value: item?.value != undefined ? JSON.stringify(item.value) : 'undefined'
 					}
 			  })
 			: []
@@ -189,7 +190,9 @@
 	/>
 {/each}
 
-<InitializeComponent {id} />
+{#if !noInitialize}
+	<InitializeComponent {id} />
+{/if}
 
 <AlignWrapper {render} {verticalAlignment}>
 	<div

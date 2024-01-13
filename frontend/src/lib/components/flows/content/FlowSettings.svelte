@@ -16,36 +16,28 @@
 	import { enterpriseLicense, workerTags, workspaceStore } from '$lib/stores'
 	import { isCloudHosted } from '$lib/cloud'
 	import { copyToClipboard } from '$lib/utils'
-	import { Icon } from 'svelte-awesome'
-	import { faClipboard } from '@fortawesome/free-solid-svg-icons'
 	import Tooltip from '$lib/components/Tooltip.svelte'
-	import { WorkerService } from '$lib/gen'
-	import { Loader2 } from 'lucide-svelte'
+	import { AlertTriangle, Clipboard } from 'lucide-svelte'
 	import SimpleEditor from '$lib/components/SimpleEditor.svelte'
 	import { schemaToObject } from '$lib/schema'
 	import type { Schema } from '$lib/common'
 	import Section from '$lib/components/Section.svelte'
 	import Label from '$lib/components/Label.svelte'
 	import ErrorHandlerToggleButton from '$lib/components/details/ErrorHandlerToggleButton.svelte'
+	import WorkerTagPicker from '$lib/components/WorkerTagPicker.svelte'
 
-	const { selectedId, flowStore, initialPath, previewArgs } =
+	export let noEditor: boolean
+
+	const { selectedId, flowStore, initialPath, previewArgs, pathStore } =
 		getContext<FlowEditorContext>('FlowEditorContext')
 
-	async function loadWorkerGroups() {
-		if (!$workerTags) {
-			$workerTags = await WorkerService.getCustomTags()
-		}
-	}
-
 	let hostname = BROWSER ? window.location.protocol + '//' + window.location.host : 'SSR'
-	$: url = `${hostname}/api/w/${$workspaceStore}/jobs/run/f/${$flowStore?.path}`
-	$: syncedUrl = `${hostname}/api/w/${$workspaceStore}/jobs/run_wait_result/f/${$flowStore?.path}`
+	$: url = `${hostname}/api/w/${$workspaceStore}/jobs/run/f/${$pathStore}`
+	$: syncedUrl = `${hostname}/api/w/${$workspaceStore}/jobs/run_wait_result/f/${$pathStore}`
 
 	$: if ($selectedId == 'settings-worker-group') {
 		$workerTags = undefined
-		loadWorkerGroups()
 	}
-	$: isStopAfterIfEnabled = Boolean($flowStore.value.skip_expr)
 
 	function asSchema(x: any) {
 		return x as Schema
@@ -55,19 +47,22 @@
 </script>
 
 <div class="h-full overflow-hidden">
-	<FlowCard title="Settings">
+	<FlowCard {noEditor} title="Settings">
 		<div class="h-full flex-1">
 			<Tabs bind:selected={$selectedId}>
 				<Tab value="settings-metadata">Metadata</Tab>
-				<Tab value="settings-schedule">Schedule</Tab>
+				{#if !noEditor}
+					<Tab value="settings-schedule">Schedule</Tab>
+				{/if}
 				<Tab value="settings-same-worker">Shared Directory</Tab>
 				<Tab value="settings-early-stop">Early Stop</Tab>
+				<Tab value="settings-early-return">Early Return</Tab>
 				<Tab value="settings-worker-group">Worker Group</Tab>
 				<Tab value="settings-concurrency">Concurrency</Tab>
 				<Tab value="settings-cache">Cache</Tab>
 
 				<svelte:fragment slot="content">
-					<TabContent value="settings-metadata" class="p-4 h-full">
+					<TabContent value="settings-metadata" class="p-4 h-full overflow-auto">
 						<div class="h-full gap-8 flex flex-col">
 							<Label label="Summary">
 								<input
@@ -90,17 +85,19 @@
 								/>
 							</Label>
 
-							<Label label="Path">
-								<Path
-									autofocus={false}
-									bind:this={path}
-									bind:dirty={dirtyPath}
-									bind:path={$flowStore.path}
-									{initialPath}
-									namePlaceholder="flow"
-									kind="flow"
-								/>
-							</Label>
+							{#if !noEditor}
+								<Label label="Path">
+									<Path
+										autofocus={false}
+										bind:this={path}
+										bind:dirty={dirtyPath}
+										bind:path={$pathStore}
+										{initialPath}
+										namePlaceholder="flow"
+										kind="flow"
+									/>
+								</Label>
+							{/if}
 
 							<Label label="Description">
 								<textarea
@@ -137,7 +134,7 @@
 								<svelte:fragment slot="right">
 									<input
 										type="number"
-										class="!w-14 ml-4"
+										class="!w-16 ml-4"
 										disabled={$flowStore.value.priority === undefined}
 										bind:value={$flowStore.value.priority}
 										on:focus
@@ -155,7 +152,7 @@
 							<div class="flex flex-row items-center gap-1">
 								<ErrorHandlerToggleButton
 									kind="flow"
-									scriptOrFlowPath={$flowStore.path}
+									scriptOrFlowPath={$pathStore}
 									bind:errorHandlerMuted={$flowStore.ws_error_handler_muted}
 									iconOnly={false}
 								/>
@@ -209,7 +206,7 @@
 													>
 														{url}
 														<span class="text-secondary ml-2">
-															<Icon data={faClipboard} />
+															<Clipboard />
 														</span>
 													</a>
 												</li>
@@ -225,7 +222,7 @@
 													>
 														{syncedUrl}
 														<span class="text-secondary ml-2">
-															<Icon data={faClipboard} />
+															<Clipboard />
 														</span>
 													</a>
 												</li>
@@ -315,46 +312,56 @@
 					</TabContent>
 
 					<TabContent value="settings-worker-group" class="p-4 flex flex-col">
-						<Alert type="info" title="Worker Group">
-							When a worker group is defined at the flow level, any steps inside the flow will run
-							on that worker group, regardless of the steps' worker group. If no worker group is
-							defined, the flow controls will be executed by the default worker group 'flow' and the
-							steps will be executed in their respective worker group.
+						<Alert type="info" title="Worker Group Tag (Queue)">
+							When a worker group tag is defined at the flow level, any steps inside the flow will
+							run on any worker group that listen to that tag, regardless of the steps' tag. If no
+							worker group tags is defined, the flow controls will be executed with the default tag
+							'flow' and the steps will be executed with their respective tag
 						</Alert>
-						<span class="my-4 text-lg font-bold">Worker Group</span>
-						{#if $workerTags}
-							{#if $workerTags?.length > 0}
-								<div class="w-40">
-									<select
-										placeholder="Worker group"
-										bind:value={$flowStore.tag}
-										on:change={(e) => {
-											if ($flowStore.tag == '') {
-												$flowStore.tag = undefined
-											}
-										}}
+						<span class="my-4 text-lg font-bold">Worker Group Tag (Queue)</span>
+						<WorkerTagPicker bind:tag={$flowStore.tag} />
+
+						<div class="py-6" />
+						<span class="my-4 text-lg font-bold flex items-baseline gap-8"
+							>Dedicated Worker {#if !$enterpriseLicense}<div
+									class="flex text-xs items-center gap-1 text-yellow-500 whitespace-nowrap"
+								>
+									<AlertTriangle size={16} />
+									EE only
+								</div>{/if}</span
+						>
+
+						<Toggle
+							disabled={!$enterpriseLicense || isCloudHosted()}
+							size="sm"
+							checked={Boolean($flowStore.dedicated_worker)}
+							on:change={() => {
+								if ($flowStore.dedicated_worker) {
+									$flowStore.dedicated_worker = undefined
+								} else {
+									$flowStore.dedicated_worker = true
+								}
+							}}
+							options={{
+								right: 'Flow is run on dedicated workers'
+							}}
+						/>
+						{#if $flowStore.dedicated_worker}
+							<div class="py-2">
+								<Alert type="info" title="Require dedicated workers">
+									One worker in a worker group needs to be configured with dedicated worker set to: <pre
+										>{$workspaceStore}:flow/{$pathStore}</pre
 									>
-										{#if $flowStore.tag}
-											<option value="">reset to default</option>
-										{:else}
-											<option value="" disabled selected>Worker Group</option>
-										{/if}
-										{#each $workerTags ?? [] as tag (tag)}
-											<option value={tag}>{tag}</option>
-										{/each}
-									</select>
-								</div>
-							{:else}
-								<div class="text-sm text-secondary italic mb-2">
-									No custom worker group defined on this instance. See <a
-										href="https://www.windmill.dev/docs/core_concepts/worker_groups"
-										target="_blank">documentation</a
-									>
-								</div>
-							{/if}
-						{:else}
-							<Loader2 class="animate-spin" />
+								</Alert>
+							</div>
 						{/if}
+						<svelte:fragment slot="header">
+							<Tooltip
+								>In this mode, every scripts of this flow is run on the workers dedicated to this
+								flow that keep the scripts "hot" so that there is not cold start cost incurred.
+								Steps can run at >1500 rps in this mode.</Tooltip
+							>
+						</svelte:fragment>
 					</TabContent>
 					<TabContent value="settings-early-stop" class="p-4">
 						<Section label="Early stop">
@@ -365,9 +372,9 @@
 								</Tooltip>
 							</svelte:fragment>
 							<Toggle
-								checked={isStopAfterIfEnabled}
+								checked={Boolean($flowStore.value.skip_expr)}
 								on:change={() => {
-									if (isStopAfterIfEnabled && $flowStore.value.skip_expr) {
+									if (Boolean($flowStore.value.skip_expr) && $flowStore.value.skip_expr) {
 										$flowStore.value.skip_expr = undefined
 									} else {
 										$flowStore.value.skip_expr = 'flow_input.foo == undefined'
@@ -400,22 +407,60 @@
 							</div>
 						</Section>
 					</TabContent>
+					<TabContent value="settings-early-return" class="p-4">
+						<Section label="Early Return">
+							<div class="py-2">
+								<Alert type="info" title="Return sync endpoints early">
+									If defined, sync endpoints will return early at the node defined here while the
+									rest of the flow continue asynchronously.
+								</Alert>
+							</div>
+							<Toggle
+								checked={Boolean($flowStore.value.early_return)}
+								on:change={() => {
+									if (Boolean($flowStore.value.early_return) && $flowStore.value.early_return) {
+										$flowStore.value.early_return = undefined
+									} else {
+										$flowStore.value.early_return = $flowStore.value.modules?.[0]?.id ?? 'a'
+									}
+								}}
+								options={{
+									right: 'Early return sync endpoint at a top-level step'
+								}}
+							/>
+
+							<div
+								class="border max-w-[120px] mt-2 p-2 flex flex-col {$flowStore.value.early_return
+									? ''
+									: 'bg-surface-secondary'}"
+							>
+								<select
+									name="oauth_name"
+									id="oauth_name"
+									bind:value={$flowStore.value.early_return}
+								>
+									<option value={undefined}>Node's id</option>
+									{#each $flowStore.value?.modules?.map((x) => x.id) as name}
+										<option value={name}>{name}</option>
+									{/each}
+								</select>
+							</div>
+						</Section>
+					</TabContent>
 
 					<TabContent value="settings-concurrency" class="p-4 flex flex-col">
-						<Section label="Concurrency Limits">
+						<Section label="Concurrency Limits" eeOnly>
 							<svelte:fragment slot="header">
 								<Tooltip>Allowed concurrency within a given timeframe</Tooltip>
 							</svelte:fragment>
-							{#if !$enterpriseLicense}
-								<Alert
-									title="Concurrency limits are going to become an Enterprise Edition feature"
-									type="warning"
-								/>
-							{/if}
 							<div class="flex flex-col gap-4">
 								<Label label="Max number of executions within the time window">
 									<div class="flex flex-row gap-2 max-w-sm">
-										<input bind:value={$flowStore.value.concurrent_limit} type="number" />
+										<input
+											disabled={!$enterpriseLicense}
+											bind:value={$flowStore.value.concurrent_limit}
+											type="number"
+										/>
 										<Button
 											size="sm"
 											color="light"
@@ -427,7 +472,10 @@
 									</div>
 								</Label>
 								<Label label="Time window in seconds">
-									<SecondsInput bind:seconds={$flowStore.value.concurrency_time_window_s} />
+									<SecondsInput
+										disabled={!$enterpriseLicense}
+										bind:seconds={$flowStore.value.concurrency_time_window_s}
+									/>
 								</Label>
 							</div>
 						</Section>

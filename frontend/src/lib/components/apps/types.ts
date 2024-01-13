@@ -75,7 +75,7 @@ export type RichConfigurations = Record<string, RichConfiguration>
 
 export type StaticRichConfigurations = Record<
 	string,
-	RichConfigurationT<GeneralAppInput & (StaticAppInput | EvalAppInput)>
+	RichConfigurationT<GeneralAppInput & (StaticAppInput | EvalAppInput | EvalV2AppInput)>
 >
 
 export interface BaseAppComponent extends Partial<Aligned> {
@@ -173,7 +173,7 @@ export type ListContext = Writable<{
 	disabled: boolean
 }>
 
-export type ListInputs = {set: (id: string, value: any) => void, remove: (id: string) => void}
+export type ListInputs = { set: (id: string, value: any) => void; remove: (id: string) => void }
 
 export type GroupContext = Writable<Record<string, any>>
 
@@ -189,13 +189,14 @@ export type AppViewerContext = {
 	mode: Writable<EditorMode>
 	connectingInput: Writable<ConnectingInput>
 	breakpoint: Writable<EditorBreakpoint>
+	bgRuns: Writable<string[]>
 	runnableComponents: Writable<
 		Record<
 			string,
 			{
 				autoRefresh: boolean
 				refreshOnStart?: boolean
-				cb: ((inlineScript?: InlineScript) => CancelablePromise<void>)[]
+				cb: ((inlineScript?: InlineScript, setRunnableJob?: boolean) => CancelablePromise<void>)[]
 			}
 		>
 	>
@@ -215,8 +216,8 @@ export type AppViewerContext = {
 				result?: string
 				error?: any
 				transformer?: { result?: string; error?: string }
+				created_at?: number
 				started_at?: number
-				started_compute_at?: number
 				duration_ms?: number
 			}
 		>
@@ -247,6 +248,7 @@ export type AppViewerContext = {
 				validate?: (key: string) => void
 				invalidate?: (key: string, error: string) => void
 				validateAll?: () => void
+				clearFiles?: () => void
 			}
 		>
 	>
@@ -259,6 +261,13 @@ export type AppViewerContext = {
 
 export type AppEditorContext = {
 	yTop: Writable<number>
+	runnableJobEditorPanel: Writable<{
+		focused: boolean
+		jobs: Record<string, string>
+		frontendJobs: Record<string, any>
+		width: number
+	}>
+	evalPreview: Writable<Record<string, any>>
 	componentActive: Writable<boolean>
 	dndItem: Writable<Record<string, (x: number, y: number, topY: number) => void>>
 	refreshComponents: Writable<(() => void) | undefined>

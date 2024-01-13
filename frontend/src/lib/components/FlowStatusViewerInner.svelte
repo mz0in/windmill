@@ -1,28 +1,40 @@
 <script lang="ts">
-	import { FlowStatusModule, Job, JobService, type FlowStatus } from '$lib/gen'
+	import {
+		FlowStatusModule,
+		Job,
+		JobService,
+		type FlowStatus,
+		CompletedJob,
+		QueuedJob,
+		type FlowModuleValue
+	} from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
 	import FlowJobResult from './FlowJobResult.svelte'
 	import FlowPreviewStatus from './preview/FlowPreviewStatus.svelte'
-	import Icon from 'svelte-awesome'
-	import { faChevronDown, faChevronUp, faHourglassHalf } from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher, getContext } from 'svelte'
 	import { onDestroy } from 'svelte'
 	import { Badge, Button, Tab } from './common'
 	import DisplayResult from './DisplayResult.svelte'
 	import Tabs from './common/tabs/Tabs.svelte'
-	import { FlowGraph, type FlowStatusViewerContext } from './graph'
+	import {
+		FlowGraph,
+		type DurationStatus,
+		type FlowStatusViewerContext,
+		type GraphModuleState
+	} from './graph'
 	import ModuleStatus from './ModuleStatus.svelte'
 	import { emptyString, msToSec, truncateRev } from '$lib/utils'
 	import JobArgs from './JobArgs.svelte'
-	import { Loader2 } from 'lucide-svelte'
+	import { ChevronDown, Hourglass, Loader2 } from 'lucide-svelte'
 	import FlowStatusWaitingForEvents from './FlowStatusWaitingForEvents.svelte'
 	import { deepEqual } from 'fast-equals'
 	import FlowTimeline from './FlowTimeline.svelte'
 	import { dfs } from './flows/dfs'
+	import { writable, type Writable } from 'svelte/store'
 
 	const dispatch = createEventDispatcher()
 
-	let { flowStateStore, flowModuleStates, retryStatus, suspendStatus, durationStatuses } =
+	let { flowStateStore, retryStatus, suspendStatus } =
 		getContext<FlowStatusViewerContext>('FlowStatusViewer')
 
 	export let jobId: string
@@ -31,9 +43,13 @@
 		| {
 				moduleId: string
 				flowJobs: string[]
+				length: number
 		  }
 		| undefined = undefined
 	export let job: Job | undefined = undefined
+
+	//only useful when forloops are optimized and the job doesn't contain the mod id anymore
+	export let innerModule: FlowModuleValue | undefined = undefined
 
 	export let render = true
 
@@ -41,11 +57,18 @@
 
 	export let selectedNode: string | undefined = undefined
 
+	export let globalModuleStates: Writable<Record<string, GraphModuleState>>[]
+	export let globalDurationStatuses: Writable<Record<string, DurationStatus>>[]
+	export let childFlow: boolean = false
+
 	let jobResults: any[] = []
 	let jobFailures: boolean[] = []
 
 	let forloop_selected = ''
 	let timeout: NodeJS.Timeout
+
+	let localModuleStates: Writable<Record<string, GraphModuleState>> = writable({})
+	let localDurationStatuses: Writable<Record<string, DurationStatus>> = writable({})
 
 	let lastSize = 0
 	$: {
@@ -53,6 +76,65 @@
 		if (len != lastSize) {
 			updateForloop(len)
 		}
+	}
+
+	function setModuleState(key: string, value: GraphModuleState) {
+		if (!deepEqual($localModuleStates[key], value)) {
+			$localModuleStates[key] = value
+
+			globalModuleStates.forEach((s) => {
+				s.update((x) => {
+					x[key] = value
+					return x
+				})
+			})
+		}
+	}
+
+	function setDurationStatusByJob(key: string, id: string, value: any) {
+		if (!deepEqual($localDurationStatuses[key]?.byJob[id], value)) {
+			$localDurationStatuses[key].byJob[id] = value
+			globalDurationStatuses.forEach((s) => {
+				s.update((x) => {
+					x[key].byJob[id] = value
+					return x
+				})
+			})
+		}
+	}
+
+	function initializeByJob(modId: string) {
+		if ($localDurationStatuses[modId] == undefined) {
+			$localDurationStatuses[modId] = { byJob: {} }
+		}
+		let prefixed = modId
+		globalDurationStatuses.forEach((x) =>
+			x.update((x) => {
+				if (x[prefixed] == undefined) {
+					x[prefixed] = { byJob: {} }
+				}
+				return x
+			})
+		)
+	}
+
+	if (flowJobIds) {
+		let common = {
+			iteration_from: Math.max(flowJobIds.flowJobs.length - 20, 0),
+			iteration_total: flowJobIds?.length
+		}
+		let modId = flowJobIds?.moduleId ?? ''
+		$localDurationStatuses[modId] = {
+			...($localDurationStatuses[modId] ?? { byJob: {} }),
+			...common
+		}
+		let prefixed = modId
+		globalDurationStatuses.forEach((x) =>
+			x.update((x) => {
+				x[prefixed] = { ...(x[prefixed] ?? { byJob: {} }), ...common }
+				return x
+			})
+		)
 	}
 
 	function updateForloop(len: number) {
@@ -79,19 +161,18 @@
 	}
 
 	function updateInnerModules() {
-		if ($flowModuleStates) {
+		if ($localModuleStates) {
 			innerModules.forEach((mod, i) => {
 				if (
 					mod.type === FlowStatusModule.type.WAITING_FOR_EVENTS &&
-					$flowModuleStates?.[innerModules?.[i - 1]?.id ?? '']?.type ==
+					$localModuleStates?.[innerModules?.[i - 1]?.id ?? '']?.type ==
 						FlowStatusModule.type.SUCCESS
 				) {
-					$flowModuleStates[mod.id ?? ''] = { type: mod.type, args: job?.args }
+					setModuleState(mod.id ?? '', { type: mod.type, args: job?.args })
 				} else if (
 					mod.type === FlowStatusModule.type.WAITING_FOR_EXECUTOR &&
-					$flowModuleStates[mod.id ?? '']?.scheduled_for == undefined
+					$localModuleStates[mod.id ?? '']?.scheduled_for == undefined
 				) {
-					console.debug('updating', mod.job)
 					JobService.getJob({
 						workspace: workspaceId ?? $workspaceStore ?? '',
 						id: mod.job ?? ''
@@ -104,8 +185,8 @@
 								parent_module: mod['parent_module'],
 								args: job?.args
 							}
-							if (!deepEqual(newState, $flowModuleStates[mod.id ?? ''])) {
-								$flowModuleStates[mod.id ?? ''] = newState
+							if (!deepEqual(newState, $localModuleStates[mod.id ?? ''])) {
+								setModuleState(mod.id ?? '', newState)
 							}
 						})
 						.catch((e) => {
@@ -142,6 +223,8 @@
 
 	async function updateJobId() {
 		if (jobId !== job?.id) {
+			$localModuleStates = {}
+			$localDurationStatuses = {}
 			flowTimeline?.reset()
 			timeout && clearTimeout(timeout)
 			innerModules = []
@@ -169,29 +252,32 @@
 
 	function onJobsLoaded(mod: FlowStatusModule, job: Job): void {
 		if (mod.id && (mod.flow_jobs ?? []).length == 0) {
-			if ($flowStateStore?.[mod.id]) {
-				$flowStateStore[mod.id] = {
-					...$flowStateStore[mod.id],
-					previewResult: job['result'],
-					previewArgs: job.args
+			if (!childFlow) {
+				if ($flowStateStore?.[mod.id]) {
+					$flowStateStore[mod.id] = {
+						...$flowStateStore[mod.id],
+						previewResult: job['result'],
+						previewArgs: job.args
+					}
 				}
 			}
-			if ($durationStatuses[mod.id] == undefined) {
-				$durationStatuses[mod.id] = {}
-			}
+			initializeByJob(mod.id)
 			let started_at = job.started_at ? new Date(job.started_at).getTime() : undefined
 			if (job.type == 'QueuedJob') {
-				$flowModuleStates[mod.id] = {
+				setModuleState(mod.id, {
 					type: FlowStatusModule.type.IN_PROGRESS,
 					job_id: job.id,
 					logs: job.logs,
 					args: job.args,
 					started_at,
 					parent_module: mod['parent_module']
-				}
-				$durationStatuses[mod.id][job.id] = { started_at }
+				})
+				setDurationStatusByJob(mod.id, job.id, {
+					created_at: job.created_at ? new Date(job.created_at).getTime() : undefined,
+					started_at
+				})
 			} else {
-				$flowModuleStates[mod.id] = {
+				setModuleState(mod.id, {
 					args: job.args,
 					type: job['success'] ? FlowStatusModule.type.SUCCESS : FlowStatusModule.type.FAILURE,
 					logs: job.logs,
@@ -200,14 +286,111 @@
 					parent_module: mod['parent_module'],
 					duration_ms: job['duration_ms'],
 					started_at: started_at,
+					iteration: mod.iterator?.itered?.length,
 					iteration_total: mod.iterator?.itered?.length
 					// retries: $flowStateStore?.raw_flow
-				}
-				$durationStatuses[mod.id][job.id] = { started_at, duration_ms: job['duration_ms'] }
+				})
+				setDurationStatusByJob(mod.id, job.id, {
+					created_at: job.created_at ? new Date(job.created_at).getTime() : undefined,
+					started_at,
+					duration_ms: job['duration_ms']
+				})
 			}
 		}
 	}
-	let showEmbeddeds = -20
+
+	function innerJobLoaded(
+		jobLoaded: (QueuedJob & { type: 'QueuedJob' }) | (CompletedJob & { type: 'CompletedJob' }),
+		j: number
+	) {
+		let modId = flowJobIds?.moduleId
+		if (modId) {
+			if ($flowStateStore?.[modId]) {
+				if (!childFlow) {
+					if (
+						!$flowStateStore[modId].previewResult ||
+						!Array.isArray($flowStateStore[modId]?.previewResult)
+					) {
+						$flowStateStore[modId].previewResult = []
+					}
+					$flowStateStore[modId].previewArgs = jobLoaded.args
+				}
+				if (jobLoaded.type == 'QueuedJob') {
+					jobResults[j] = 'Job in progress ...'
+				} else {
+					$flowStateStore[modId].previewResult[j] = jobLoaded.result
+					jobResults[j] = jobLoaded.result
+					jobFailures[j] = jobLoaded.success === false
+				}
+			}
+
+			let started_at = jobLoaded.started_at ? new Date(jobLoaded.started_at).getTime() : undefined
+
+			let created_at = jobLoaded.created_at ? new Date(jobLoaded.created_at).getTime() : undefined
+
+			let job_id = jobLoaded.id
+			initializeByJob(modId)
+
+			if (jobLoaded.type == 'QueuedJob') {
+				setModuleState(modId, {
+					type: FlowStatusModule.type.IN_PROGRESS,
+					started_at,
+					logs: jobLoaded.logs,
+					job_id,
+					args: jobLoaded.args,
+					iteration: flowJobIds?.flowJobs.length,
+					iteration_total: flowJobIds?.length,
+					duration_ms: undefined
+				})
+
+				setDurationStatusByJob(modId, job_id, {
+					created_at,
+					started_at
+				})
+			} else {
+				setModuleState(modId, {
+					started_at,
+					args: jobLoaded.args,
+					type: jobLoaded.success ? FlowStatusModule.type.SUCCESS : FlowStatusModule.type.FAILURE,
+					logs: 'All jobs completed',
+					result: jobResults,
+					job_id,
+					iteration: flowJobIds?.flowJobs.length,
+					iteration_total: flowJobIds?.length,
+					duration_ms: undefined,
+					isListJob: true
+				})
+				setDurationStatusByJob(modId, job_id, {
+					created_at,
+					started_at,
+					duration_ms: jobLoaded.duration_ms
+				})
+			}
+
+			if (jobLoaded.job_kind == 'script' || jobLoaded.job_kind == 'preview') {
+				let id: string | undefined = undefined
+				if (innerModule?.type == 'forloopflow') {
+					id = innerModule?.modules?.[0]?.id
+				}
+				if (id) {
+					setModuleState(id, {
+						...($localModuleStates[modId] ?? {}),
+						iteration: undefined,
+						isListJob: false,
+						iteration_total: undefined
+					})
+					initializeByJob(id)
+
+					setDurationStatusByJob(
+						id,
+						job_id,
+
+						$localDurationStatuses[modId].byJob[job_id]
+					)
+				}
+			}
+		}
+	}
 
 	let flowTimeline: FlowTimeline
 
@@ -222,14 +405,24 @@
 			<div class="h-8" />
 		{/if} -->
 		{#if isListJob}
-			{#if (flowJobIds?.flowJobs.length ?? 0) > 20}
-				<p class="text-tertiary italic">
-					For performance reasons, only the last 20 items are shown. <button
-						class="text-primary underline"
+			{@const lenToAdd = Math.min(
+				20,
+				$localDurationStatuses[flowJobIds?.moduleId ?? '']?.iteration_from ?? 0
+			)}
+
+			{#if (flowJobIds?.flowJobs.length ?? 0) > 20 && lenToAdd > 0}
+				<p class="text-tertiary italic text-xs">
+					For performance reasons, only the last 20 items are shown by default <button
+						class="text-primary underline ml-4"
 						on:click={() => {
-							showEmbeddeds -= 20
+							let r = $localDurationStatuses[flowJobIds?.moduleId ?? '']
+							if (r.iteration_from) {
+								r.iteration_from -= lenToAdd
+								$localDurationStatuses = $localDurationStatuses
+								globalDurationStatuses.forEach((x) => x.update((x) => x))
+							}
 						}}
-						>Load 20 prior
+						>Load {lenToAdd} prior
 					</button>
 				</p>
 			{/if}
@@ -299,21 +492,30 @@
 		{/if}
 		<div class={selected != 'sequence' ? 'hidden' : ''}>
 			{#if isListJob}
+				{@const lenToAdd = Math.min(
+					20,
+					$localDurationStatuses[flowJobIds?.moduleId ?? '']?.iteration_from ?? 0
+				)}
 				<h3 class="text-md leading-6 font-bold text-tertiary border-b mb-4">
 					Embedded flows: ({flowJobIds?.flowJobs.length} items)
 				</h3>
-				{#if (flowJobIds?.flowJobs.length ?? 0) > 20}
-					<p class="text-tertiary italic">
-						For performance reasons, only the last 20 items are shown. <button
-							class="text-primary underline"
+				{#if (flowJobIds?.flowJobs.length ?? 0) > 20 && lenToAdd > 0}
+					<p class="text-tertiary italic text-xs">
+						For performance reasons, only the last 20 items are shown by default <button
+							class="text-primary underline ml-4"
 							on:click={() => {
-								showEmbeddeds -= 20
+								let r = $localDurationStatuses[flowJobIds?.moduleId ?? '']
+								if (r.iteration_from) {
+									r.iteration_from -= lenToAdd
+									$localDurationStatuses = $localDurationStatuses
+									globalDurationStatuses.forEach((x) => x.update((x) => x))
+								}
 							}}
-							>Load 20 prior
+							>Load {lenToAdd} prior
 						</button>
 					</p>
 				{/if}
-				{#each (flowJobIds?.flowJobs.length ?? 0) > 20 ? flowJobIds?.flowJobs?.slice(showEmbeddeds) ?? [] : flowJobIds?.flowJobs ?? [] as loopJobId, j}
+				{#each (flowJobIds?.flowJobs.length ?? 0) > 20 ? flowJobIds?.flowJobs?.slice($localDurationStatuses[flowJobIds?.moduleId ?? '']?.iteration_from ?? 0) ?? [] : flowJobIds?.flowJobs ?? [] as loopJobId, j (loopJobId)}
 					{#if render}
 						<Button
 							variant={forloop_selected === loopJobId ? 'contained' : 'border'}
@@ -330,93 +532,35 @@
 									forloop_selected = loopJobId
 								}
 							}}
+							endIcon={{
+								icon: ChevronDown,
+								classes: forloop_selected == loopJobId ? '!rotate-180' : ''
+							}}
 						>
-							<span class="truncate">
-								#{(flowJobIds?.flowJobs.length ?? 0) > 20
-									? (flowJobIds?.flowJobs.length ?? 0) + showEmbeddeds + j + 1
-									: j + 1}: {loopJobId}
+							<span class="truncate font-mono">
+								#{($localDurationStatuses[flowJobIds?.moduleId ?? '']?.iteration_from ?? 0) +
+									j +
+									1}: {loopJobId}
 							</span>
-
-							<Icon
-								class="ml-2"
-								data={forloop_selected == loopJobId ? faChevronUp : faChevronDown}
-								scale={0.8}
-							/>
 						</Button>
 					{/if}
+
 					<div class="border p-6" class:hidden={forloop_selected != loopJobId}>
 						<svelte:self
+							{childFlow}
+							globalModuleStates={[localModuleStates, ...globalModuleStates]}
+							globalDurationStatuses={[localDurationStatuses, ...globalDurationStatuses]}
 							render={forloop_selected == loopJobId && selected == 'sequence' && render}
 							{workspaceId}
 							jobId={loopJobId}
-							on:jobsLoaded={(e) => {
-								let modId = flowJobIds?.moduleId
-								if (modId) {
-									if ($flowStateStore?.[modId]) {
-										if (
-											!$flowStateStore[modId].previewResult ||
-											!Array.isArray($flowStateStore[modId]?.previewResult)
-										) {
-											$flowStateStore[modId].previewResult = []
-										}
-										$flowStateStore[modId].previewResult[j] = e.detail.result
-										$flowStateStore[modId].previewArgs = e.detail.args
-										if (e.detail.type == 'QueuedJob') {
-											jobResults[j] = 'Job in progress ...'
-										} else {
-											jobResults[j] = e.detail.result
-											jobFailures[j] = e.detail.success === false
-										}
-									}
-
-									let started_at = e.detail.started_at
-										? new Date(e.detail.started_at).getTime()
-										: undefined
-
-									let job_id = e.detail.id
-									if ($durationStatuses[modId] == undefined) {
-										$durationStatuses[modId] = {}
-									}
-									if (e.detail.type == 'QueuedJob') {
-										$flowModuleStates[modId] = {
-											type: FlowStatusModule.type.IN_PROGRESS,
-											started_at,
-											logs: e.detail.logs,
-											job_id,
-											args: e.detail.args,
-											iteration_total: flowJobIds?.flowJobs.length,
-											duration_ms: undefined
-										}
-
-										$durationStatuses[modId][job_id] = { started_at }
-									} else {
-										$flowModuleStates[modId] = {
-											started_at,
-											args: e.detail.args,
-											type: e.detail.success
-												? FlowStatusModule.type.SUCCESS
-												: FlowStatusModule.type.FAILURE,
-											logs: 'All jobs completed',
-											result: jobResults,
-											job_id,
-											iteration_total: flowJobIds?.flowJobs.length,
-											duration_ms: e.detail.duration_ms,
-											isListJob: true
-										}
-										$durationStatuses[modId][job_id] = {
-											started_at,
-											duration_ms: e.detail.duration_ms
-										}
-									}
-								}
-							}}
+							on:jobsLoaded={(e) => innerJobLoaded(e.detail, j)}
 						/>
 					</div>
 				{/each}
 			{:else if innerModules.length > 0}
 				<ul class="w-full">
 					<h3 class="text-md leading-6 font-bold text-primary border-b mb-4 py-2">
-						Step-by-step results
+						Step-by-step
 					</h3>
 
 					{#each innerModules as mod, i}
@@ -445,20 +589,30 @@
 							{#if [FlowStatusModule.type.IN_PROGRESS, FlowStatusModule.type.SUCCESS, FlowStatusModule.type.FAILURE].includes(mod.type)}
 								{#if job.raw_flow?.modules[i]?.value.type == 'flow'}
 									<svelte:self
+										globalModuleStates={[]}
+										globalDurationStatuses={[]}
 										render={selected == 'sequence' && render}
 										{workspaceId}
 										jobId={mod.job}
-										on:jobsLoaded={(e) => onJobsLoaded(mod, e.detail)}
+										childFlow
+										on:jobsLoaded={(e) => {
+											onJobsLoaded(mod, e.detail)
+										}}
 									/>
 								{:else}
 									<svelte:self
+										{childFlow}
+										globalModuleStates={[localModuleStates, ...globalModuleStates]}
+										globalDurationStatuses={[localDurationStatuses, ...globalDurationStatuses]}
 										render={selected == 'sequence' && render}
 										{workspaceId}
 										jobId={mod.job}
+										innerModule={mod.flow_jobs ? job.raw_flow?.modules[i]?.value : undefined}
 										flowJobIds={mod.flow_jobs
 											? {
 													moduleId: mod.id,
-													flowJobs: mod.flow_jobs
+													flowJobs: mod.flow_jobs,
+													length: mod.iterator?.itered?.length ?? mod.flow_jobs.length
 											  }
 											: undefined}
 										on:jobsLoaded={(e) => onJobsLoaded(mod, e.detail)}
@@ -467,7 +621,7 @@
 							{:else}
 								<ModuleStatus
 									type={mod.type}
-									scheduled_for={$flowModuleStates?.[mod.id ?? '']?.scheduled_for}
+									scheduled_for={$localModuleStates?.[mod.id ?? '']?.scheduled_for}
 								/>
 							{/if}
 						</li>
@@ -500,8 +654,8 @@
 
 						<FlowGraph
 							download
-							success={isSuccess(job?.['success'])}
-							flowModuleStates={$flowModuleStates}
+							success={jobId != undefined && isSuccess(job?.['success'])}
+							flowModuleStates={$localModuleStates}
 							on:select={(e) => {
 								rightColumnSelect = 'detail'
 								if (typeof e.detail == 'string') {
@@ -530,12 +684,12 @@
 								flowDone={job?.['success'] != undefined}
 								bind:this={flowTimeline}
 								flowModules={dfs(job.raw_flow?.modules ?? [], (x) => x.id)}
-								durationStatuses={$durationStatuses}
+								durationStatuses={localDurationStatuses}
 							/>
 						{:else if rightColumnSelect == 'detail'}
 							<div class="pt-2">
 								{#if selectedNode}
-									{@const node = $flowModuleStates[selectedNode]}
+									{@const node = $localModuleStates[selectedNode]}
 
 									{#if selectedNode == 'end'}
 										<FlowJobResult
@@ -554,14 +708,14 @@
 												<JobArgs args={job.args} />
 											</div>
 										{:else}
-											<p class="p-2">No arguments</p>
+											<p class="p-2 text-secondary">No arguments</p>
 										{/if}
 									{:else if node}
 										<div class="px-2 flex gap-2 min-w-0 overflow-hidden w-full">
 											<ModuleStatus type={node.type} scheduled_for={node.scheduled_for} />
 											{#if node.duration_ms}
 												<Badge>
-													<Icon data={faHourglassHalf} scale={0.6} class="mr-2" />
+													<Hourglass class="mr-2" size={10} />
 													{msToSec(node.duration_ms)} s
 												</Badge>
 											{/if}

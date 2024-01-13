@@ -8,30 +8,17 @@
 		editorConfig,
 		updateOptions
 	} from '$lib/editorUtils'
-	import libStdContent from '$lib/es5.d.ts.txt?raw'
-	import 'monaco-editor/esm/vs/editor/edcore.main'
-	import {
-		editor as meditor,
-		Uri as mUri,
-		languages,
-		Range,
-		KeyMod,
-		KeyCode
-	} from 'monaco-editor/esm/vs/editor/editor.api'
-	import 'monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution'
+	import libStdContent from '$lib/es6.d.ts.txt?raw'
+	import { editor as meditor, Uri as mUri, languages, Range, KeyMod, KeyCode } from 'monaco-editor'
 	import { createEventDispatcher, getContext, onDestroy, onMount } from 'svelte'
 	import type { AppViewerContext } from './apps/types'
 	import { writable } from 'svelte/store'
 	import { buildWorkerDefinition } from './build_workers'
+	import 'monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution'
+	import 'monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution'
 	import 'monaco-editor/esm/vs/language/typescript/monaco.contribution'
-
-	languages.typescript.javascriptDefaults.setCompilerOptions({
-		target: languages.typescript.ScriptTarget.Latest,
-		allowNonTsExtensions: true,
-		noLib: true
-	})
-
-	languages.register({ id: 'template' })
+	import { initializeVscode } from './vscode'
+	import EditorTheme from './EditorTheme.svelte'
 
 	export const conf = {
 		wordPattern:
@@ -362,13 +349,6 @@
 		}
 	}
 
-	// Register a tokens provider for the language
-	languages.registerTokensProviderFactory('template', {
-		create: () => language as languages.IMonarchLanguage
-	})
-
-	languages.setLanguageConfiguration('template', conf)
-
 	let divEl: HTMLDivElement | null = null
 	let editor: meditor.IStandaloneCodeEditor
 	let model: meditor.ITextModel
@@ -427,16 +407,47 @@
 	let extraModel
 
 	let width = 0
-	let widgets: HTMLElement | undefined = document.getElementById('monaco-widgets-root') ?? undefined
+	// let widgets: HTMLElement | undefined = document.getElementById('monaco-widgets-root') ?? undefined
+
+	let initialized = false
+
+	let jsLoader: NodeJS.Timeout | undefined = undefined
 
 	async function loadMonaco() {
+		await initializeVscode()
+		initialized = true
+		languages.typescript.javascriptDefaults.setCompilerOptions({
+			target: languages.typescript.ScriptTarget.Latest,
+			allowNonTsExtensions: true,
+			noSemanticValidation: false,
+			noLib: true,
+			moduleResolution: languages.typescript.ModuleResolutionKind.NodeJs
+		})
+
+		languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+			noSemanticValidation: false,
+			noSyntaxValidation: false,
+			noSuggestionDiagnostics: false,
+			diagnosticCodesToIgnore: [1108]
+		})
+
+		languages.register({ id: 'template' })
+
+		// Register a tokens provider for the language
+		languages.registerTokensProviderFactory('template', {
+			create: () => language as languages.IMonarchLanguage
+		})
+
+		languages.setLanguageConfiguration('template', conf)
+
 		model = meditor.createModel(code, lang, mUri.parse(uri))
 
 		model.updateOptions(updateOptions)
 
 		editor = meditor.create(divEl as HTMLDivElement, {
-			...editorConfig(model, code, lang, automaticLayout, fixedOverflowWidgets),
-			overflowWidgetsDomNode: widgets,
+			...editorConfig(code, lang, automaticLayout, fixedOverflowWidgets),
+			model,
+			// overflowWidgetsDomNode: widgets,
 			lineNumbers: 'off',
 			fontSize,
 			suggestOnTriggerCharacters: true,
@@ -449,87 +460,6 @@
 			editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, function () {})
 		})
 
-		extraModel = meditor.createModel('`' + model.getValue() + '`', 'javascript')
-		const worker = await languages.typescript.getJavaScriptWorker()
-		const client = await worker(extraModel.uri)
-
-		cip = languages.registerCompletionItemProvider('template', {
-			triggerCharacters: ['.'],
-
-			provideCompletionItems: async (model, position) => {
-				extraModel.setValue('`' + model.getValue() + '`')
-
-				const offset = model.getOffsetAt(position) + 1
-				const info = await client.getCompletionsAtPosition(extraModel.uri.toString(), offset)
-				if (!info) {
-					return { suggestions: [] }
-				}
-				const wordInfo = model.getWordUntilPosition(position)
-				const wordRange = new Range(
-					position.lineNumber,
-					wordInfo.startColumn,
-					position.lineNumber,
-					wordInfo.endColumn
-				)
-
-				const suggestions = info.entries
-					.filter((x) => x.kind != 'keyword' && x.kind != 'var')
-					.map((entry) => {
-						let range = wordRange
-						if (entry.replacementSpan) {
-							const p1 = model.getPositionAt(entry.replacementSpan.start)
-							const p2 = model.getPositionAt(
-								entry.replacementSpan.start + entry.replacementSpan.length
-							)
-							range = new Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column)
-						}
-
-						const tags: languages.CompletionItemTag[] = []
-						if (entry.kindModifiers?.indexOf('deprecated') !== -1) {
-							tags.push(languages.CompletionItemTag.Deprecated)
-						}
-						return {
-							uri: model.uri,
-							position: position,
-							offset: offset,
-							range: range,
-							label: entry.name,
-							insertText: entry.name,
-							sortText: entry.sortText,
-							kind: convertKind(entry.kind),
-							tags
-						}
-					})
-				return { suggestions }
-			},
-			resolveCompletionItem: async (item: languages.CompletionItem, token: any) => {
-				extraModel.setValue('`' + model.getValue() + '`')
-
-				const myItem = <any>item
-				const position = myItem.position
-				const offset = myItem.offset
-
-				const details = await client.getCompletionEntryDetails(
-					extraModel.uri.toString(),
-					offset,
-					myItem.label
-				)
-				if (!details) {
-					return myItem
-				}
-				return <any>{
-					uri: model.uri,
-					position: position,
-					label: details.name,
-					kind: convertKind(details.kind),
-					detail: displayPartsToString(details.displayParts),
-					documentation: {
-						value: createDocumentationString(details)
-					}
-				}
-			}
-		})
-
 		let timeoutModel: NodeJS.Timeout | undefined = undefined
 		editor.onDidChangeModelContent((event) => {
 			timeoutModel && clearTimeout(timeoutModel)
@@ -538,6 +468,8 @@
 				dispatch('change', { code })
 			}, 200)
 		})
+
+		extraModel = meditor.createModel('`' + model.getValue() + '`', 'javascript')
 
 		if (autoHeight) {
 			const updateHeight = () => {
@@ -560,6 +492,93 @@
 		editor.onDidBlurEditorText(() => {
 			code = getCode()
 		})
+
+		jsLoader = setTimeout(async () => {
+			jsLoader = undefined
+			try {
+				const worker = await languages.typescript.getJavaScriptWorker()
+				const client = await worker(extraModel.uri)
+
+				cip = languages.registerCompletionItemProvider('template', {
+					triggerCharacters: ['.'],
+
+					provideCompletionItems: async (model, position) => {
+						extraModel.setValue('`' + model.getValue() + '`')
+
+						const offset = model.getOffsetAt(position) + 1
+						const info = await client.getCompletionsAtPosition(extraModel.uri.toString(), offset)
+						if (!info) {
+							return { suggestions: [] }
+						}
+						const wordInfo = model.getWordUntilPosition(position)
+						const wordRange = new Range(
+							position.lineNumber,
+							wordInfo.startColumn,
+							position.lineNumber,
+							wordInfo.endColumn
+						)
+
+						const suggestions = info.entries
+							.filter((x) => x.kind != 'keyword' && x.kind != 'var')
+							.map((entry) => {
+								let range = wordRange
+								if (entry.replacementSpan) {
+									const p1 = model.getPositionAt(entry.replacementSpan.start)
+									const p2 = model.getPositionAt(
+										entry.replacementSpan.start + entry.replacementSpan.length
+									)
+									range = new Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column)
+								}
+
+								const tags: languages.CompletionItemTag[] = []
+								if (entry.kindModifiers?.indexOf('deprecated') !== -1) {
+									tags.push(languages.CompletionItemTag.Deprecated)
+								}
+								return {
+									uri: model.uri,
+									position: position,
+									offset: offset,
+									range: range,
+									label: entry.name,
+									insertText: entry.name,
+									sortText: entry.sortText,
+									kind: convertKind(entry.kind),
+									tags
+								}
+							})
+						return { suggestions }
+					},
+					resolveCompletionItem: async (item: languages.CompletionItem, token: any) => {
+						extraModel.setValue('`' + model.getValue() + '`')
+
+						const myItem = <any>item
+						const position = myItem.position
+						const offset = myItem.offset
+
+						const details = await client.getCompletionEntryDetails(
+							extraModel.uri.toString(),
+							offset,
+							myItem.label
+						)
+						if (!details) {
+							return myItem
+						}
+						return <any>{
+							uri: model.uri,
+							position: position,
+							label: details.name,
+							kind: convertKind(details.kind),
+							detail: displayPartsToString(details.displayParts),
+							documentation: {
+								value: createDocumentationString(details)
+							}
+						}
+					}
+				})
+			} catch (e) {
+				console.error('Error loading javascipt worker:', e)
+			}
+		}, 300)
 	}
 
 	export function focus() {
@@ -574,25 +593,23 @@
 		}
 	})
 
-	$: mounted && extraLib && loadExtraLib()
+	$: mounted && extraLib && initialized && loadExtraLib()
 
 	function loadExtraLib() {
-		const stdLib = { content: libStdContent, filePath: 'es5.d.ts' }
+		const stdLib = { content: libStdContent, filePath: 'es6.d.ts' }
+		const libs = [stdLib]
 		if (extraLib != '') {
-			languages.typescript.javascriptDefaults.setExtraLibs([
-				{
-					content: extraLib,
-					filePath: 'windmill.d.ts'
-				},
-				stdLib
-			])
-		} else {
-			languages.typescript.javascriptDefaults.setExtraLibs([stdLib])
+			libs.push({
+				content: extraLib,
+				filePath: 'windmill.d.ts'
+			})
 		}
+		languages.typescript.javascriptDefaults.setExtraLibs(libs)
 	}
 
 	onDestroy(() => {
 		try {
+			jsLoader && clearTimeout(jsLoader)
 			model && model.dispose()
 			editor && editor.dispose()
 			cip && cip.dispose()
@@ -600,6 +617,8 @@
 		} catch (err) {}
 	})
 </script>
+
+<EditorTheme />
 
 <div
 	bind:this={divEl}

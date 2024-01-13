@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { getContext } from 'svelte'
-	import type { AppViewerContext, CancelablePromise, InlineScript } from '../../types'
+	import type {
+		AppEditorContext,
+		AppViewerContext,
+		CancelablePromise,
+		InlineScript
+	} from '../../types'
 	import { Button, Kbd } from '$lib/components/common'
 	import { getModifierKey } from '$lib/utils'
 	import { Loader2 } from 'lucide-svelte'
@@ -11,6 +16,7 @@
 	export let hideShortcut = false
 
 	const { runnableComponents } = getContext<AppViewerContext>('AppViewerContext')
+	const { runnableJobEditorPanel } = getContext<AppEditorContext>('AppEditorContext')
 	let cancelable: CancelablePromise<void>[] | undefined = undefined
 </script>
 
@@ -20,12 +26,12 @@
 			loading={runLoading}
 			size="xs"
 			color="dark"
-			variant="border"
-			btnClasses="!px-2 !py-1 !bg-gray-700 !text-white hover:!bg-gray-900"
+			btnClasses="!px-2 !py-1"
 			on:click={async () => {
 				runLoading = true
+				$runnableJobEditorPanel.focused = true
 				try {
-					cancelable = $runnableComponents[id]?.cb?.map((f) => f(inlineScript))
+					cancelable = $runnableComponents[id]?.cb?.map((f) => f(inlineScript, true))
 					await Promise.all(cancelable)
 				} catch {}
 				runLoading = false

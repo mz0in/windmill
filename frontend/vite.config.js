@@ -45,18 +45,19 @@ const config = {
 				}
 			]
 		}),
-		circleDependency({circleImportThrowErr: false}),
+		circleDependency({ circleImportThrowErr: false })
 	],
 	define: {
 		__pkg__: version
 	},
 	optimizeDeps: {
-		include: ['highlight.js', 'highlight.js/lib/core', 'ag-grid-svelte']
+		include: ['highlight.js', 'highlight.js/lib/core']
 	},
 	resolve: {
 		alias: {
 			path: 'path-browserify'
-		}
+		},
+		dedupe: ['monaco-editor', 'vscode']
 	},
 	assetsInclude: ['**/*.wasm']
 }

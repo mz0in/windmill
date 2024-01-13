@@ -28,16 +28,83 @@ export interface SchemaProperty {
 		contentEncoding?: 'base64'
 		enum?: string[]
 	}
+	min?: number
+	max?: number
+	currency?: string
+	currencyLocale?: string
+	multiselect?: boolean
+	customErrorMessage?: string
 	properties?: { [name: string]: SchemaProperty }
 	required?: string[]
+	showExpr?: string
 }
 
+export interface ModalSchemaProperty {
+	selectedType?: string
+	description: string
+	name: string
+	required: boolean
+	min?: number
+	max?: number
+	currency?: string
+	currencyLocale?: string
+	multiselect?: boolean
+	format?: string
+	pattern?: string
+	enum_?: string[]
+	default?: any
+	items?: { type?: 'string' | 'number'; enum?: string[] }
+	contentEncoding?: 'base64' | 'binary'
+	schema?: Schema
+	customErrorMessage?: string
+	showExpr?: string
+}
+
+export function modalToSchema(schema: ModalSchemaProperty): SchemaProperty {
+	return {
+		type: schema.selectedType,
+		description: schema.description,
+		pattern: schema.pattern,
+		default: schema.default,
+		enum: schema.enum_,
+		items: schema.items,
+		contentEncoding: schema.contentEncoding,
+		format: schema.format,
+		customErrorMessage: schema.customErrorMessage,
+		properties: schema.schema?.properties,
+		required: schema.schema?.required,
+		min: schema.min,
+		max: schema.max,
+		currency: schema.currency,
+		currencyLocale: schema.currencyLocale,
+		multiselect: schema.multiselect,
+		showExpr: schema.showExpr
+	}
+}
 export type Schema = {
 	$schema: string | undefined
 	type: string
 	properties: { [name: string]: SchemaProperty }
 	order?: string[]
 	required: string[]
+}
+
+export function mergeSchema(
+	schema: Schema | Record<string, any>,
+	enum_payload: Record<string, any> = {}
+) {
+	if (!schema.properties || !enum_payload) {
+		return schema
+	}
+	let new_schema: Schema = JSON.parse(JSON.stringify(schema))
+	for (let [key, value] of Object.entries(new_schema.properties ?? {})) {
+		if (enum_payload[key]) {
+			value.enum = enum_payload[key]
+			value['disableCreate'] = true
+		}
+	}
+
+	return new_schema
 }
 
 export type Meta = { ownerKind: OwnerKind; owner: string; name: string }

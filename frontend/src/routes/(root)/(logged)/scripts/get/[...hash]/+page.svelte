@@ -8,7 +8,6 @@
 		canWrite,
 		truncateHash
 	} from '$lib/utils'
-	import { faEdit, faCodeFork, faHistory, faTableColumns } from '@fortawesome/free-solid-svg-icons'
 	import Tooltip from '$lib/components/Tooltip.svelte'
 	import ShareModal from '$lib/components/ShareModal.svelte'
 	import { runFormStore, userStore, workspaceStore } from '$lib/stores'
@@ -37,16 +36,21 @@
 	import WebhooksPanel from '$lib/components/details/WebhooksPanel.svelte'
 	import DetailPageLayout from '$lib/components/details/DetailPageLayout.svelte'
 	import DetailPageHeader from '$lib/components/details/DetailPageHeader.svelte'
-	import InlineCodeCopy from '$lib/components/InlineCodeCopy.svelte'
 	import CliHelpBox from '$lib/components/CliHelpBox.svelte'
 	import {
+		Activity,
 		Archive,
 		ArchiveRestore,
+		Eye,
 		FolderOpen,
+		GitFork,
 		Globe2,
+		History,
 		Loader2,
+		Pen,
 		Server,
 		Share,
+		Table2,
 		Trash
 	} from 'lucide-svelte'
 	import { SCRIPT_VIEW_SHOW_PUBLISH_TO_HUB } from '$lib/consts'
@@ -57,14 +61,20 @@
 	import { createAppFromScript } from '$lib/components/details/createAppFromScript'
 	import { importStore } from '$lib/components/apps/store'
 	import TimeAgo from '$lib/components/TimeAgo.svelte'
+	import ClipboardPanel from '$lib/components/details/ClipboardPanel.svelte'
+	import PersistentScriptDrawer from '$lib/components/PersistentScriptDrawer.svelte'
 
 	let script: Script | undefined
 	let topHash: string | undefined
 	let can_write = false
 	let deploymentInProgress = false
-	let intervalId: NodeJS.Timer
+	let intervalId: NodeJS.Timeout
 	let shareModal: ShareModal
 	let runForm: RunForm
+
+	let scheduledForStr: string | undefined = undefined
+	let invisible_to_owner: false | undefined = undefined
+	let overrideTag: string | undefined = undefined
 
 	$: cliCommand = `wmill script run ${script?.path} -d '${JSON.stringify(args)}'`
 
@@ -167,7 +177,8 @@
 	async function runScript(
 		scheduledForStr: string | undefined,
 		args: Record<string, any>,
-		invisibleToOwner?: boolean
+		invisibleToOwner: boolean | undefined,
+		overrideTag: string | undefined
 	) {
 		try {
 			runLoading = true
@@ -177,7 +188,8 @@
 				hash: script?.hash ?? '',
 				requestBody: args,
 				scheduledFor,
-				invisibleToOwner
+				invisibleToOwner,
+				tag: overrideTag
 			})
 			await goto('/run/' + run + '?workspace=' + $workspaceStore)
 		} catch (err) {
@@ -195,23 +207,24 @@
 
 	let moveDrawer: MoveDrawer
 	let deploymentDrawer: DeployWorkspaceDrawer
+	let persistentScriptDrawer: PersistentScriptDrawer
 
 	function getMainButtons(script: Script | undefined, args: object | undefined, topHash?: string) {
 		const buttons: any = []
 
-		if (!topHash && script) {
+		if (!topHash && script && !$userStore?.operator) {
 			buttons.push({
 				label: 'Fork',
 				buttonProps: {
 					href: `/scripts/add?template=${script.path}`,
 					size: 'xs',
 					color: 'light',
-					startIcon: faCodeFork
+					startIcon: GitFork
 				}
 			})
 		}
 
-		if (!script || $userStore?.operator || !can_write) {
+		if (!script) {
 			return buttons
 		}
 
@@ -221,9 +234,13 @@
 				href: `/runs/${script.path}`,
 				size: 'xs',
 				color: 'light',
-				startIcon: faHistory
+				startIcon: History
 			}
 		})
+
+		if (!script || $userStore?.operator || !can_write) {
+			return buttons
+		}
 
 		if (Array.isArray(script.parent_hashes) && script.parent_hashes.length > 0) {
 			buttons.push({
@@ -235,7 +252,7 @@
 
 					size: 'xs',
 					color: 'light',
-					startIcon: faHistory
+					startIcon: History
 				}
 			})
 		}
@@ -252,9 +269,24 @@
 
 					size: 'xs',
 					color: 'light',
-					startIcon: faTableColumns
+					startIcon: Table2
 				}
 			})
+
+			if (script?.restart_unless_cancelled ?? false) {
+				buttons.push({
+					label: 'Current runs',
+					buttonProps: {
+						onClick: () => {
+							persistentScriptDrawer.open?.(script)
+						},
+						size: 'xs',
+						startIcon: Activity,
+						color: 'dark',
+						variant: 'contained'
+					}
+				})
+			}
 
 			buttons.push({
 				label: 'Edit',
@@ -263,7 +295,7 @@
 						topHash ? `&hash=${script.hash}&topHash=` + topHash : ''
 					}`,
 					size: 'xs',
-					startIcon: faEdit,
+					startIcon: Pen,
 					color: 'dark',
 					variant: 'contained',
 					disabled: !can_write
@@ -285,6 +317,14 @@
 			Icon: FolderOpen,
 			onclick: () => {
 				moveDrawer.openDrawer(script?.path ?? '', script?.summary, 'script')
+			}
+		})
+
+		menuItems.push({
+			label: 'Audit logs',
+			Icon: Eye,
+			onclick: () => {
+				goto(`/audit_logs?resource=${script?.path}`)
 			}
 		})
 
@@ -375,6 +415,9 @@
 				break
 		}
 	}
+
+	let token = 'TOKEN_TO_CREATE'
+	let detailSelected = 'saved_inputs'
 </script>
 
 <MoveDrawer
@@ -388,6 +431,7 @@
 <svelte:window on:keydown={onKeyDown} />
 
 <DeployWorkspaceDrawer bind:this={deploymentDrawer} />
+<PersistentScriptDrawer bind:this={persistentScriptDrawer} />
 <ShareModal bind:this={shareModal} />
 
 {#if script}
@@ -405,7 +449,7 @@
 			/>
 		</DrawerContent>
 	</Drawer>
-	<DetailPageLayout isOperator={$userStore?.operator}>
+	<DetailPageLayout bind:selected={detailSelected} isOperator={$userStore?.operator}>
 		<svelte:fragment slot="header">
 			<DetailPageHeader
 				{mainButtons}
@@ -414,6 +458,7 @@
 				bind:errorHandlerMuted={script.ws_error_handler_muted}
 				errorHandlerKind="script"
 				scriptOrFlowPath={script.path}
+				tag={script.tag}
 			>
 				{#if script?.priority != undefined}
 					<div class="hidden md:block">
@@ -421,6 +466,13 @@
 							{`Priority: ${script.priority}`}
 						</Badge>
 					</div>
+				{/if}
+				{#if script?.restart_unless_cancelled ?? false}
+					<button on:click={() => persistentScriptDrawer.open?.(script)}>
+						<div class="hidden md:block">
+							<Badge color="red" variant="outlined" size="xs">Persistent</Badge>
+						</div>
+					</button>
 				{/if}
 				{#if script?.concurrent_limit != undefined && script.concurrency_time_window_s != undefined}
 					<div class="hidden md:block">
@@ -433,7 +485,7 @@
 		</svelte:fragment>
 		<svelte:fragment slot="form">
 			<div class="p-8 w-full max-w-3xl mx-auto">
-				<div class="flex flex-col gap-0.5 mb-8">
+				<div class="flex flex-col gap-0.5 mb-4">
 					{#if script.lock_error_logs || topHash || script.archived || script.deleted}
 						<div class="flex flex-col gap-2 my-2">
 							{#if script.lock_error_logs}
@@ -467,42 +519,24 @@
 						</div>
 					{/if}
 
-					{#if !emptyString(script.summary)}
-						<span class="text-lg font-semibold">{script.path}</span>
-					{/if}
-
-					<div class="flex flex-row gap-x-2 flex-wrap items-center mt-2">
-						<span class="text-sm text-secondary">
-							Edited <TimeAgo date={script.created_at || ''} /> by {script.created_by || 'unknown'}
-						</span>
-						<Badge small color="dark-blue">
-							{truncateHash(script?.hash ?? '')}
-						</Badge>
-						{#if script?.is_template}
-							<Badge color="blue">Template</Badge>
-						{/if}
-						{#if script && script.kind !== 'script'}
-							<Badge color="blue">
-								{script?.kind}
-							</Badge>
-						{/if}
-						{#if deploymentInProgress}
-							<Badge color="yellow">
-								<Loader2 size={12} class="inline animate-spin mr-1" />
-								Deployment in progress
-							</Badge>
-						{/if}
-						<SharedBadge canWrite={can_write} extraPerms={script?.extra_perms ?? {}} />
-					</div>
-
 					{#if !emptyString(script.description)}
-						<div class="border p-2">
+						<div class="py-2 mb-8 !text-secondary">
 							<Urlize text={defaultIfEmptyString(script.description, 'No description')} />
 						</div>
 					{/if}
 				</div>
 
+				{#if deploymentInProgress}
+					<Badge color="yellow">
+						<Loader2 size={12} class="inline animate-spin mr-1" />
+						Deployment in progress
+					</Badge>
+				{/if}
+
 				<RunForm
+					bind:scheduledForStr
+					bind:invisible_to_owner
+					bind:overrideTag
 					viewKeybinding
 					loading={runLoading}
 					autofocus
@@ -515,6 +549,31 @@
 					isFlow={false}
 					bind:this={runForm}
 				/>
+
+				<div class="py-10" />
+				{#if !emptyString(script.summary)}
+					<div class="mb-2">
+						<span class="!text-tertiary">{script.path}</span>
+					</div>
+				{/if}
+				<div class="flex flex-row gap-x-2 flex-wrap items-center">
+					<span class="text-sm text-tertiary">
+						Edited <TimeAgo date={script.created_at || ''} /> by {script.created_by || 'unknown'}
+					</span>
+					<Badge small color="gray">
+						{truncateHash(script?.hash ?? '')}
+					</Badge>
+					{#if script?.is_template}
+						<Badge color="blue">Template</Badge>
+					{/if}
+					{#if script && script.kind !== 'script'}
+						<Badge color="blue">
+							{script?.kind}
+						</Badge>
+					{/if}
+
+					<SharedBadge canWrite={can_write} extraPerms={script?.extra_perms ?? {}} />
+				</div>
 			</div>
 		</svelte:fragment>
 		<svelte:fragment slot="save_inputs">
@@ -533,7 +592,7 @@
 			{/if}
 		</svelte:fragment>
 		<svelte:fragment slot="webhooks">
-			<WebhooksPanel scopes={[`run:script/${script?.path}`]} {webhooks} {args} />
+			<WebhooksPanel bind:token scopes={[`run:script/${script?.path}`]} {webhooks} {args} />
 		</svelte:fragment>
 		<svelte:fragment slot="schedule">
 			<RunPageSchedules isFlow={false} path={script.path ?? ''} {can_write} />
@@ -569,7 +628,7 @@
 							</div>
 						</TabContent>
 						<TabContent value="dependencies">
-							<div class="">
+							<div>
 								{#if script?.lock}
 									<pre class="bg-surface-secondary text-sm p-2 h-full overflow-auto w-full"
 										>{script.lock}</pre
@@ -601,7 +660,7 @@
 		</svelte:fragment>
 		<svelte:fragment slot="cli">
 			<div class="p-2 flex flex-col gap-4">
-				<InlineCodeCopy content={cliCommand} />
+				<ClipboardPanel content={cliCommand} />
 				<CliHelpBox />
 			</div>
 		</svelte:fragment>

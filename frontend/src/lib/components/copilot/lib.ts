@@ -1,30 +1,52 @@
 import { OpenAI } from 'openai'
-import { OpenAPI } from '../../gen/core/OpenAPI'
-import { ResourceService, Script, WorkspaceService } from '../../gen'
+import { OpenAPI, ResourceService, Script } from '../../gen'
 import type { Writable } from 'svelte/store'
 
-import { copilotInfo, workspaceStore, type DBSchema } from '$lib/stores'
+import type { DBSchema } from '$lib/stores'
 import { formatResourceTypes } from './utils'
 
 import { EDIT_CONFIG, FIX_CONFIG, GEN_CONFIG } from './prompts'
 import type {
-	CompletionCreateParamsStreaming,
-	CreateChatCompletionRequestMessage
+	ChatCompletionCreateParamsStreaming,
+	ChatCompletionMessageParam
 } from 'openai/resources/chat'
 import { buildClientSchema, printSchema } from 'graphql'
 
 export const SUPPORTED_LANGUAGES = new Set(Object.keys(GEN_CONFIG.prompts))
 
-const openaiConfig: CompletionCreateParamsStreaming = {
+const openaiConfig: ChatCompletionCreateParamsStreaming = {
 	temperature: 0,
 	max_tokens: 2048,
-	model: 'gpt-4',
+	model: 'gpt-4-1106-preview',
+	seed: 42,
 	stream: true,
 	messages: []
 }
 
-let workspace: string | undefined = undefined
-let openai: OpenAI | undefined = undefined
+class WorkspacedOpenai {
+	private client: OpenAI | undefined
+
+	init(workspace: string) {
+		const baseURL = `${location.origin}${OpenAPI.BASE}/w/${workspace}/openai/proxy`
+		this.client = new OpenAI({
+			baseURL,
+			apiKey: 'fakekey',
+			defaultHeaders: {
+				Authorization: ''
+			},
+			dangerouslyAllowBrowser: true
+		})
+	}
+
+	getClient() {
+		if (!this.client) {
+			throw new Error('OpenAI not initialized')
+		}
+		return this.client
+	}
+}
+
+export let workspacedOpenai = new WorkspacedOpenai()
 
 export async function testKey({
 	apiKey,
@@ -32,7 +54,7 @@ export async function testKey({
 	messages
 }: {
 	apiKey?: string
-	messages: CreateChatCompletionRequestMessage[]
+	messages: ChatCompletionMessageParam[]
 	abortController: AbortController
 }) {
 	if (apiKey) {
@@ -51,37 +73,14 @@ export async function testKey({
 			}
 		)
 	} else {
-		await getNonStreamingCompletion(messages, abortController)
+		await getNonStreamingCompletion(messages, abortController, undefined, true)
 	}
 }
-
-workspaceStore.subscribe(async (value) => {
-	workspace = value
-	const baseURL = `${location.origin}${OpenAPI.BASE}/w/${workspace}/openai/proxy`
-	openai = new OpenAI({
-		baseURL,
-		apiKey: 'fakekey',
-		defaultHeaders: {
-			Authorization: ''
-		},
-		dangerouslyAllowBrowser: true
-	})
-	if (value) {
-		try {
-			copilotInfo.set(await WorkspaceService.getCopilotInfo({ workspace: value }))
-		} catch (err) {
-			copilotInfo.set({
-				exists_openai_resource_path: false,
-				code_completion_enabled: false
-			})
-			console.error('Could not get copilot info')
-		}
-	}
-})
 
 interface BaseOptions {
 	language: Script.language | 'frontend'
 	dbSchema: DBSchema | undefined
+	workspace: string
 }
 
 interface ScriptGenerationOptions extends BaseOptions {
@@ -104,10 +103,6 @@ interface FixScriptOpions extends BaseOptions {
 type CopilotOptions = ScriptGenerationOptions | EditScriptOptions | FixScriptOpions
 
 async function getResourceTypes(scriptOptions: CopilotOptions) {
-	if (!workspace) {
-		throw new Error('Workspace not initialized')
-	}
-
 	const elems =
 		scriptOptions.type === 'gen' || scriptOptions.type === 'edit' ? [scriptOptions.description] : []
 
@@ -131,8 +126,9 @@ async function getResourceTypes(scriptOptions: CopilotOptions) {
 	}
 
 	const resourceTypes = await ResourceService.queryResourceTypes({
-		workspace,
-		text: elems.join(';')
+		workspace: scriptOptions.workspace,
+		text: elems.join(';'),
+		limit: 3
 	})
 
 	return resourceTypes
@@ -154,7 +150,7 @@ function addDBSChema(scriptOptions: CopilotOptions, prompt: string) {
 	const { dbSchema, language } = scriptOptions
 	if (
 		dbSchema &&
-		['postgresql', 'mysql', 'snowflake', 'bigquery', 'graphql'].includes(language) && // make sure we are using a SQL/query language
+		['postgresql', 'mysql', 'snowflake', 'bigquery', 'mssql', 'graphql'].includes(language) && // make sure we are using a SQL/query language
 		language === dbSchema.lang // make sure we are using the same language as the schema
 	) {
 		const { schema, lang } = dbSchema
@@ -188,7 +184,8 @@ function addDBSChema(scriptOptions: CopilotOptions, prompt: string) {
 
 			let finalSchema: typeof smallerSchema | (typeof smallerSchema)['schemaKey'] = smallerSchema
 			if (dbSchema.publicOnly) {
-				finalSchema = smallerSchema.public || smallerSchema.PUBLIC || smallerSchema
+				finalSchema =
+					smallerSchema.public || smallerSchema.PUBLIC || smallerSchema.dbo || smallerSchema
 			} else if (lang === 'mysql' && Object.keys(smallerSchema).length === 1) {
 				finalSchema = smallerSchema[Object.keys(smallerSchema)[0]]
 			}
@@ -234,15 +231,13 @@ const PROMPTS_CONFIGS = {
 }
 
 export async function getNonStreamingCompletion(
-	messages: CreateChatCompletionRequestMessage[],
+	messages: ChatCompletionMessageParam[],
 	abortController: AbortController,
-	model: string = 'gpt-4'
+	model: string = 'gpt-4-1106-preview',
+	noCache?: boolean
 ) {
-	if (!openai) {
-		throw new Error('OpenAI not initialized')
-	}
-
-	const completion = await openai.chat.completions.create(
+	const openaiClient = workspacedOpenai.getClient()
+	const completion = await openaiClient.chat.completions.create(
 		{
 			...openaiConfig,
 			messages,
@@ -250,6 +245,9 @@ export async function getNonStreamingCompletion(
 			model
 		},
 		{
+			query: {
+				no_cache: noCache
+			},
 			signal: abortController.signal
 		}
 	)
@@ -263,14 +261,11 @@ export async function getNonStreamingCompletion(
 }
 
 export async function getCompletion(
-	messages: CreateChatCompletionRequestMessage[],
+	messages: ChatCompletionMessageParam[],
 	abortController: AbortController
 ) {
-	if (!openai) {
-		throw new Error('OpenAI not initialized')
-	}
-
-	const completion = await openai.chat.completions.create(
+	const openaiClient = workspacedOpenai.getClient()
+	const completion = await openaiClient.chat.completions.create(
 		{
 			...openaiConfig,
 			messages
@@ -372,7 +367,7 @@ function getStringEndDelta(prev: string, now: string) {
 }
 
 export async function deltaCodeCompletion(
-	messages: CreateChatCompletionRequestMessage[],
+	messages: ChatCompletionMessageParam[],
 	generatedCodeDelta: Writable<string>,
 	abortController: AbortController
 ) {

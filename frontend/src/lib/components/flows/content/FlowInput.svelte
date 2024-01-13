@@ -2,7 +2,6 @@
 	import { Button, DrawerContent } from '$lib/components/common'
 
 	import SchemaEditor from '$lib/components/SchemaEditor.svelte'
-	import SchemaForm from '$lib/components/SchemaForm.svelte'
 	import { getContext } from 'svelte'
 	import FlowCard from '../common/FlowCard.svelte'
 	import { copyFirstStepSchema } from '../flowStore'
@@ -13,6 +12,9 @@
 	import { convert } from '@redocly/json-to-json-schema'
 	import { sendUserToast } from '$lib/toast'
 	import SavedInputs from '$lib/components/SavedInputs.svelte'
+	import EditableSchemaForm from '$lib/components/EditableSchemaForm.svelte'
+
+	export let noEditor: boolean
 
 	const { flowStore, flowStateStore, previewArgs, initialPath } =
 		getContext<FlowEditorContext>('FlowEditorContext')
@@ -37,7 +39,7 @@
 </script>
 
 <CapturePayload bind:this={capturePayload} />
-<FlowCard title="Flow Input">
+<FlowCard {noEditor} title="Flow Input">
 	<div class="p-6">
 		<div class="flex flex-row items-center gap-2 pb-2 border-b border-gray-400">
 			<div>Copy input's schema from</div>
@@ -89,8 +91,8 @@
 		</div>
 	</div>
 	<div class="p-6">
-		<h2 class="mb-4">Customize Inputs</h2>
-		<SchemaForm bind:schema={$flowStore.schema} editableSchema={true} />
+		<h2 class="mb-4">Customize Flow Inputs</h2>
+		<EditableSchemaForm bind:schema={$flowStore.schema} />
 	</div>
 </FlowCard>
 

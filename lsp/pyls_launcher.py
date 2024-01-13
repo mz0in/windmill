@@ -59,7 +59,8 @@ class LanguageServerWebSocketHandler(websocket.WebSocketHandler):
 
     def on_message(self, message):
         """Forward client->server messages to the endpoint."""
-        self.writer.write(json.loads(message))
+        if not "Unhandled method" in message:
+            self.writer.write(json.loads(message))
 
     def on_close(self) -> None:
         log.info("CLOSING: " + str(self.id))
@@ -87,9 +88,6 @@ class DenoLS(LanguageServerWebSocketHandler):
     procargs = ["deno", "lsp"]
 
 
-class BunLS(LanguageServerWebSocketHandler):
-    procargs = ["typescript-language-server", "--stdio"]
-
 
 class GoLS(LanguageServerWebSocketHandler):
     procargs = ["gopls", "serve"]
@@ -116,7 +114,6 @@ if __name__ == "__main__":
             (r"/ws/diagnostic", DiagnosticLS),
             (r"/ws/ruff", RuffLS),
             (r"/ws/deno", DenoLS),
-            (r"/ws/bun", BunLS),
             (r"/ws/go", GoLS),
             (r"/", MainHandler),
             (r"/health", MainHandler),

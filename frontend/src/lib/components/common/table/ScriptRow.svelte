@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation'
-	import Dropdown from '$lib/components/Dropdown.svelte'
+	import Dropdown from '$lib/components/DropdownV2.svelte'
 	import type MoveDrawer from '$lib/components/MoveDrawer.svelte'
 	import ScheduleEditor from '$lib/components/ScheduleEditor.svelte'
 	import SharedBadge from '$lib/components/SharedBadge.svelte'
@@ -8,17 +8,7 @@
 
 	import { ScriptService, type Script, DraftService } from '$lib/gen'
 	import { userStore, workspaceStore } from '$lib/stores'
-	import {
-		faArchive,
-		faCalendarAlt,
-		faCodeFork,
-		faCopy,
-		faEdit,
-		faFileExport,
-		faList,
-		faShare,
-		faTrashAlt
-	} from '@fortawesome/free-solid-svg-icons'
+
 	import { createEventDispatcher } from 'svelte'
 	import Badge from '../badge/Badge.svelte'
 	import Button from '../button/Button.svelte'
@@ -28,6 +18,19 @@
 	import { copyToClipboard, DELETE, isOwner } from '$lib/utils'
 	import type DeployWorkspaceDrawer from '$lib/components/DeployWorkspaceDrawer.svelte'
 	import { LanguageIcon } from '../languageIcons'
+	import {
+		Archive,
+		Calendar,
+		Code,
+		Copy,
+		Eye,
+		FileUp,
+		GitFork,
+		List,
+		Pen,
+		Share,
+		Trash
+	} from 'lucide-svelte'
 
 	export let script: Script & { canWrite: boolean }
 	export let marked: string | undefined
@@ -37,19 +40,9 @@
 	export let deploymentDrawer: DeployWorkspaceDrawer
 	export let deleteConfirmedCallback: (() => void) | undefined
 	export let errorHandlerMuted: boolean
-
-	let {
-		summary,
-		path,
-		hash,
-		language,
-		extra_perms,
-		canWrite,
-		lock_error_logs,
-		archived,
-		has_draft,
-		draft_only
-	} = script
+	export let showCode: (path: string, summary: string) => void
+	export let depth: number = 0
+	export let menuOpen: boolean = false
 
 	const dispatch = createEventDispatcher()
 
@@ -83,59 +76,64 @@
 	const dlt: 'delete' = 'delete'
 </script>
 
-<ScheduleEditor on:update={() => goto('/schedules')} bind:this={scheduleEditor} />
+{#if menuOpen}
+	<ScheduleEditor on:update={() => goto('/schedules')} bind:this={scheduleEditor} />
+{/if}
 
 <Row
-	href="/scripts/get/{hash}?workspace={$workspaceStore}"
+	href={script.draft_only
+		? `/scripts/edit/${script.path}`
+		: `/scripts/get/${script.hash}?workspace=${$workspaceStore}`}
 	kind="script"
 	{marked}
-	{path}
-	{summary}
+	path={script.path}
+	summary={script.summary}
 	{starred}
 	{errorHandlerMuted}
 	workspaceId={$workspaceStore ?? ''}
 	on:change
-	canFavorite={!draft_only}
+	canFavorite={!script.draft_only}
+	{depth}
 >
 	<svelte:fragment slot="badges">
-		{#if lock_error_logs}
+		{#if script.lock_error_logs}
 			<Badge color="red" baseClass="border border-red-200">Deployment failed</Badge>
 		{/if}
 
-		{#if archived}
+		{#if script.archived}
 			<Badge color="red" baseClass="border">archived</Badge>
 		{/if}
 
-		<SharedBadge {canWrite} extraPerms={extra_perms} />
-		<DraftBadge {has_draft} {draft_only} />
+		<SharedBadge canWrite={script.canWrite} extraPerms={script.extra_perms} />
+		<DraftBadge has_draft={script.has_draft} draft_only={script.draft_only} />
 		<div class="w-8 center-center">
-			<LanguageIcon lang={language} width={12} height={12} />
+			<LanguageIcon lang={script.language} width={12} height={12} />
 		</div>
 	</svelte:fragment>
 
 	<svelte:fragment slot="actions">
 		<span class="hidden md:inline-flex gap-x-1">
 			{#if !$userStore?.operator}
-				{#if canWrite && !archived}
+				{#if script.canWrite && !script.archived}
 					<div>
 						<Button
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faEdit }}
-							href="/scripts/edit/{path}"
+							startIcon={{ icon: Pen }}
+							href="/scripts/edit/{script.path}"
 						>
 							Edit
 						</Button>
 					</div>
-				{:else if !draft_only}
+				{:else if !script.draft_only}
 					<div>
 						<Button
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faCodeFork }}
-							href="/scripts/add?template={path}"
+							startIcon={{ icon: GitFork }}
+							href="/scripts/add?template={script.path}"
 						>
 							Fork
 						</Button>
@@ -144,97 +142,119 @@
 			{/if}
 		</span>
 		<Dropdown
-			placement="bottom-end"
-			dropdownItems={() => {
-				let owner = isOwner(path, $userStore, $workspaceStore)
-				if (draft_only) {
+			items={() => {
+				let owner = isOwner(script.path, $userStore, $workspaceStore)
+				if (script.draft_only) {
 					return [
 						{
+							displayName: 'View code',
+							icon: Code,
+							action: () => {
+								showCode(script.path, script.summary)
+							}
+						},
+						{
 							displayName: 'Delete',
-							icon: faTrashAlt,
+							icon: Trash,
 							action: (event) => {
+								// TODO
+								// @ts-ignore
 								if (event?.shiftKey) {
-									deleteScript(path)
+									deleteScript(script.path)
 								} else {
 									deleteConfirmedCallback = () => {
-										deleteScript(path)
+										deleteScript(script.path)
 									}
 								}
 							},
 							type: dlt,
-							disabled: !canWrite
+							disabled: !script.canWrite
 						}
 					]
 				}
 				return [
 					{
-						displayName: 'Duplicate/Fork',
-						icon: faCodeFork,
-						href: `/scripts/add?template=${path}`
-					},
-					{
-						displayName: 'Move/Rename',
-						icon: faFileExport,
+						displayName: 'View code',
+						icon: Code,
 						action: () => {
-							moveDrawer.openDrawer(path, summary, 'script')
-						},
-						disabled: !owner || archived
-					},
-					{
-						displayName: 'Deploy to staging/prod',
-						icon: faFileExport,
-						action: () => {
-							deploymentDrawer.openDrawer(path, 'script')
-						},
-						disabled: archived
-					},
-					{
-						displayName: 'View runs',
-						icon: faList,
-						href: `/runs/${path}`
-					},
-					{
-						displayName: 'Schedule',
-						icon: faCalendarAlt,
-						action: () => {
-							scheduleEditor.openNew(false, path)
-						},
-						disabled: archived
-					},
-					{
-						displayName: owner ? 'Share' : 'See Permissions',
-						icon: faShare,
-						action: () => {
-							shareModal.openDrawer && shareModal.openDrawer(path, 'script')
-						},
-						disabled: archived
-					},
-					{
-						displayName: 'Copy path',
-						icon: faCopy,
-						action: () => {
-							copyToClipboard(path)
+							showCode(script.path, script.summary)
 						}
 					},
 					{
-						displayName: archived ? 'Unarchive' : 'Archive',
-						icon: faArchive,
+						displayName: 'Duplicate/Fork',
+						icon: GitFork,
+						href: `/scripts/add?template=${script.path}`
+					},
+					{
+						displayName: 'Move/Rename',
+						icon: FileUp,
 						action: () => {
-							archived ? path && unarchiveScript(path) : path && archiveScript(path)
+							moveDrawer.openDrawer(script.path, script.summary, 'script')
+						},
+						disabled: !owner || script.archived
+					},
+					{
+						displayName: 'Deploy to staging/prod',
+						icon: FileUp,
+						action: () => {
+							deploymentDrawer.openDrawer(script.path, 'script')
+						},
+						disabled: script.archived
+					},
+					{
+						displayName: 'View runs',
+						icon: List,
+						href: `/runs/${script.path}`
+					},
+					{
+						displayName: 'Audit logs',
+						icon: Eye,
+						href: `/audit_logs?resource=${script.path}`
+					},
+					{
+						displayName: 'Schedule',
+						icon: Calendar,
+						action: () => {
+							scheduleEditor.openNew(false, script.path)
+						},
+						disabled: script.archived
+					},
+					{
+						displayName: owner ? 'Share' : 'See Permissions',
+						icon: Share,
+						action: () => {
+							shareModal.openDrawer && shareModal.openDrawer(script.path, 'script')
+						},
+						disabled: script.archived
+					},
+					{
+						displayName: 'Copy path',
+						icon: Copy,
+						action: () => {
+							copyToClipboard(script.path)
+						}
+					},
+					{
+						displayName: script.archived ? 'Unarchive' : 'Archive',
+						icon: Archive,
+						action: () => {
+							script.archived
+								? script.path && unarchiveScript(script.path)
+								: script.path && archiveScript(script.path)
 						},
 						type: 'delete',
 						disabled: !owner
 					},
 
-					...(has_draft
+					...(script.has_draft
 						? [
 								{
 									displayName: 'Delete Draft',
-									icon: faTrashAlt,
+									icon: Trash,
 									action: async () => {
 										await DraftService.deleteDraft({
 											workspace: $workspaceStore ?? '',
-											path,
+											path: script.path,
 											kind: 'script'
 										})
 										dispatch('change')
@@ -248,22 +268,25 @@
 						? [
 								{
 									displayName: 'Delete',
-									icon: faTrashAlt,
+									icon: Trash,
 									action: (event) => {
 										if (event?.shiftKey) {
-											deleteScript(path)
+											deleteScript(script.path)
 										} else {
 											deleteConfirmedCallback = () => {
-												deleteScript(path)
+												deleteScript(script.path)
 											}
 										}
 									},
 									type: dlt,
-									disabled: !canWrite
+									disabled: !script.canWrite
 								}
 						  ]
 						: [])
 				]
+			}}
+			on:open={() => {
+				menuOpen = true
 			}}
 		/>
 	</svelte:fragment>

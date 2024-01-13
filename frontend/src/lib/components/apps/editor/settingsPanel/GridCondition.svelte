@@ -1,10 +1,9 @@
 <script lang="ts">
 	import type { AppInputSpec } from '../../inputType'
 	import Button from '$lib/components/common/button/Button.svelte'
-	import { faPlus } from '@fortawesome/free-solid-svg-icons'
 	import PanelSection from './common/PanelSection.svelte'
 	import { dndzone } from 'svelte-dnd-action'
-	import { GripVertical, X } from 'lucide-svelte'
+	import { GripVertical, Plus, X } from 'lucide-svelte'
 	import InputsSpecEditor from './InputsSpecEditor.svelte'
 	import { generateRandomString } from '$lib/utils'
 	import Alert from '$lib/components/common/alert/Alert.svelte'
@@ -90,14 +89,14 @@
 		}
 
 		// Remove the corresponding item from the items array
-		items = items.filter((item) => item.originalIndex !== index)
+		const nitems = items.filter((item) => item.originalIndex !== index)
 
-		component.numberOfSubgrids = items.length
+		component.numberOfSubgrids = nitems.length
 		// Update the originalIndex of the remaining items
-		items.forEach((item, i) => {
+		nitems.forEach((item, i) => {
 			item.originalIndex = i
 		})
-		items = items
+		items = nitems
 
 		delete $app!.subgrids![`${component.id}-${items.length}`]
 		$app = $app
@@ -110,24 +109,21 @@
 			$app.subgrids = {}
 		}
 
-		const lastSubgrid = JSON.parse(
-			JSON.stringify($app.subgrids[`${component.id}-${numberOfConditions - 1}`])
-		)
-
+		$app.subgrids[`${component.id}-${numberOfConditions}`] =
+			$app.subgrids[`${component.id}-${numberOfConditions - 1}`]
 		$app.subgrids[`${component.id}-${numberOfConditions - 1}`] = []
-		$app.subgrids[`${component.id}-${numberOfConditions}`] = lastSubgrid
-		component.numberOfSubgrids = items.length
 
 		const newCondition: AppInputSpec<'boolean', boolean> = {
-			type: 'eval',
+			type: 'evalv2',
 			expr: 'false',
-			fieldType: 'boolean'
+			fieldType: 'boolean',
+			connections: []
 		}
 
 		items.splice(conditions.length - 1, 0, {
 			value: newCondition,
 			id: generateRandomString(),
-			originalIndex: items.length - 1
+			originalIndex: items.length
 		})
 
 		component.numberOfSubgrids = items.length
@@ -209,7 +205,7 @@
 			size="xs"
 			color="light"
 			variant="border"
-			startIcon={{ icon: faPlus }}
+			startIcon={{ icon: Plus }}
 			on:click={addCondition}
 			iconOnly
 		/>

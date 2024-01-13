@@ -26,6 +26,53 @@ use swc_ecma_parser::{lexer::Lexer, EsConfig, Parser, StringInput, Syntax, TsCon
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+struct ImportsFinder {
+    imports: HashSet<String>,
+}
+
+impl Visit for ImportsFinder {
+    noop_visit_type!();
+
+    fn visit_import_decl(&mut self, n: &swc_ecma_ast::ImportDecl) {
+        if let Some(ref s) = n.src.raw {
+            let s = s.to_string();
+            if s.starts_with("'") && s.ends_with("'") {
+                self.imports.insert(s[1..s.len() - 1].to_string());
+            } else if s.starts_with("\"") && s.ends_with("\"") {
+                self.imports.insert(s[1..s.len() - 1].to_string());
+            }
+        }
+    }
+}
+
+pub fn parse_expr_for_imports(code: &str) -> anyhow::Result<Vec<String>> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Custom("main.d.ts".into()), code.into());
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsConfig::default()),
+        // EsVersion defaults to es5
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+
+    let mut parser = Parser::new_from(lexer);
+
+    let mut err_s = "".to_string();
+    for e in parser.take_errors() {
+        err_s += &e.into_kind().msg().to_string();
+    }
+
+    let expr = parser.parse_module().map_err(|e| {
+        anyhow::anyhow!("Error while parsing code, it is invalid TypeScript: {err_s}, {e:?}")
+    })?;
+
+    let mut visitor = ImportsFinder { imports: HashSet::new() };
+    swc_ecma_visit::visit_module(&mut visitor, &expr);
+
+    Ok(visitor.imports.into_iter().collect())
+}
+
 struct OutputFinder {
     idents: HashSet<(String, String)>,
 }
@@ -71,9 +118,9 @@ pub fn parse_expr_for_ids(code: &str) -> anyhow::Result<Vec<(String, String)>> {
         err_s += &e.into_kind().msg().to_string();
     }
 
-    let expr = parser
-        .parse_module()
-        .map_err(|_| anyhow::anyhow!("Error while parsing code, it is invalid TypeScript"))?;
+    let expr = parser.parse_module().map_err(|e| {
+        anyhow::anyhow!("Error while parsing code, it is invalid TypeScript: {err_s}, {e:?}")
+    })?;
 
     let mut visitor = OutputFinder { idents: HashSet::new() };
     swc_ecma_visit::visit_module(&mut visitor, &expr);
@@ -102,7 +149,9 @@ pub fn parse_deno_signature(code: &str, skip_dflt: bool) -> anyhow::Result<MainA
 
     let ast = parser
         .parse_module()
-        .map_err(|_| anyhow::anyhow!("Error while parsing code, it is invalid TypeScript"))?
+        .map_err(|e| {
+            anyhow::anyhow!("Error while parsing code, it is invalid TypeScript: {err_s}, {e:?}")
+        })?
         .body;
 
     let params = ast.into_iter().find_map(|x| match x {
@@ -235,12 +284,15 @@ fn binding_ident_to_arg(BindingIdent { id, type_ann }: &BindingIdent) -> (String
     (id.sym.to_string(), typ, nullable)
 }
 
+lazy_static::lazy_static! {
+    static ref RE_SNK_CASE: Regex = Regex::new(r"_(\d)").unwrap();
+}
+
 fn to_snake_case(s: &str) -> String {
     let r = s.to_case(Case::Snake);
 
     // s_3 => s3
-    let re = Regex::new(r"_(\d)").unwrap();
-    re.replace_all(&r, "$1").to_string()
+    RE_SNK_CASE.replace_all(&r, "$1").to_string()
 }
 
 fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
@@ -311,6 +363,12 @@ fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
             } else {
                 let literals = types
                     .into_iter()
+                    .filter(|x| match ***x {
+                        TsType::TsKeywordType(TsKeywordType { kind, .. }) => {
+                            kind != TsKeywordTypeKind::TsStringKeyword
+                        }
+                        _ => true,
+                    })
                     .map(|x| match &**x {
                         TsType::TsLitType(TsLitType {
                             lit: TsLit::Str(Str { value, .. }), ..

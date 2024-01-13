@@ -2,7 +2,6 @@
 	import { page } from '$app/stores'
 	import { FlowService, JobService, type Flow, type FlowModule } from '$lib/gen'
 	import { canWrite, defaultIfEmptyString, emptyString, encodeState } from '$lib/utils'
-	import { faCodeFork, faEdit, faHistory, faTableColumns } from '@fortawesome/free-solid-svg-icons'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
 
 	import DetailPageLayout from '$lib/components/details/DetailPageLayout.svelte'
@@ -16,12 +15,24 @@
 	import Urlize from '$lib/components/Urlize.svelte'
 	import DeployWorkspaceDrawer from '$lib/components/DeployWorkspaceDrawer.svelte'
 	import SavedInputs from '$lib/components/SavedInputs.svelte'
-	import { FolderOpen, Archive, Trash, Server, Share, Badge, Loader2 } from 'lucide-svelte'
+	import {
+		FolderOpen,
+		Archive,
+		Trash,
+		Server,
+		Share,
+		Badge,
+		Loader2,
+		GitFork,
+		History,
+		Columns,
+		Pen,
+		Eye
+	} from 'lucide-svelte'
 
 	import DetailPageHeader from '$lib/components/details/DetailPageHeader.svelte'
 	import WebhooksPanel from '$lib/components/details/WebhooksPanel.svelte'
 	import CliHelpBox from '$lib/components/CliHelpBox.svelte'
-	import InlineCodeCopy from '$lib/components/InlineCodeCopy.svelte'
 	import FlowGraphViewer from '$lib/components/FlowGraphViewer.svelte'
 	import SplitPanesWrapper from '$lib/components/splitPanes/SplitPanesWrapper.svelte'
 	import SchemaViewer from '$lib/components/SchemaViewer.svelte'
@@ -29,13 +40,18 @@
 	import { createAppFromFlow } from '$lib/components/details/createAppFromScript'
 	import { importStore } from '$lib/components/apps/store'
 	import TimeAgo from '$lib/components/TimeAgo.svelte'
+	import ClipboardPanel from '$lib/components/details/ClipboardPanel.svelte'
+	import FlowGraphViewerStep from '$lib/components/FlowGraphViewerStep.svelte'
 
 	let flow: Flow | undefined
 	let can_write = false
 	let path = $page.params.path
 	let shareModal: ShareModal
-
 	let deploymentInProgress = false
+
+	let scheduledForStr: string | undefined = undefined
+	let invisible_to_owner: false | undefined = undefined
+	let overrideTag: string | undefined = undefined
 
 	$: cliCommand = `wmill flow run ${flow?.path} -d '${JSON.stringify(args)}'`
 
@@ -74,7 +90,8 @@
 	async function runFlow(
 		scheduledForStr: string | undefined,
 		args: Record<string, any>,
-		invisibleToOwner?: boolean
+		invisibleToOwner: boolean | undefined,
+		overrideTag: string | undefined
 	) {
 		loading = true
 		const scheduledFor = scheduledForStr ? new Date(scheduledForStr).toISOString() : undefined
@@ -83,7 +100,8 @@
 			path,
 			invisibleToOwner,
 			requestBody: args,
-			scheduledFor
+			scheduledFor,
+			tag: overrideTag
 		})
 		await goto('/run/' + run + '?workspace=' + $workspaceStore)
 	}
@@ -102,7 +120,7 @@
 	function getMainButtons(flow: Flow | undefined, args: object | undefined) {
 		const buttons: any = []
 
-		if (flow) {
+		if (flow && !$userStore?.operator) {
 			buttons.push({
 				label: 'Fork',
 				buttonProps: {
@@ -110,12 +128,12 @@
 					variant: 'border',
 					color: 'light',
 					size: 'xs',
-					startIcon: faCodeFork
+					startIcon: GitFork
 				}
 			})
 		}
 
-		if (!flow || $userStore?.operator || !can_write) {
+		if (!flow) {
 			return buttons
 		}
 
@@ -125,9 +143,13 @@
 				href: `/runs/${flow.path}`,
 				size: 'xs',
 				color: 'light',
-				startIcon: faHistory
+				startIcon: History
 			}
 		})
+
+		if (!flow || $userStore?.operator || !can_write) {
+			return buttons
+		}
 
 		if (!$userStore?.operator) {
 			buttons.push({
@@ -141,7 +163,7 @@
 
 					size: 'xs',
 					color: 'light',
-					startIcon: faTableColumns
+					startIcon: Columns
 				}
 			})
 
@@ -150,10 +172,10 @@
 				buttonProps: {
 					href: `/flows/edit/${path}?nodraft=true&args=${encodeState(args)}`,
 					variant: 'contained',
-					size: 'sm',
+					size: 'xs',
 					color: 'dark',
 					disabled: !can_write,
-					startIcon: faEdit
+					startIcon: Pen
 				}
 			})
 		}
@@ -178,6 +200,14 @@
 			label: 'Move/Rename',
 			onclick: () => moveDrawer.openDrawer(flow?.path ?? '', flow?.summary, 'flow'),
 			Icon: FolderOpen
+		})
+
+		menuItems.push({
+			label: 'Audit logs',
+			Icon: Eye,
+			onclick: () => {
+				goto(`/audit_logs?resource=${flow?.path}`)
+			}
 		})
 
 		menuItems.push({
@@ -218,6 +248,8 @@
 		}
 	}
 	let stepDetail: FlowModule | string | undefined = undefined
+	let token = 'TOKEN_TO_CREATE'
+	let detailSelected = 'saved_inputs'
 </script>
 
 <Skeleton
@@ -238,6 +270,7 @@
 
 {#if flow}
 	<DetailPageLayout
+		bind:selected={detailSelected}
 		isOperator={$userStore?.operator}
 		flow_json={{
 			value: flow.value,
@@ -255,6 +288,7 @@
 				bind:errorHandlerMuted={flow.ws_error_handler_muted}
 				scriptOrFlowPath={flow.path}
 				errorHandlerKind="flow"
+				tag={flow.tag}
 			>
 				{#if flow?.value?.priority != undefined}
 					<div class="hidden md:block">
@@ -277,33 +311,25 @@
 				<Splitpanes horizontal>
 					<Pane size={60} minSize={20}>
 						<div class="p-8 w-full max-w-3xl mx-auto gap-2 bg-surface">
-							<div class="flex flex-col gap-0.5">
-								{#if !emptyString(flow.summary)}
-									<span class="text-lg font-semibold">{flow.path}</span>
-								{/if}
-								<span class="text-sm text-tertiary">
-									Edited <TimeAgo date={flow.edited_at ?? ''} /> by {flow.edited_by}
-								</span>
-
-								{#if deploymentInProgress}
-									<Badge color="yellow">
-										<Loader2 size={12} class="inline animate-spin mr-1" />
-										Deployment in progress
-									</Badge>
-								{/if}
-								{#if flow.archived}
-									<div class="" />
-									<Alert type="error" title="Archived">This flow was archived</Alert>
-								{/if}
-
+							<div class="flex flex-col gap-2 mb-8">
 								{#if !emptyString(flow.description)}
-									<div class=" break-words whitespace-pre-wrap text-sm">
+									<div class=" break-words whitespace-pre-wrap text-sm mb-4 !text-secondary">
 										<Urlize text={defaultIfEmptyString(flow.description, 'No description')} />
 									</div>
 								{/if}
 							</div>
 
+							{#if deploymentInProgress}
+								<Badge color="yellow">
+									<Loader2 size={12} class="inline animate-spin mr-1" />
+									Deployment in progress
+								</Badge>
+							{/if}
+
 							<RunForm
+								bind:scheduledForStr
+								bind:invisible_to_owner
+								bind:overrideTag
 								viewKeybinding
 								{loading}
 								autofocus
@@ -315,6 +341,23 @@
 								isFlow
 								bind:this={runForm}
 							/>
+							<div class="py-10" />
+
+							{#if !emptyString(flow.summary)}
+								<div class="mb-2">
+									<span class="!text-tertiary">{flow.path}</span>
+								</div>
+							{/if}
+							<div class="flex flex-row gap-x-2 flex-wrap items-center">
+								<span class="text-sm text-tertiary">
+									Edited <TimeAgo date={flow.edited_at ?? ''} /> by {flow.edited_by}
+								</span>
+
+								{#if flow.archived}
+									<div class="" />
+									<Alert type="error" title="Archived">This flow was archived</Alert>
+								{/if}
+							</div>
 						</div>
 					</Pane>
 					<Pane size={40} minSize={20}>
@@ -356,6 +399,7 @@
 		</svelte:fragment>
 		<svelte:fragment slot="webhooks">
 			<WebhooksPanel
+				bind:token
 				scopes={[`run:flow/${flow?.path}`]}
 				webhooks={{
 					async: {
@@ -375,14 +419,14 @@
 		</svelte:fragment>
 		<svelte:fragment slot="cli">
 			<div class="p-2">
-				<InlineCodeCopy content={cliCommand} />
+				<ClipboardPanel content={cliCommand} />
 				<CliHelpBox />
 			</div>
 		</svelte:fragment>
 
 		<svelte:fragment slot="flow_step">
 			{#if stepDetail}
-				<FlowGraphViewer download {flow} overflowAuto noSide={false} noGraph={true} {stepDetail} />
+				<FlowGraphViewerStep {flow} {stepDetail} />
 			{/if}
 		</svelte:fragment>
 	</DetailPageLayout>

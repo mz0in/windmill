@@ -42,6 +42,9 @@ use time::OffsetDateTime;
 use tower_cookies::{Cookie, Cookies};
 use tracing::{Instrument, Span};
 use windmill_audit::{audit_log, ActionKind};
+#[cfg(feature = "enterprise")]
+use windmill_common::ee::{get_license_plan, LicensePlan};
+use windmill_common::oauth2::REQUIRE_PREEXISTING_USER_FOR_OAUTH;
 use windmill_common::users::truncate_token;
 use windmill_common::worker::{CLOUD_HOSTED, SERVER_CONFIG};
 use windmill_common::{
@@ -93,6 +96,7 @@ pub fn global_service() -> Router {
             "/tutorial_progress",
             post(update_tutorial_progress).get(get_tutorial_progress),
         )
+        .route("/leave_instance", post(leave_instance))
     // .route("/list_invite_codes", get(list_invite_codes))
     // .route("/create_invite_code", post(create_invite_code))
     // .route("/signup", post(signup))
@@ -1415,6 +1419,29 @@ async fn add_user_to_workspace<'c>(
     Ok(tx)
 }
 
+async fn leave_instance(
+    Extension(db): Extension<DB>,
+    ApiAuthed { email, username, .. }: ApiAuthed,
+) -> Result<String> {
+    let mut tx = db.begin().await?;
+    sqlx::query!("DELETE FROM password WHERE email = $1", &email)
+        .execute(&mut *tx)
+        .await?;
+
+    audit_log(
+        &mut *tx,
+        &username,
+        "workspaces.leave",
+        ActionKind::Delete,
+        "global",
+        Some(&email),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+
+    Ok(format!("Left instance",))
+}
 async fn update_workspace_user(
     ApiAuthed { username, is_admin, .. }: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1577,6 +1604,8 @@ async fn create_user(
         ));
     }
 
+    _check_nb_of_user(&db).await?;
+
     sqlx::query!(
         "INSERT INTO password(email, verified, password_hash, login_type, super_admin, name, \
          company)
@@ -1601,6 +1630,8 @@ async fn create_user(
         None,
     )
     .await?;
+    tx = add_to_demo_if_exists(tx, &email).await?;
+
     tx.commit().await?;
 
     invite_user_to_all_auto_invite_worspaces(&db, &nu.email).await?;
@@ -1635,9 +1666,16 @@ pub fn send_email_if_possible(subject: &str, content: &str, to: &str) {
 
 pub async fn send_email_if_possible_intern(subject: &str, content: &str, to: &str) -> Result<()> {
     if let Some(smtp) = SERVER_CONFIG.read().await.smtp.clone() {
-        let client = SmtpClientBuilder::new(smtp.host, smtp.port)
-            .implicit_tls(smtp.tls_implicit)
-            .credentials((smtp.username, smtp.password));
+        let client = SmtpClientBuilder::new(smtp.host, smtp.port).implicit_tls(smtp.tls_implicit);
+        let client = if let (Some(username), Some(password)) = (smtp.username, smtp.password) {
+            if !username.is_empty() {
+                client.credentials((username, password))
+            } else {
+                client
+            }
+        } else {
+            client
+        };
         let message = MessageBuilder::new()
             .from(("Windmill", smtp.from.as_str()))
             .to(to)
@@ -2035,7 +2073,7 @@ async fn create_token(
         &mut *tx,
         &email,
         "users.token.create",
-        ActionKind::Delete,
+        ActionKind::Create,
         &"global",
         Some(&token[0..10]),
         None,
@@ -2099,19 +2137,37 @@ async fn impersonate(
     Ok((StatusCode::CREATED, token))
 }
 
+#[derive(Deserialize)]
+struct ListTokenQuery {
+    exclude_ephemeral: Option<bool>,
+}
+
 async fn list_tokens(
     Extension(db): Extension<DB>,
     ApiAuthed { email, .. }: ApiAuthed,
+    Query(query): Query<ListTokenQuery>,
 ) -> JsonResult<Vec<TruncatedToken>> {
-    let rows = sqlx::query_as!(
-        TruncatedToken,
-        "SELECT label, concat(substring(token for 10)) as token_prefix, expiration, created_at, \
-         last_used_at, scopes FROM token WHERE email = $1
-         ORDER BY created_at DESC",
-        email,
-    )
-    .fetch_all(&db)
-    .await?;
+    let rows = if query.exclude_ephemeral.unwrap_or(false) {
+        sqlx::query_as!(
+            TruncatedToken,
+            "SELECT label, concat(substring(token for 10)) as token_prefix, expiration, created_at, \
+             last_used_at, scopes FROM token WHERE email = $1 AND label != 'ephemeral-script'
+             ORDER BY created_at DESC",
+            email,
+        )
+        .fetch_all(&db)
+        .await?
+    } else {
+        sqlx::query_as!(
+            TruncatedToken,
+            "SELECT label, concat(substring(token for 10)) as token_prefix, expiration, created_at, \
+            last_used_at, scopes FROM token WHERE email = $1
+            ORDER BY created_at DESC",
+            email,
+        )
+        .fetch_all(&db)
+        .await?
+    };
     Ok(Json(rows))
 }
 
@@ -2289,13 +2345,27 @@ pub struct LoginUserInfo {
 }
 
 async fn _check_nb_of_user(db: &DB) -> Result<()> {
-    let nb_groups =
+    #[cfg(feature = "enterprise")]
+    if matches!(get_license_plan().await, LicensePlan::Enterprise) {
+        return Ok(());
+    }
+    let nb_users_sso =
         sqlx::query_scalar!("SELECT COUNT(*) FROM password WHERE login_type != 'password'",)
             .fetch_one(db)
             .await?;
-    if nb_groups.unwrap_or(0) >= 50 {
+    if nb_users_sso.unwrap_or(0) >= 10 {
         return Err(Error::BadRequest(
-            "You have reached the maximum number of oauth users accounts (50) without an enterprise license"
+            "You have reached the maximum number of oauth users accounts (10) without an enterprise license"
+                .to_string(),
+        ));
+    }
+
+    let nb_users = sqlx::query_scalar!("SELECT COUNT(*) FROM password",)
+        .fetch_one(db)
+        .await?;
+    if nb_users.unwrap_or(0) >= 50 {
+        return Err(Error::BadRequest(
+            "You have reached the maximum number of accounts (50) without an enterprise license"
                 .to_string(),
         ));
     }
@@ -2316,9 +2386,12 @@ pub async fn login_externally(
             .bind(email)
             .fetch_optional(&mut *tx)
             .await?;
+    let require_existing_user =
+        REQUIRE_PREEXISTING_USER_FOR_OAUTH.load(std::sync::atomic::Ordering::Relaxed);
+
     if let Some((email, login_type, super_admin)) = login {
         let login_type = serde_json::json!(login_type);
-        if login_type == client_name {
+        if require_existing_user || login_type == client_name {
             crate::users::create_session_token(&email, super_admin, &mut tx, cookies).await?;
         } else {
             return Err(error::Error::BadRequest(format!(
@@ -2350,12 +2423,18 @@ pub async fn login_externally(
             .await?;
         };
     } else {
+        if require_existing_user {
+            return Err(error::Error::BadRequest(format!(
+                "no user with the email associated to this login exists (windmill is set to only \
+                     allow oauth logins for existing users)"
+            )));
+        }
+
         let mut name = user.clone().and_then(|x| x.name);
         if (name.is_none() || name == Some(String::new())) && user.is_some() {
             name = user.clone().unwrap().displayName;
         }
 
-        #[cfg(not(feature = "enterprise"))]
         _check_nb_of_user(&db).await?;
 
         sqlx::query(&format!(
@@ -2383,26 +2462,34 @@ pub async fn login_externally(
         )
         .await?;
 
-        let demo_exists =
-            sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM workspace WHERE id = 'demo')")
-                .fetch_one(&mut *tx)
-                .await?
-                .unwrap_or(false);
-        if demo_exists {
-            if let Err(e) = sqlx::query!(
-                "INSERT INTO workspace_invite
-                (workspace_id, email, is_admin)
-                VALUES ('demo', $1, false)
-                ON CONFLICT DO NOTHING",
-                &email
-            )
-            .execute(&mut *tx)
-            .await
-            {
-                tracing::error!("error inserting invite: {:#?}", e);
-            }
-        }
+        tx = add_to_demo_if_exists(tx, email).await?;
     }
     tx.commit().await?;
     Ok(())
+}
+
+async fn add_to_demo_if_exists<'c>(
+    mut tx: sqlx::Transaction<'c, sqlx::Postgres>,
+    email: &String,
+) -> Result<sqlx::Transaction<'c, sqlx::Postgres>> {
+    let demo_exists =
+        sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM workspace WHERE id = 'demo')")
+            .fetch_one(&mut *tx)
+            .await?
+            .unwrap_or(false);
+    if demo_exists {
+        if let Err(e) = sqlx::query!(
+            "INSERT INTO workspace_invite
+                (workspace_id, email, is_admin)
+                VALUES ('demo', $1, false)
+                ON CONFLICT DO NOTHING",
+            &email
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::error!("error inserting invite: {:#?}", e);
+        }
+    }
+    return Ok(tx);
 }

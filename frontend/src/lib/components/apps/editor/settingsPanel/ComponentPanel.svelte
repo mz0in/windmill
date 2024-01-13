@@ -1,6 +1,5 @@
 <script lang="ts">
 	import Button from '$lib/components/common/button/Button.svelte'
-	import { faChevronLeft } from '@fortawesome/free-solid-svg-icons'
 	import { getContext } from 'svelte'
 	import type { AppEditorContext, AppViewerContext, GridItem, RichConfiguration } from '../../types'
 	import PanelSection from './common/PanelSection.svelte'
@@ -25,7 +24,7 @@
 	import { push } from '$lib/history'
 	import Kbd from '$lib/components/common/kbd/Kbd.svelte'
 	import StylePanel from './StylePanel.svelte'
-	import { Delete, ExternalLink } from 'lucide-svelte'
+	import { ChevronLeft, Delete, ExternalLink } from 'lucide-svelte'
 	import GridCondition from './GridCondition.svelte'
 	import { isTriggerable } from './script/utils'
 	import { inferDeps } from '../appUtilsInfer'
@@ -37,6 +36,9 @@
 	import ComponentControl from './ComponentControl.svelte'
 	import GridAgGridLicenseKey from './GridAgGridLicenseKey.svelte'
 	import ComponentPanelDataSource from './ComponentPanelDataSource.svelte'
+	import MenuItems from './MenuItems.svelte'
+	import DecisionTreeGraphEditor from './DecisionTreeGraphEditor.svelte'
+	import GridAgChartsLicenseKe from './GridAgChartsLicenseKe.svelte'
 
 	export let componentSettings: { item: GridItem; parent: string | undefined } | undefined =
 		undefined
@@ -112,6 +114,10 @@
 			  )
 			: undefined
 
+	// 	`
+	// /** The current's app state */
+	// const state: Record<string, any> = ${JSON.stringify(state)};`
+
 	function keydown(event: KeyboardEvent) {
 		const { key, metaKey } = event
 		if (key === 'Delete' || (key === 'Backspace' && metaKey)) {
@@ -121,11 +127,11 @@
 	}
 
 	const initialConfiguration = componentSettings?.item?.data?.type
-		? ccomponents[componentSettings.item.data.type].initialData.configuration
+		? ccomponents[componentSettings.item.data.type]?.initialData?.configuration
 		: {}
 
 	const componentInput: RichConfiguration | undefined = componentSettings?.item?.data?.type
-		? ccomponents[componentSettings?.item?.data?.type].initialData.componentInput
+		? ccomponents[componentSettings?.item?.data?.type]?.initialData?.componentInput
 		: undefined
 
 	$: componentSettings?.item?.data && ($app = $app)
@@ -170,10 +176,10 @@
 	{@const component = componentSettings.item.data}
 	<div class="flex justify-between items-center px-3 py-2 bg-surface-selected">
 		<div class="text-xs text-primary font-semibold"
-			>{components[componentSettings.item.data.type].name}</div
+			>{components[componentSettings.item.data.type]?.name ?? 'Unknown'}</div
 		>
 		<a
-			href={components[componentSettings.item.data.type].documentationLink}
+			href={components[componentSettings.item.data.type]?.documentationLink}
 			target="_blank"
 			class="text-frost-500 dark:text-frost-300 font-semibold text-xs"
 		>
@@ -184,12 +190,14 @@
 		</a>
 	</div>
 
-	<div class="flex min-h-full flex-col min-w-[150px] w-full divide-y">
+	<div class="flex min-h-[calc(100%-32px)] flex-col min-w-[150px] w-full divide-y">
 		<ComponentPanelDataSource bind:component={componentSettings.item.data}>
 			{#if component.componentInput}
 				<PanelSection
 					title={componentSettings?.item.data.type == 'steppercomponent'
 						? 'Validations'
+						: componentSettings?.item.data.type == 's3fileinputcomponent'
+						? 'Path template'
 						: hasInteraction
 						? 'Event handler'
 						: 'Data source'}
@@ -246,7 +254,7 @@
 										<div class="flex flex-wrap gap-2 items-center">
 											<div class="text-2xs text-tertiary">Re-evaluated on changes to:</div>
 											<div class="flex flex-wrap gap-1">
-												{#each componentSettings.item.data?.componentInput.connections as connection (connection.componentId + '-' + connection.id)}
+												{#each componentSettings.item.data?.componentInput.connections ?? [] as connection (connection.componentId + '-' + connection.id)}
 													<span
 														class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium border"
 													>
@@ -263,6 +271,7 @@
 								/>
 							{:else if componentSettings.item.data.componentInput.type === 'evalv2' && component.componentInput !== undefined}
 								<EvalV2InputEditor
+									field="nonrunnable"
 									bind:this={evalV2editor}
 									id={component.id}
 									bind:componentInput={componentSettings.item.data.componentInput}
@@ -320,6 +329,8 @@
 			/>
 		{:else if componentSettings.item.data.type === 'aggridcomponentee'}
 			<GridAgGridLicenseKey bind:license={componentSettings.item.data.license} />
+		{:else if componentSettings.item.data.type === 'agchartscomponentee'}
+			<GridAgChartsLicenseKe bind:license={componentSettings.item.data.license} />
 		{:else if componentSettings.item.data.type === 'steppercomponent'}
 			<GridTab
 				bind:tabs={componentSettings.item.data.tabs}
@@ -336,6 +347,12 @@
 				bind:conditions={componentSettings.item.data.conditions}
 				bind:component={componentSettings.item.data}
 			/>
+		{:else if componentSettings.item.data.type === 'decisiontreecomponent'}
+			<DecisionTreeGraphEditor
+				bind:nodes={componentSettings.item.data.nodes}
+				bind:component={componentSettings.item.data}
+				rebuildOnChange={componentSettings.item.data.nodes}
+			/>
 		{:else if componentSettings.item.data.type === 'verticalsplitpanescomponent' || componentSettings.item.data.type === 'horizontalsplitpanescomponent'}
 			<GridPane
 				bind:panes={componentSettings.item.data.panes}
@@ -343,6 +360,8 @@
 			/>
 		{:else if componentSettings.item.data.type === 'tablecomponent' && Array.isArray(componentSettings.item.data.actionButtons)}
 			<TableActions id={component.id} bind:components={componentSettings.item.data.actionButtons} />
+		{:else if componentSettings.item.data.type === 'menucomponent' && Array.isArray(componentSettings.item.data.menuItems)}
+			<MenuItems id={component.id} bind:components={componentSettings.item.data.menuItems} />
 		{/if}
 
 		{#if Object.values(initialConfiguration).length > 0}
@@ -359,7 +378,6 @@
 				{ccomponents[component.type].name} has no configuration
 			</div>
 		{/if}
-
 		{#if (`recomputeIds` in componentSettings.item.data && Array.isArray(componentSettings.item.data.recomputeIds)) || componentSettings.item.data.type === 'buttoncomponent' || componentSettings.item.data.type === 'formcomponent' || componentSettings.item.data.type === 'formbuttoncomponent' || componentSettings.item.data.type === 'checkboxcomponent'}
 			<Recompute
 				bind:recomputeIds={componentSettings.item.data.recomputeIds}
@@ -369,14 +387,14 @@
 
 		<div class="grow shrink" />
 
-		{#if Object.keys(ccomponents[component.type].customCss ?? {}).length > 0}
+		{#if Object.keys(ccomponents[component.type]?.customCss ?? {}).length > 0}
 			<PanelSection title="Styling">
 				<div slot="action" class="flex justify-end flex-wrap gap-1">
 					<Button
 						color="light"
 						size="xs"
 						variant="border"
-						startIcon={{ icon: faChevronLeft }}
+						startIcon={{ icon: ChevronLeft }}
 						on:click={() => secondaryMenuLeft.toggle(StylePanel, {})}
 					>
 						Show
@@ -385,7 +403,7 @@
 				<AlignmentEditor bind:component={componentSettings.item.data} />
 				{#if viewCssOptions}
 					<div transition:slide|local class="w-full">
-						{#each Object.keys(ccomponents[component.type].customCss ?? {}) as name}
+						{#each Object.keys(ccomponents[component.type]?.customCss ?? {}) as name}
 							{#if componentSettings.item.data?.customCss != undefined}
 								<div class="w-full mb-2">
 									<CssProperty

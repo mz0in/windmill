@@ -45,7 +45,7 @@
 		}
 	}
 
-	let css = initCss($app.css?.containercomponent, customCss)
+	let css = initCss($app.css?.listcomponent, customCss)
 	let result: any[] | undefined = undefined
 
 	$: isCard = resolvedConfig.width?.selected == 'card'
@@ -141,9 +141,13 @@
 		style={css?.container?.style}
 	>
 		<div
-			class="w-full h-full shrink flex flex-wrap {$allIdsInPath.includes(id) && $mode == 'dnd'
+			class="w-full h-full shrink flex {$allIdsInPath.includes(id) && $mode == 'dnd'
 				? 'overflow-visible'
-				: 'overflow-auto'} {isCard ? 'gap-2' : resolvedConfig?.displayBorders ? 'divide-y' : ''}"
+				: 'overflow-auto'} {isCard
+				? 'gap-2 flex-wrap'
+				: resolvedConfig?.displayBorders
+				? 'divide-y flex-col'
+				: 'flex-col'}"
 		>
 			{#if $app.subgrids?.[`${id}-0`]}
 				{#if Array.isArray(result) && result.length > 0}
@@ -158,9 +162,13 @@
 								  } max-height: ${resolvedConfig.heightPx}px;`
 								: ''}
 							class={inRange
-								? `${$allIdsInPath.includes(id) ? 'overflow-visible' : 'overflow-auto'} ${
-										!isCard ? 'w-full' : resolvedConfig?.displayBorders ? 'border' : ''
-								  }`
+								? `${
+										$allIdsInPath.includes(id)
+											? 'overflow-visible'
+											: resolvedConfig.heightPx
+											? 'overflow-auto'
+											: ''
+								  } ${!isCard ? 'w-full' : resolvedConfig?.displayBorders ? 'border' : ''}`
 								: 'h-0 float overflow-hidden invisible absolute'}
 						>
 							<ListWrapper

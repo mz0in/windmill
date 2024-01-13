@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { ScheduleService, JobService, type ScriptArgs, type ScheduleWJobs } from '$lib/gen'
 	import { canWrite, displayDate } from '$lib/utils'
-
 	import CenteredPage from '$lib/components/CenteredPage.svelte'
 	import { Badge, Button, Skeleton } from '$lib/components/common'
-	import Dropdown from '$lib/components/Dropdown.svelte'
+	import Dropdown from '$lib/components/DropdownV2.svelte'
 	import PageHeader from '$lib/components/PageHeader.svelte'
 	import Popover from '$lib/components/Popover.svelte'
 	import ScheduleEditor from '$lib/components/ScheduleEditor.svelte'
@@ -12,19 +11,7 @@
 	import ShareModal from '$lib/components/ShareModal.svelte'
 	import Toggle from '$lib/components/Toggle.svelte'
 	import { userStore, workspaceStore } from '$lib/stores'
-	import {
-		faCircle,
-		faEdit,
-		faEye,
-		faList,
-		faPen,
-		faPlay,
-		faPlus,
-		faShare,
-		faTrash
-	} from '@fortawesome/free-solid-svg-icons'
-	import { Icon } from 'svelte-awesome'
-	import { Loader2 } from 'lucide-svelte'
+	import { Circle, Eye, List, Loader2, Pen, Play, Plus, Share, Trash } from 'lucide-svelte'
 	import { goto } from '$app/navigation'
 	import { sendUserToast } from '$lib/toast'
 	import SearchItems from '$lib/components/SearchItems.svelte'
@@ -123,7 +110,7 @@
 	{filter}
 	items={schedules}
 	bind:filteredItems
-	f={(x) => x.path + ' ' + x.script_path}
+	f={(x) => (x.summary ?? '') + ' ' + x.path + ' (' + x.script_path + ')'}
 />
 
 <CenteredPage>
@@ -132,7 +119,7 @@
 		tooltip="Trigger Scripts and Flows according to a cron schedule"
 		documentationLink="https://www.windmill.dev/docs/core_concepts/scheduling"
 	>
-		<Button size="md" startIcon={{ icon: faPlus }} on:click={() => scheduleEditor.openNew(false)}>
+		<Button size="md" startIcon={{ icon: Plus }} on:click={() => scheduleEditor.openNew(false)}>
 			New&nbsp;schedule
 		</Button>
 	</PageHeader>
@@ -148,7 +135,7 @@
 			<div class="text-center text-sm text-tertiary mt-2"> No schedules </div>
 		{:else if filteredItems?.length}
 			<div class="border rounded-md divide-y">
-				{#each filteredItems as { path, error, edited_by, edited_at, schedule, timezone, enabled, script_path, is_flow, extra_perms, canWrite, args, marked, jobs }}
+				{#each filteredItems as { path, error, summary, edited_by, edited_at, schedule, timezone, enabled, script_path, is_flow, extra_perms, canWrite, args, marked, jobs }}
 					{@const href = `${is_flow ? '/flows/get' : '/scripts/get'}/${script_path}`}
 					{@const avg_s = jobs
 						? jobs.reduce((acc, x) => acc + x.duration_ms, 0) / jobs.length
@@ -172,7 +159,7 @@
 											{@html marked}
 										</span>
 									{:else}
-										{script_path}
+										{summary ?? script_path}
 									{/if}
 								</div>
 								<div class="text-secondary text-xs truncate text-left font-light">
@@ -193,18 +180,11 @@
 								{#if error}
 									<Popover notClickable>
 										<span class="flex h-4 w-4">
-											<Icon
-												class="text-red-600 animate-ping absolute inline-flex "
-												data={faCircle}
-												scale={0.7}
-												label="Error during last job scheduling"
+											<Circle
+												class="text-red-600 animate-ping absolute inline-flex fill-current"
+												size={12}
 											/>
-											<Icon
-												class="text-red-600 relative inline-flex"
-												data={faCircle}
-												scale={0.7}
-												label="Error during last job scheduling"
-											/>
+											<Circle class="text-red-600 relative inline-flex fill-current" size={12} />
 										</span>
 										<div slot="text">
 											The schedule disabled itself because there was an error scheduling the next
@@ -228,7 +208,7 @@
 								<Button
 									href={`/runs/?schedule_path=${path}`}
 									size="xs"
-									startIcon={{ icon: faList }}
+									startIcon={{ icon: List }}
 									color="light"
 									variant="border"
 								>
@@ -237,17 +217,16 @@
 								<Button
 									on:click={() => scheduleEditor?.openEdit(path, is_flow)}
 									size="xs"
-									startIcon={{ icon: faPen }}
+									startIcon={{ icon: Pen }}
 									color="dark"
 								>
 									Edit
 								</Button>
 								<Dropdown
-									placement="bottom-end"
-									dropdownItems={[
+									items={[
 										{
 											displayName: `View ${is_flow ? 'Flow' : 'Script'}`,
-											icon: faEye,
+											icon: Eye,
 											action: () => {
 												goto(href)
 											}
@@ -255,7 +234,7 @@
 										{
 											displayName: 'Delete',
 											type: 'delete',
-											icon: faTrash,
+											icon: Trash,
 											disabled: !canWrite,
 											action: async () => {
 												await ScheduleService.deleteSchedule({
@@ -267,7 +246,7 @@
 										},
 										{
 											displayName: 'Edit',
-											icon: faEdit,
+											icon: Pen,
 											disabled: !canWrite,
 											action: () => {
 												scheduleEditor?.openEdit(path, is_flow)
@@ -275,19 +254,24 @@
 										},
 										{
 											displayName: 'View Runs',
-											icon: faList,
+											icon: List,
 											href: '/runs/?schedule_path=' + path
 										},
 										{
+											displayName: 'Audit logs',
+											icon: Eye,
+											href: `/audit_logs?resource=${path}`
+										},
+										{
 											displayName: 'Run now',
-											icon: faPlay,
+											icon: Play,
 											action: () => {
 												runScheduleNow(script_path, args, is_flow)
 											}
 										},
 										{
 											displayName: canWrite ? 'Share' : 'See Permissions',
-											icon: faShare,
+											icon: Share,
 											action: () => {
 												shareModal.openDrawer(path, 'schedule')
 											}

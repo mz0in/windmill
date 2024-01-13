@@ -1,9 +1,19 @@
 <script lang="ts">
 	import Button from '$lib/components/common/button/Button.svelte'
 	import { WorkerService, type FlowModule } from '$lib/gen'
-	import { faCodeBranch, faPen, faSave } from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher, getContext } from 'svelte'
-	import { Bed, Database, Gauge, PhoneIncoming, Repeat, Square, Voicemail } from 'lucide-svelte'
+	import {
+		Bed,
+		Database,
+		Gauge,
+		GitFork,
+		Pen,
+		PhoneIncoming,
+		Repeat,
+		Save,
+		Square,
+		Voicemail
+	} from 'lucide-svelte'
 	import Popover from '../../Popover.svelte'
 	import type { FlowEditorContext } from '../types'
 	import { sendUserToast } from '$lib/utils'
@@ -27,85 +37,79 @@
 	$: moduleRetry = module.retry?.constant || module.retry?.exponential
 </script>
 
-<div class="flex flex-row space-x-2">
+<div class="flex flex-row space-x-1">
 	{#if module.value.type === 'script' || module.value.type === 'rawscript' || module.value.type == 'flow'}
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2 
-			{moduleRetry
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleRetry')}
-		>
-			<Repeat size={14} />
-			<svelte:fragment slot="text">Retries</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2 
-		{module?.value?.['concurrency_limit'] != undefined
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleConcurrency')}
-		>
-			<Gauge size={14} />
-			<svelte:fragment slot="text">Concurrency Limits</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2 
-		{module.cache_ttl != undefined
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleCache')}
-		>
-			<Database size={14} />
-			<svelte:fragment slot="text">Cache</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2
-			{module.stop_after_if
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleStopAfterIf')}
-		>
-			<Square size={14} />
-			<svelte:fragment slot="text">Early stop/break</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2 
-			{module.suspend
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleSuspend')}
-		>
-			<PhoneIncoming size={14} />
-			<svelte:fragment slot="text">Suspend</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2
-			{module.sleep
-				? 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleSleep')}
-		>
-			<Bed size={14} />
-			<svelte:fragment slot="text">Sleep</svelte:fragment>
-		</Popover>
-		<Popover
-			placement="bottom"
-			class="center-center rounded p-2
-		{module.mock?.enabled
-				? 'bg-blue-100  text-blue-800 border border-blue-300 hover:bg-blue-200'
-				: 'bg-surface text-primay hover:bg-hover'}"
-			on:click={() => dispatch('toggleMock')}
-		>
-			<Voicemail size={14} />
-			<svelte:fragment slot="text">Mock</svelte:fragment>
-		</Popover>
+		{#if moduleRetry}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleRetry')}
+			>
+				<Repeat size={14} />
+				<svelte:fragment slot="text">Retries</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module?.value?.['concurrent_limit'] != undefined}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleConcurrency')}
+			>
+				<Gauge size={14} />
+				<svelte:fragment slot="text">Concurrency Limits</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module.cache_ttl != undefined}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 'bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleCache')}
+			>
+				<Database size={14} />
+				<svelte:fragment slot="text">Cache</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module.stop_after_if}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleStopAfterIf')}
+			>
+				<Square size={14} />
+				<svelte:fragment slot="text">Early stop/break</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module.suspend}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleSuspend')}
+			>
+				<PhoneIncoming size={14} />
+				<svelte:fragment slot="text">Suspend</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module.sleep}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200
+				dark:bg-frost-700 dark:text-frost-100 dark:border-frost-600"
+				on:click={() => dispatch('toggleSleep')}
+			>
+				<Bed size={14} />
+				<svelte:fragment slot="text">Sleep</svelte:fragment>
+			</Popover>
+		{/if}
+		{#if module.mock?.enabled}
+			<Popover
+				placement="bottom"
+				class="center-center rounded p-2 bg-blue-100  text-blue-800 border border-blue-300 hover:bg-blue-200"
+				on:click={() => dispatch('toggleMock')}
+			>
+				<Voicemail size={14} />
+				<svelte:fragment slot="text">Mock</svelte:fragment>
+			</Popover>
+		{/if}
 	{/if}
 	{#if module.value.type === 'script'}
 		<div class="w-2" />
@@ -122,7 +126,7 @@
 						})
 					}
 				}}
-				startIcon={{ icon: faPen }}
+				startIcon={{ icon: Pen }}
 				iconOnly={false}
 				disabled={module.value.hash != undefined}
 			>
@@ -133,20 +137,20 @@
 			size="xs"
 			color="light"
 			on:click={() => dispatch('fork')}
-			startIcon={{ icon: faCodeBranch }}
+			startIcon={{ icon: GitFork }}
 			iconOnly={false}
 		>
 			Fork
 		</Button>
 	{/if}
-
+	<div class="px-0.5" />
 	{#if module.value.type === 'rawscript'}
 		{#if $workerTags}
 			{#if $workerTags?.length > 0}
 				<div class="w-40">
 					{#if $flowStore.tag == undefined}
 						<select
-							placeholder="Worker group"
+							placeholder="Tag"
 							bind:value={module.value.tag}
 							on:change={(e) => {
 								if (module.value.type === 'rawscript') {
@@ -159,7 +163,7 @@
 							{#if module.value.tag}
 								<option value="">reset to default</option>
 							{:else}
-								<option value="" disabled selected>Worker Group</option>
+								<option value="" disabled selected>Tag</option>
 							{/if}
 							{#each $workerTags ?? [] as tag (tag)}
 								<option value={tag}>{tag}</option>
@@ -180,7 +184,7 @@
 		<Button
 			size="xs"
 			color="light"
-			startIcon={{ icon: faSave }}
+			startIcon={{ icon: Save }}
 			on:click={() => dispatch('createScriptFromInlineScript')}
 			iconOnly={false}
 		>

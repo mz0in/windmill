@@ -1,4 +1,5 @@
 <script lang="ts">
+	import AssignableTags from '$lib/components/AssignableTags.svelte'
 	import CenteredPage from '$lib/components/CenteredPage.svelte'
 	import { Button, Popup, Skeleton } from '$lib/components/common'
 	import Badge from '$lib/components/common/badge/Badge.svelte'
@@ -9,23 +10,22 @@
 	import Toggle from '$lib/components/Toggle.svelte'
 	import Tooltip from '$lib/components/Tooltip.svelte'
 	import WorkspaceGroup from '$lib/components/WorkspaceGroup.svelte'
+	import { WORKER_S3_BUCKET_SYNC_SETTING } from '$lib/consts'
 	import { WorkerService, type WorkerPing, SettingService, ConfigService } from '$lib/gen'
 	import { enterpriseLicense, superadmin } from '$lib/stores'
 	import { sendUserToast } from '$lib/toast'
 	import { displayDate, groupBy, truncate } from '$lib/utils'
-	import { faPlus } from '@fortawesome/free-solid-svg-icons'
-	import { AlertTriangle, Loader2, Pen, X } from 'lucide-svelte'
+	import { AlertTriangle, Plus } from 'lucide-svelte'
 	import { onDestroy, onMount } from 'svelte'
 
 	let workers: WorkerPing[] | undefined = undefined
 	let filteredWorkers: WorkerPing[] = []
 	let workerGroups: Record<string, any> | undefined = undefined
 	let groupedWorkers: [string, [string, WorkerPing[]][]][] = []
-	let intervalId: NodeJS.Timer | undefined
+	let intervalId: NodeJS.Timeout | undefined
 
 	const splitter = '_%%%_'
 	let globalCache = false
-	let customTags: string[] | undefined = []
 	$: filteredWorkers = (workers ?? []).filter((x) => (x.last_ping ?? 0) < 300)
 	$: groupedWorkers = groupBy(
 		groupBy(
@@ -36,9 +36,6 @@
 		(x) => x[0]?.split(splitter)?.[1],
 		(x) => x[0]?.split(splitter)?.[0]
 	)
-
-	const WORKER_S3_BUCKET_SYNC_SETTING = 'worker_s3_bucket_sync'
-	const CUSTOM_TAGS_SETTING = 'custom_tags'
 
 	let timeSinceLastPing = 0
 
@@ -61,7 +58,7 @@
 		}
 	}
 
-	let secondInterval: NodeJS.Timer | undefined = undefined
+	let secondInterval: NodeJS.Timeout | undefined = undefined
 	onMount(() => {
 		loadWorkers()
 		loadWorkerGroups()
@@ -72,23 +69,15 @@
 		secondInterval = setInterval(() => {
 			timeSinceLastPing += 1
 		}, 1000)
-		if ($superadmin) {
-			loadGlobalCache()
-			loadCustomTags()
-		}
 	})
+
+	$: if ($superadmin) {
+		loadGlobalCache()
+	}
 
 	async function loadGlobalCache() {
 		try {
 			globalCache = (await SettingService.getGlobal({ key: WORKER_S3_BUCKET_SYNC_SETTING })) ?? true
-		} catch (err) {
-			sendUserToast(`Could not load global cache: ${err}`, true)
-		}
-	}
-
-	async function loadCustomTags() {
-		try {
-			customTags = (await SettingService.getGlobal({ key: CUSTOM_TAGS_SETTING })) ?? []
 		} catch (err) {
 			sendUserToast(`Could not load global cache: ${err}`, true)
 		}
@@ -103,14 +92,14 @@
 		}
 	})
 
-	let newGroupName = ''
+	let newConfigName = ''
 
-	async function addGroup() {
-		await ConfigService.updateConfig({ name: 'worker__' + newGroupName, requestBody: {} })
+	let customTags: string[] | undefined = undefined
+
+	async function addConfig() {
+		await ConfigService.updateConfig({ name: 'worker__' + newConfigName, requestBody: {} })
 		loadWorkerGroups()
 	}
-
-	let newTag: string = ''
 </script>
 
 <CenteredPage>
@@ -137,7 +126,7 @@
 							}
 						}}
 						options={{ right: 'global cache to s3' }}
-						disabled={!$enterpriseLicense}
+						disabled={!$enterpriseLicense || $enterpriseLicense.endsWith('_pro')}
 					/>
 					<Tooltip
 						><p
@@ -149,90 +138,14 @@
 						is on)</Tooltip
 					>
 				</div>
-				<div
-					><Popup
-						floatingConfig={{ strategy: 'absolute', placement: 'bottom-end' }}
-						containerClasses="border rounded-lg shadow-lg p-4 bg-surface"
-					>
-						<svelte:fragment slot="button">
-							<Button color="dark" size="xs" nonCaptureEvent={true}>
-								<div class="flex flex-row gap-1 items-center"
-									><Pen size={14} /> Assignable tags&nbsp;<Tooltip light
-										>Tags are assigned to scripts and flows. Workers only accept jobs that
-										correspond to their worker tags. Scripts have a default tag based on the
-										language they are in but users can choose to override their tags with custom
-										ones. This editor allow you to set the custom tags one can override the scripts
-										and flows with.</Tooltip
-									></div
-								>
-							</Button>
-						</svelte:fragment>
-						<div class="flex flex-col w-72 p-2 gap-2">
-							{#if customTags == undefined}
-								<Loader2 class="animate-spin" />
-							{:else}
-								<div class="flex flex-wrap gap-3 gap-y-2">
-									{#each customTags as customTag}
-										<div class="flex gap-0.5 items-center"
-											><div class="text-2xs p-1 rounded border text-primary">{customTag}</div>
-											<button
-												class="z-10 rounded-full p-1 duration-200 hover:bg-gray-200"
-												aria-label="Remove item"
-												on:click|preventDefault|stopPropagation={async () => {
-													await SettingService.setGlobal({
-														key: CUSTOM_TAGS_SETTING,
-														requestBody: { value: customTags?.filter((x) => x != customTag) }
-													})
-													loadCustomTags()
-													sendUserToast('Tag removed')
-												}}
-											>
-												<X size={12} />
-											</button></div
-										>
-									{/each}
-								</div>
-								<input type="text" bind:value={newTag} />
-
-								<Button
-									variant="contained"
-									color="blue"
-									size="sm"
-									on:click={async () => {
-										await SettingService.setGlobal({
-											key: CUSTOM_TAGS_SETTING,
-											requestBody: {
-												value: [...(customTags ?? []), newTag.trim().replaceAll(' ', '_')]
-											}
-										})
-										loadCustomTags()
-										sendUserToast('Tag added')
-									}}
-									disabled={newTag.trim() == ''}
-								>
-									Add
-								</Button>
-								<span class="text-2xs text-tertiary"
-									>For tags specific to some workspaces, use <pre class="inline"
-										>tag(workspace1+workspace2)</pre
-									></span
-								>
-								<span class="text-2xs text-tertiary"
-									>For dynamic tags based on the workspace, use <pre class="inline">$workspace</pre
-									>, e.g:
-									<pre class="inline">tag-$workspace</pre></span
-								>
-							{/if}
-						</div>
-					</Popup>
-				</div>
+				<div><AssignableTags bind:customTags /> </div>
 			</div>
 		{/if}
 	</PageHeader>
 
 	{#if workers != undefined}
 		{#if groupedWorkers.length == 0}
-			<p>No workers seems to be available</p>
+			<p>No workers seem to be available</p>
 		{/if}
 
 		<div class="py-4 w-full flex justify-between"
@@ -253,16 +166,16 @@
 					>
 						<svelte:fragment slot="button">
 							<div class="flex items-center">
-								<Button size="sm" startIcon={{ icon: faPlus }} nonCaptureEvent
-									>New worker group config</Button
-								>
-								<Tooltip
-									>Worker Group configs are propagated to every workers in the worker group</Tooltip
-								>
+								<Button size="sm" startIcon={{ icon: Plus }} nonCaptureEvent>
+									New worker group config
+									<Tooltip light>
+										Worker Group configs are propagated to every workers in the worker group
+									</Tooltip>
+								</Button>
 							</div>
 						</svelte:fragment>
 						<div class="flex flex-col gap-2">
-							<input class="mr-2 h-full" placeholder="New group name" bind:value={newGroupName} />
+							<input class="mr-2 h-full" placeholder="New group name" bind:value={newConfigName} />
 
 							{#if !$enterpriseLicense}
 								<div class="flex items-center whitespace-nowrap text-yellow-600 gap-2">
@@ -272,9 +185,9 @@
 							{/if}
 							<Button
 								size="sm"
-								startIcon={{ icon: faPlus }}
-								disabled={!newGroupName || !$enterpriseLicense}
-								on:click={addGroup}
+								startIcon={{ icon: Plus }}
+								disabled={!newConfigName || !$enterpriseLicense}
+								on:click={addConfig}
 							>
 								Create
 							</Button>
@@ -283,8 +196,9 @@
 				</div>
 			{/if}</div
 		>
-		{#each groupedWorkers as worker_group}
+		{#each groupedWorkers as worker_group (worker_group[0])}
 			<WorkspaceGroup
+				{customTags}
 				name={worker_group[0]}
 				config={(workerGroups ?? {})[worker_group[0]]}
 				on:reload={() => {
@@ -312,6 +226,7 @@
 						<Cell head>Last ping</Cell>
 						<Cell head>Worker start</Cell>
 						<Cell head>Nb of jobs executed</Cell>
+						<Cell head>Version</Cell>
 						<Cell head last>Liveness</Cell>
 					</tr>
 				</Head>
@@ -320,7 +235,7 @@
 						<tr class="border-t">
 							<Cell
 								first
-								colspan="6"
+								colspan="7"
 								scope="colgroup"
 								class="bg-surface-secondary/60 py-2 border-b"
 							>
@@ -333,7 +248,7 @@
 						</tr>
 
 						{#if workers}
-							{#each workers as { worker, custom_tags, last_ping, started_at, jobs_executed }}
+							{#each workers as { worker, custom_tags, last_ping, started_at, jobs_executed, wm_version }}
 								<tr>
 									<Cell first>{worker}</Cell>
 									<Cell>
@@ -347,6 +262,11 @@
 									<Cell>{last_ping != undefined ? last_ping + timeSinceLastPing : -1}s ago</Cell>
 									<Cell>{displayDate(started_at)}</Cell>
 									<Cell>{jobs_executed}</Cell>
+									<Cell
+										><div class="!text-2xs"
+											>{wm_version.split('-')[0]}<Tooltip>{wm_version}</Tooltip></div
+										></Cell
+									>
 									<Cell last>
 										<Badge
 											color={last_ping != undefined ? (last_ping < 60 ? 'green' : 'red') : 'gray'}
@@ -365,8 +285,9 @@
 
 		<div class="pb-4" />
 
-		{#each Object.entries(workerGroups ?? {}).filter((x) => !groupedWorkers.some((y) => y[0] == x[0])) as worker_group}
+		{#each Object.entries(workerGroups ?? {}).filter((x) => !groupedWorkers.some((y) => y[0] == x[0])) as worker_group (worker_group[0])}
 			<WorkspaceGroup
+				{customTags}
 				on:reload={() => {
 					loadWorkerGroups()
 				}}

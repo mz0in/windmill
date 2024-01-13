@@ -1,10 +1,14 @@
 <script lang="ts">
-	import type { Schema, SchemaProperty, PropertyDisplayInfo } from '$lib/common'
+	import {
+		type Schema,
+		type SchemaProperty,
+		type PropertyDisplayInfo,
+		modalToSchema,
+		type ModalSchemaProperty
+	} from '$lib/common'
 	import { emptySchema, emptyString, sendUserToast } from '$lib/utils'
-	import { faPlus } from '@fortawesome/free-solid-svg-icons'
 	import { Button } from './common'
 	import { createEventDispatcher } from 'svelte'
-	import type { ModalSchemaProperty } from './SchemaModal.svelte'
 	import SchemaModal, { DEFAULT_PROPERTY, schemaToModal } from './SchemaModal.svelte'
 	import PropertyRow from './PropertyRow.svelte'
 	import SimpleEditor from './SimpleEditor.svelte'
@@ -13,6 +17,7 @@
 	import Tooltip from './Tooltip.svelte'
 	import { flip } from 'svelte/animate'
 	import Portal from 'svelte-portal'
+	import { Plus } from 'lucide-svelte'
 
 	export let isFlowInput = false
 
@@ -79,32 +84,25 @@
 		}
 	}
 
-	function modalToSchema(schema: ModalSchemaProperty): SchemaProperty {
-		return {
-			type: schema.selectedType,
-			description: schema.description,
-			pattern: schema.pattern,
-			default: schema.default,
-			enum: schema.enum_,
-			items: schema.items,
-			contentEncoding: schema.contentEncoding,
-			format: schema.format,
-			properties: schema.schema?.properties,
-			required: schema.schema?.required
-		}
-	}
 	function handleAddOrEditArgument(modalProperty: ModalSchemaProperty): void {
 		// If editing the arg's name, oldName containing the old argument name must be provided
 		argError = ''
 		modalProperty.name = modalProperty.name.trim()
+
 		if (modalProperty.name.length === 0) {
 			argError = 'Arguments need to have a name'
 		} else if (
-			Object.keys(schema.properties).includes(modalProperty.name) &&
+			Object.keys(schema.properties ?? {}).includes(modalProperty.name) &&
 			(!editing || (editing && oldArgName && oldArgName !== modalProperty.name))
 		) {
 			argError = 'There is already an argument with this name'
 		} else {
+			if (!schema.properties) {
+				schema.properties = {}
+			}
+			if (!schema.required) {
+				schema.required = []
+			}
 			schema.properties[modalProperty.name] = modalToSchema(modalProperty)
 			if (modalProperty.required) {
 				if (!schema.required.includes(modalProperty.name)) {
@@ -126,6 +124,7 @@
 
 			schemaModal.closeDrawer()
 		}
+
 		schema = schema
 		syncOrders()
 		schemaString = JSON.stringify(schema, null, '\t')
@@ -262,24 +261,25 @@
 </script>
 
 <div class="flex flex-col">
-	<div class="flex justify-between gap-x-2">
+	<div class="flex justify-between items-center gap-x-2">
 		<div>
 			<Button
 				variant="contained"
 				color="dark"
-				size="sm"
-				startIcon={{ icon: faPlus }}
+				size={lightMode ? 'xs2' : 'sm'}
+				startIcon={{ icon: Plus }}
 				on:click={() => {
 					schemaModal.openDrawer(Object.assign({}, DEFAULT_PROPERTY))
 				}}
 				id="flow-editor-add-property"
 			>
-				Add Property
+				Add Argument
 			</Button>
 		</div>
 
 		<div class="flex items-center">
 			<Toggle
+				size={lightMode ? 'xs' : 'sm'}
 				on:change={() => switchTab()}
 				options={{
 					right: 'As JSON'
@@ -334,6 +334,7 @@
 		{:else}
 			<div class="border rounded p-2">
 				<SimpleEditor
+					small
 					bind:this={jsonEditor}
 					fixedOverflowWidgets={false}
 					on:change={() => {
@@ -366,5 +367,6 @@
 		on:save={(e) => handleAddOrEditArgument(e.detail)}
 		bind:editing
 		bind:oldArgName
+		propsNames={Object.keys(schema.properties ?? {})}
 	/>
 </Portal>

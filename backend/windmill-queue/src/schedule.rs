@@ -10,7 +10,9 @@ use crate::push;
 use crate::PushIsolationLevel;
 use crate::QueueTransaction;
 use sqlx::{query_scalar, Postgres, Transaction};
+use std::collections::HashMap;
 use std::str::FromStr;
+use windmill_common::flows::Retry;
 use windmill_common::jobs::JobPayload;
 use windmill_common::schedule::schedule_to_user;
 use windmill_common::DB;
@@ -71,8 +73,22 @@ pub async fn push_scheduled_job<'c, R: rsmq_async::RsmqConnection + Send + 'c>(
         }
     }
 
-    let (payload, tag) = if schedule.is_flow {
-        (JobPayload::Flow(schedule.script_path), None)
+    let (payload, tag, timeout) = if schedule.is_flow {
+        let r = sqlx::query!(
+            "SELECT tag, dedicated_worker from flow WHERE path = $1 and workspace_id = $2",
+            &schedule.script_path,
+            &schedule.workspace_id,
+        )
+        .fetch_optional(&mut tx)
+        .await?;
+        let (tag, dedicated_worker) = r
+            .map(|x| (x.tag, x.dedicated_worker))
+            .unwrap_or_else(|| (None, None));
+        (
+            JobPayload::Flow { path: schedule.script_path, dedicated_worker },
+            tag,
+            None,
+        )
     } else {
         let (
             hash,
@@ -83,25 +99,58 @@ pub async fn push_scheduled_job<'c, R: rsmq_async::RsmqConnection + Send + 'c>(
             language,
             dedicated_worker,
             priority,
+            timeout,
         ) = windmill_common::get_latest_hash_for_path(
             tx.transaction_mut(),
             &schedule.workspace_id,
             &schedule.script_path,
         )
         .await?;
-        (
-            JobPayload::ScriptHash {
-                hash,
-                path: schedule.script_path,
-                concurrent_limit: concurrent_limit,
-                concurrency_time_window_s: concurrency_time_window_s,
-                cache_ttl: cache_ttl,
-                dedicated_worker,
-                language,
-                priority,
-            },
-            tag,
-        )
+
+        if schedule.retry.is_some() {
+            let parsed_retry =
+                serde_json::from_value::<Retry>(schedule.retry.unwrap()).map_err(|err| {
+                    error::Error::InternalErr(format!(
+                        "Unable to parse retry information from schedule: {}",
+                        err.to_string(),
+                    ))
+                })?;
+            let mut static_args = HashMap::<String, serde_json::Value>::new();
+            for (arg_name, arg_value) in args.clone() {
+                static_args.insert(arg_name, arg_value);
+            }
+            // if retry is set, we wrap the script into a one step flow with a retry on the module
+            (
+                JobPayload::SingleScriptFlow {
+                    path: schedule.script_path,
+                    hash: hash,
+                    retry: parsed_retry,
+                    args: static_args,
+                    concurrent_limit: concurrent_limit,
+                    concurrency_time_window_s: concurrency_time_window_s,
+                    cache_ttl: cache_ttl,
+                    priority: priority,
+                    tag_override: schedule.tag.clone(),
+                },
+                Some("flow".to_string()),
+                timeout,
+            )
+        } else {
+            (
+                JobPayload::ScriptHash {
+                    hash,
+                    path: schedule.script_path,
+                    concurrent_limit: concurrent_limit,
+                    concurrency_time_window_s: concurrency_time_window_s,
+                    cache_ttl: cache_ttl,
+                    dedicated_worker,
+                    language,
+                    priority,
+                },
+                schedule.tag.or(tag),
+                timeout,
+            )
+        }
     };
 
     sqlx::query!(
@@ -131,7 +180,7 @@ pub async fn push_scheduled_job<'c, R: rsmq_async::RsmqConnection + Send + 'c>(
         None,
         true,
         tag,
-        None,
+        timeout,
         None,
         None,
     )

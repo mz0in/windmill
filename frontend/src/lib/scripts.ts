@@ -7,9 +7,9 @@ export function scriptLangToEditorLang(lang: Script.language) {
 	if (lang == 'deno') {
 		return 'typescript'
 	} else if (lang == 'bun') {
-		return 'typescript'
+		return 'javascript'
 	} else if (lang == 'nativets') {
-		return 'typescript'
+		return 'javascript'
 		// } else if (lang == 'graphql') {
 		// 	return 'typescript'
 	} else if (lang == 'postgresql') {
@@ -19,6 +19,8 @@ export function scriptLangToEditorLang(lang: Script.language) {
 	} else if (lang == 'bigquery') {
 		return 'sql'
 	} else if (lang == 'snowflake') {
+		return 'sql'
+	} else if (lang == 'mssql') {
 		return 'sql'
 	} else if (lang == 'python3') {
 		return 'python'

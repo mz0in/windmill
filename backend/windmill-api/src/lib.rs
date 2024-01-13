@@ -36,6 +36,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 use windmill_common::db::UserDB;
+#[cfg(feature = "enterprise_saml")]
+use windmill_common::ee::{get_license_plan, LicensePlan};
 use windmill_common::utils::rd_string;
 use windmill_common::worker::ALL_TAGS;
 use windmill_common::BASE_URL;
@@ -57,6 +59,8 @@ mod granular_acls;
 mod groups;
 mod inputs;
 mod integration;
+pub mod job_helpers;
+pub mod job_metrics;
 pub mod jobs;
 pub mod oauth2;
 mod openai;
@@ -104,10 +108,6 @@ lazy_static::lazy_static! {
         connects: HashMap::new(),
         slack: None
     }));
-
-    pub static ref LICENSE_KEY_VALID: Arc<RwLock<bool>> = Arc::new(RwLock::new(true));
-    pub static ref LICENSE_KEY_ID: Arc<RwLock<String>> = Arc::new(RwLock::new("".to_string()));
-    pub static ref LICENSE_KEY: Arc<RwLock<String>> = Arc::new(RwLock::new("".to_string()));
 }
 
 pub async fn run_server(
@@ -115,7 +115,7 @@ pub async fn run_server(
     rsmq: Option<rsmq_async::MultiplexedRsmq>,
     addr: SocketAddr,
     mut rx: tokio::sync::broadcast::Receiver<()>,
-    port_tx: tokio::sync::oneshot::Sender<u16>,
+    port_tx: tokio::sync::oneshot::Sender<String>,
     server_mode: bool,
 ) -> anyhow::Result<()> {
     if let Some(mut rsmq) = rsmq.clone() {
@@ -160,10 +160,13 @@ pub async fn run_server(
         .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
         .allow_origin(Any);
 
-    #[cfg(feature = "enterprise")]
-    let sp_extension: (ServiceProviderExt, SamlSsoLogin) = saml::build_sp_extension().await?;
+    #[cfg(feature = "enterprise_saml")]
+    let sp_extension: (ServiceProviderExt, SamlSsoLogin) = match get_license_plan().await {
+        LicensePlan::Enterprise => saml::build_sp_extension().await?,
+        LicensePlan::Pro => (ServiceProviderExt(None), SamlSsoLogin(None)),
+    };
 
-    #[cfg(not(feature = "enterprise"))]
+    #[cfg(not(feature = "enterprise_saml"))]
     let sp_extension = (ServiceProviderExt(), SamlSsoLogin(None));
 
     let embeddings_db = if server_mode {
@@ -183,31 +186,33 @@ pub async fn run_server(
                         // Reordered alphabetically
                         .nest("/acls", granular_acls::workspaced_service())
                         .nest("/apps", apps::workspaced_service())
-                        .nest("/raw_apps", raw_apps::workspaced_service())
                         .nest("/audit", audit::workspaced_service())
                         .nest("/capture", capture::workspaced_service())
+                        .nest(
+                            "/embeddings",
+                            embeddings::workspaced_service(embeddings_db.clone()),
+                        )
+                        .nest("/drafts", drafts::workspaced_service())
                         .nest("/favorites", favorite::workspaced_service())
                         .nest("/flows", flows::workspaced_service())
                         .nest("/folders", folders::workspaced_service())
                         .nest("/groups", groups::workspaced_service())
                         .nest("/inputs", inputs::workspaced_service())
+                        .nest("/job_metrics", job_metrics::workspaced_service())
+                        .nest("/job_helpers", job_helpers::workspaced_service())
                         .nest("/jobs", jobs::workspaced_service())
                         .nest("/oauth", oauth2::workspaced_service())
+                        .nest("/openai", openai::workspaced_service())
+                        .nest("/raw_apps", raw_apps::workspaced_service())
                         .nest("/resources", resources::workspaced_service())
                         .nest("/schedules", schedule::workspaced_service())
                         .nest("/scripts", scripts::workspaced_service())
-                        .nest("/drafts", drafts::workspaced_service())
                         .nest(
                             "/users",
                             users::workspaced_service().layer(Extension(argon2.clone())),
                         )
                         .nest("/variables", variables::workspaced_service())
-                        .nest("/workspaces", workspaces::workspaced_service())
-                        .nest("/openai", openai::workspaced_service())
-                        .nest(
-                            "/embeddings",
-                            embeddings::workspaced_service(embeddings_db.clone()),
-                        ),
+                        .nest("/workspaces", workspaces::workspaced_service()),
                 )
                 .nest("/workspaces", workspaces::global_service())
                 .nest(
@@ -250,6 +255,10 @@ pub async fn run_server(
                     jobs::global_service().layer(cors.clone()),
                 )
                 .nest(
+                    "/w/:workspace_id/resources_u",
+                    resources::public_service().layer(cors.clone()),
+                )
+                .nest(
                     "/w/:workspace_id/capture_u",
                     capture::global_service().layer(cors),
                 )
@@ -282,7 +291,7 @@ pub async fn run_server(
     );
 
     port_tx
-        .send(server.local_addr().port())
+        .send(format!("http://localhost:{}", server.local_addr().port()))
         .expect("Failed to send port");
 
     let server = server.with_graceful_shutdown(async {
@@ -337,6 +346,8 @@ async fn ee_license() -> &'static str {
 
 #[cfg(feature = "enterprise")]
 async fn ee_license() -> String {
+    use windmill_common::ee::LICENSE_KEY_ID;
+
     LICENSE_KEY_ID.read().await.clone()
 }
 

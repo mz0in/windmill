@@ -10,13 +10,17 @@ use tokio::{
     process::Command,
 };
 use uuid::Uuid;
+#[cfg(feature = "enterprise")]
+use windmill_common::ee::{get_license_plan, LicensePlan};
 use windmill_common::{
     error::{self, Error},
     jobs::QueuedJob,
     utils::calculate_hash,
+    variables::get_secret_value_as_admin,
     worker::WORKER_CONFIG,
     DB,
 };
+use windmill_queue::CanceledBy;
 
 lazy_static::lazy_static! {
     static ref PYTHON_PATH: String =
@@ -24,11 +28,11 @@ lazy_static::lazy_static! {
 
     static ref FLOCK_PATH: String =
     std::env::var("FLOCK_PATH").unwrap_or_else(|_| "/usr/bin/flock".to_string());
-
-
+    static ref NON_ALPHANUM_CHAR: Regex = regex::Regex::new(r"[^0-9A-Za-z=.-]").unwrap();
 
     static ref PIP_INDEX_URL: Option<String> = std::env::var("PIP_INDEX_URL").ok();
     static ref PIP_TRUSTED_HOST: Option<String> = std::env::var("PIP_TRUSTED_HOST").ok();
+    static ref PIP_INDEX_CERT: Option<String> = std::env::var("PIP_INDEX_CERT").ok();
 
 
     static ref RELATIVE_IMPORT_REGEX: Regex = Regex::new(r#"(import|from)\s(((u|f)\.)|\.)"#).unwrap();
@@ -67,6 +71,7 @@ pub async fn pip_compile(
     requirements: &str,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job_dir: &str,
     db: &Pool<Postgres>,
     worker_name: &str,
@@ -79,20 +84,34 @@ pub async fn pip_compile(
         WORKER_CONFIG.read().await.pip_local_dependencies.as_ref()
     {
         let deps = pip_local_dependencies.clone();
+        let compiled_deps = deps.iter().map(|dep| {
+            let compiled_dep = Regex::new(dep);
+            match compiled_dep {
+                Ok(compiled_dep) => Some(compiled_dep),
+                Err(e) => {
+                    tracing::warn!("regex compilation failed for Python local dependency: '{}' - it will be ignored", e);
+                    return None;
+                }
+            }
+        }).filter(|dep_maybe| dep_maybe.is_some()).map(|dep| dep.unwrap()).collect::<Vec<Regex>>();
         requirements
             .lines()
             .filter(|s| {
-                if !deps.contains(&s.to_string()) {
-                    return true;
-                } else {
+                if compiled_deps.iter().any(|dep| dep.is_match(s)) {
                     logs.push_str(&format!("\nignoring local dependency: {}", s));
                     return false;
+                } else {
+                    return true;
                 }
             })
             .join("\n")
     } else {
         requirements.to_string()
     };
+
+    #[cfg(feature = "enterprise")]
+    let requirements = replace_pip_secret(db, w_id, &requirements, worker_name, job_id).await?;
+
     let req_hash = format!("py-{}", calculate_hash(&requirements));
     if let Some(cached) = sqlx::query_scalar!(
         "SELECT lockfile FROM pip_resolution_cache WHERE hash = $1",
@@ -119,6 +138,9 @@ pub async fn pip_compile(
     if let Some(host) = PIP_TRUSTED_HOST.as_ref() {
         args.extend(["--trusted-host", host]);
     }
+    if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
+        args.extend(["--cert", cert_path]);
+    }
 
     let mut child_cmd = Command::new("pip-compile");
     child_cmd
@@ -132,6 +154,7 @@ pub async fn pip_compile(
         db,
         logs,
         mem_peak,
+        canceled_by,
         child_process,
         false,
         worker_name,
@@ -169,6 +192,7 @@ pub async fn handle_python_job(
     job: &QueuedJob,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     db: &sqlx::Pool<sqlx::Postgres>,
     client: &AuthedClientBackgroundTask,
     inner_content: &String,
@@ -189,6 +213,7 @@ pub async fn handle_python_job(
         worker_dir,
         logs,
         mem_peak,
+        canceled_by,
     )
     .await?;
 
@@ -251,7 +276,7 @@ try:
     res_json = re.sub(replace_nan, ' null ', json.dumps(res, separators=(',', ':'), default=str).replace('\n', ''))
     with open("result.json", 'w') as f:
         f.write(res_json)
-except Exception as e:
+except BaseException as e:
     exc_type, exc_value, exc_traceback = sys.exc_info()
     tb = traceback.format_tb(exc_traceback)
     with open("result.json", 'w') as f:
@@ -352,6 +377,7 @@ mount {{
         db,
         logs,
         mem_peak,
+        canceled_by,
         child,
         !*DISABLE_NSJAIL,
         worker_name,
@@ -404,6 +430,13 @@ async fn prepare_wrapper(
         .to_lowercase();
     let module_dir = format!("{}/{}", job_dir, dirs);
     tokio::fs::create_dir_all(format!("{module_dir}/")).await?;
+
+    let last = if last.starts_with(|x: char| x.is_ascii_digit()) {
+        format!("_{}", last)
+    } else {
+        last
+    };
+
     let _ = write_file(&module_dir, &format!("{last}.py"), inner_content).await?;
     if relative_imports {
         let _ = write_file(job_dir, "loader.py", RELATIVE_PYTHON_LOADER).await?;
@@ -490,6 +523,37 @@ if args["{name}"] is None:
     ))
 }
 
+async fn replace_pip_secret(
+    db: &DB,
+    w_id: &str,
+    req: &str,
+    worker_name: &str,
+    job_id: &Uuid,
+) -> error::Result<String> {
+    if PIP_SECRET_VARIABLE.is_match(req) {
+        let capture = PIP_SECRET_VARIABLE.captures(req);
+        let variable = capture.unwrap().get(1).unwrap().as_str();
+        if !variable.contains("/PIP_SECRET_") {
+            return Err(error::Error::InternalErr(format!(
+                "invalid secret variable in pip requirements, (last part of path ma): {}",
+                req
+            )));
+        }
+        let secret = get_secret_value_as_admin(db, w_id, variable).await?;
+        tracing::info!(
+            worker_name = %worker_name,
+            job_id = %job_id,
+            workspace_id = %w_id,
+            "found secret variable in pip requirements: {}",
+            req
+        );
+        let req = PIP_SECRET_VARIABLE.replace(req, secret.as_str());
+        Ok(req.to_string())
+    } else {
+        Ok(req.to_string())
+    }
+}
+
 async fn handle_python_deps(
     job_dir: &str,
     requirements_o: Option<String>,
@@ -502,6 +566,7 @@ async fn handle_python_deps(
     worker_dir: &str,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
 ) -> error::Result<Vec<String>> {
     create_dependencies_dir(job_dir).await;
 
@@ -532,6 +597,7 @@ async fn handle_python_deps(
                     &requirements,
                     logs,
                     mem_peak,
+                    canceled_by,
                     job_dir,
                     db,
                     worker_name,
@@ -546,7 +612,7 @@ async fn handle_python_deps(
     };
 
     if requirements.len() > 0 {
-        additional_python_paths = handle_python_reqs(
+        let mut venv_path = handle_python_reqs(
             requirements
                 .split("\n")
                 .filter(|x| !x.starts_with("--"))
@@ -555,14 +621,20 @@ async fn handle_python_deps(
             w_id,
             logs,
             mem_peak,
+            canceled_by,
             db,
             worker_name,
             job_dir,
             worker_dir,
         )
         .await?;
+        additional_python_paths.append(&mut venv_path);
     }
     Ok(additional_python_paths)
+}
+
+lazy_static::lazy_static! {
+    static ref PIP_SECRET_VARIABLE: Regex = Regex::new(r"\$\{PIP_SECRET:([^s\}]+)\}").unwrap();
 }
 
 pub async fn handle_python_reqs(
@@ -571,6 +643,7 @@ pub async fn handle_python_reqs(
     w_id: &str,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     db: &sqlx::Pool<sqlx::Postgres>,
     worker_name: &str,
     job_dir: &str,
@@ -587,6 +660,9 @@ pub async fn handle_python_reqs(
         }
         if let Some(url) = PIP_INDEX_URL.as_ref() {
             vars.push(("INDEX_URL", url));
+        }
+        if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
+            vars.push(("PIP_INDEX_CERT", cert_path));
         }
         if let Some(host) = PIP_TRUSTED_HOST.as_ref() {
             vars.push(("TRUSTED_HOST", host));
@@ -625,12 +701,16 @@ pub async fn handle_python_reqs(
 
         #[cfg(feature = "enterprise")]
         if let Some(ref bucket) = *S3_CACHE_BUCKET {
-            sqlx::query_scalar!("UPDATE queue SET last_ping = now() WHERE id = $1", job_id)
-                .execute(db)
-                .await?;
-            if pull_from_tar(bucket, venv_p.clone()).await.is_ok() {
-                req_paths.push(venv_p.clone());
-                continue;
+            if matches!(get_license_plan().await, LicensePlan::Pro) {
+                tracing::warn!("S3 cache not available in the pro plan");
+            } else {
+                sqlx::query_scalar!("UPDATE queue SET last_ping = now() WHERE id = $1", job_id)
+                    .execute(db)
+                    .await?;
+                if pull_from_tar(bucket, venv_p.clone()).await.is_ok() {
+                    req_paths.push(venv_p.clone());
+                    continue;
+                }
             }
         }
 
@@ -665,6 +745,8 @@ pub async fn handle_python_reqs(
                 .stderr(Stdio::piped());
             start_child_process(nsjail_cmd, NSJAIL_PATH.as_str()).await?
         } else {
+            let fssafe_req = NON_ALPHANUM_CHAR.replace_all(&req, "_").to_string();
+            let req = format!("'{}'", req);
             let mut command_args = vec![
                 PYTHON_PATH.as_str(),
                 "-m",
@@ -687,6 +769,9 @@ pub async fn handle_python_reqs(
             if let Some(url) = PIP_INDEX_URL.as_ref() {
                 command_args.extend(["--index-url", url]);
             }
+            if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
+                command_args.extend(["--cert", cert_path]);
+            }
             if let Some(host) = PIP_TRUSTED_HOST.as_ref() {
                 command_args.extend(["--trusted-host", &host]);
             }
@@ -707,7 +792,7 @@ pub async fn handle_python_reqs(
                 .envs(envs)
                 .args([
                     "-x",
-                    &format!("{}/pip-{}.lock", LOCK_CACHE_DIR, req),
+                    &format!("{}/pip-{}.lock", LOCK_CACHE_DIR, fssafe_req),
                     "--command",
                     &command_args.join(" "),
                 ])
@@ -721,6 +806,7 @@ pub async fn handle_python_reqs(
             db,
             logs,
             mem_peak,
+            canceled_by,
             child,
             false,
             worker_name,
@@ -742,8 +828,12 @@ pub async fn handle_python_reqs(
 
         #[cfg(feature = "enterprise")]
         if let Some(ref bucket) = *S3_CACHE_BUCKET {
-            let venv_p = venv_p.clone();
-            tokio::spawn(build_tar_and_push(bucket, venv_p));
+            if matches!(get_license_plan().await, LicensePlan::Pro) {
+                tracing::warn!("S3 cache not available in the pro plan");
+            } else {
+                let venv_p = venv_p.clone();
+                tokio::spawn(build_tar_and_push(bucket, venv_p));
+            }
         }
         req_paths.push(venv_p);
     }
@@ -780,6 +870,7 @@ pub async fn start_worker(
 ) -> error::Result<()> {
     let mut logs = "".to_string();
     let mut mem_peak: i32 = 0;
+    let mut canceled_by: Option<CanceledBy> = None;
     let context = variables::get_reserved_variables(
         w_id,
         &token,
@@ -796,7 +887,7 @@ pub async fn start_worker(
     .await
     .to_vec();
 
-    let context_envs = build_envs_map(context);
+    let context_envs = build_envs_map(context).await;
     let additional_python_paths = handle_python_deps(
         job_dir,
         requirements_o,
@@ -809,6 +900,7 @@ pub async fn start_worker(
         job_dir,
         &mut logs,
         &mut mem_peak,
+        &mut canceled_by,
     )
     .await?;
 
@@ -827,8 +919,17 @@ pub async fn start_worker(
     ) = prepare_wrapper(job_dir, inner_content, script_path).await?;
 
     {
-        // logs.push_str(format!("infer args: {:?}\n", start.elapsed().as_micros()).as_str());
-        // we cannot use Bun.read and Bun.write because it results in an EBADF error on cloud
+        let indented_transforms = transforms
+            .lines()
+            .map(|x| format!("    {}", x))
+            .collect::<Vec<String>>()
+            .join("\n");
+        let indented_spread = spread
+            .lines()
+            .map(|x| format!("    {}", x))
+            .collect::<Vec<String>>()
+            .join("\n");
+
         let wrapper_content: String = format!(
             r#"
 import json
@@ -850,10 +951,12 @@ replace_nan = re.compile(r'\bNaN\b')
 sys.stdout.write('start\n')
 
 for line in sys.stdin:
+    if line == 'end\n':
+        break
     kwargs = json.loads(line, strict=False)
     args = {{}}
-    {transforms}
-    {spread}
+{indented_transforms}
+{indented_spread}
     for k, v in list(args.items()):
         if v == '<function call>':
             del args[k]
@@ -873,12 +976,12 @@ for line in sys.stdin:
                 if type(v).__name__ == 'bytes':
                     res[k] = to_b_64(v)
         res_json = re.sub(replace_nan, ' null ', json.dumps(res, separators=(',', ':'), default=str).replace('\n', ''))
-        sys.stdout.write(res_json + "\n")
-    except Exception as e:
+        sys.stdout.write("wm_res[success]:" + res_json + "\n")
+    except BaseException as e:
         exc_type, exc_value, exc_traceback = sys.exc_info()
         tb = traceback.format_tb(exc_traceback)
-        err_json = json.dumps({{ "error": {{ "message": str(e), "name": e.__class__.__name__, "stack": '\n'.join(tb[1:])  }} }}, separators=(',', ':'), default=str).replace('\n', '')
-        sys.stdout.write(err_json + "\n")
+        err_json = json.dumps({{ "message": str(e), "name": e.__class__.__name__, "stack": '\n'.join(tb[1:])  }}, separators=(',', ':'), default=str).replace('\n', '')
+        sys.stdout.write("wm_res[error]:" + err_json + "\n")
     sys.stdout.flush()
 "#,
         );
@@ -918,6 +1021,7 @@ for line in sys.stdin:
         job_completed_tx,
         token,
         jobs_rx,
+        worker_name,
     )
     .await
 }

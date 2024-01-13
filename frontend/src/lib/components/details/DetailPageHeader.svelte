@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Button } from '$lib/components/common'
+	import { Badge, Button } from '$lib/components/common'
 
 	import Menu from '$lib/components/details/Menu.svelte'
 	import MenuItem from '$lib/components/common/menu/MenuItem.svelte'
@@ -23,6 +23,7 @@
 	export let mainButtons: MainButton[] = []
 	export let menuItems: MenuItemButton[] = []
 	export let title: string
+	export let tag: string | undefined
 
 	export let errorHandlerKind: 'flow' | 'script'
 	export let scriptOrFlowPath: string
@@ -31,9 +32,11 @@
 
 <div class="border-b p-2 shadow-md">
 	<div class="mx-auto">
-		<div class="flex w-full flex-wrap md:flex-nowrap justify-end gap-x-2 gap-y-4 h-8 items-center">
-			<div class="grow px-2 sm:w-full inline-flex items-center gap-4">
-				<div class="text-lg min-w-24 font-bold truncate">{title}</div>
+		<div class="flex w-full flex-wrap md:flex-nowrap justify-end gap-x-2 gap-y-4 items-center">
+			<div class="grow px-2 inline-flex items-center gap-4 min-w-0">
+				<div class="text-lg min-w-24 font-bold truncate">{title}</div>{#if tag}
+					<Badge>tag: {tag}</Badge>
+				{/if}
 				<slot />
 			</div>
 			<div class="flex gap-1 md:gap-2 items-center">

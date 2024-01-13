@@ -2,17 +2,21 @@
 	import type { EvalV2AppInput } from '../../../inputType'
 
 	import { getContext } from 'svelte'
-	import type { AppViewerContext } from '$lib/components/apps/types'
+	import type { AppEditorContext, AppViewerContext } from '$lib/components/apps/types'
 	import SimpleEditor from '$lib/components/SimpleEditor.svelte'
 	import { buildExtraLib } from '$lib/components/apps/utils'
 	import { inferDeps } from '../../appUtilsInfer'
-	import { Maximize2 } from 'lucide-svelte'
+	import { Maximize2, X } from 'lucide-svelte'
 	import { Drawer } from '$lib/components/common'
+	import { Pane, Splitpanes } from 'svelte-splitpanes'
 
 	export let componentInput: EvalV2AppInput | undefined
 	export let id: string
+	export let field: string
+	export let fixedOverflowWidgets: boolean = true
 
 	const { onchange, worldStore, state, app } = getContext<AppViewerContext>('AppViewerContext')
+	const { evalPreview } = getContext<AppEditorContext>('AppEditorContext')
 
 	let editor: SimpleEditor
 	export function setCode(code: string) {
@@ -43,26 +47,42 @@
 	}
 
 	let fullscreen = false
+	let focus = false
 </script>
 
 {#if componentInput?.type === 'evalv2'}
 	{#if fullscreen}
 		<Drawer placement="bottom" on:close={() => (fullscreen = false)} open>
-			<SimpleEditor
-				class="h-full w-full"
-				bind:this={editor}
-				lang="javascript"
-				bind:code={componentInput.expr}
-				shouldBindKey={false}
-				fixedOverflowWidgets={false}
-				{extraLib}
-				on:change={async (e) => {
-					if (onchange) {
-						onchange()
-					}
-					inferDepsFromCode(e.detail.code)
-				}}
-			/>
+			<Splitpanes horizontal class="h-full">
+				<Pane size={50}>
+					<SimpleEditor
+						class="h-full w-full"
+						bind:this={editor}
+						lang="javascript"
+						bind:code={componentInput.expr}
+						shouldBindKey={false}
+						fixedOverflowWidgets={false}
+						{extraLib}
+						on:change={async (e) => {
+							if (onchange) {
+								onchange()
+							}
+							inferDepsFromCode(e.detail.code)
+						}}
+					/>
+				</Pane>
+				<Pane size={50}>
+					<div class="relative w-full">
+						<div
+							class="p-1 !text-2xs absolute border border-l bg-surface w-full z-[5000] overflow-auto"
+						>
+							<pre class="text-tertiary"
+								>{JSON.stringify($evalPreview[`${id}.${field}`] ?? null, null, 4) ?? 'null'}</pre
+							>
+						</div>
+					</div>
+				</Pane>
+			</Splitpanes>
 		</Drawer>
 	{/if}
 	<div class="border relative">
@@ -73,8 +93,16 @@
 				lang="javascript"
 				bind:code={componentInput.expr}
 				shouldBindKey={false}
+				domLib
 				{extraLib}
 				autoHeight
+				{fixedOverflowWidgets}
+				on:focus={() => {
+					focus = true
+				}}
+				on:blur={() => {
+					focus = false
+				}}
 				on:change={async (e) => {
 					if (onchange) {
 						onchange()
@@ -86,10 +114,24 @@
 				class="border bg-surface absolute top-0.5 right-2 p-0.5"
 				on:click={() => (fullscreen = true)}><Maximize2 size={12} /></button
 			>
+			{#if focus}
+				<div class="relative w-full">
+					<div
+						class="p-1 !text-2xs absolute rounded-b border-b border-r border-l bg-surface w-full z-[5000] overflow-auto"
+					>
+						<div class="float-right text-tertiary cursor-pointer"><X size={14} /></div>
+						<pre class="text-tertiary"
+							>{JSON.stringify($evalPreview[`${id}.${field}`] ?? null, null, 4) ?? 'null'}</pre
+						>
+					</div>
+				</div>
+			{/if}
 		{:else}
 			<pre class="text-small border px-2">{componentInput.expr}</pre>
 		{/if}
 	</div>
+	<!-- <div class="relative">
+		<div class="absolute top-0 left-0 z-[1000]"> -->
 
 	{#if componentInput?.expr && componentInput.expr != '' && componentInput.expr
 			.trim()

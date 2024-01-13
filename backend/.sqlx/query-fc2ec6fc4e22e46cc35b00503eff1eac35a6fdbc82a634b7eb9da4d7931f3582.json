@@ -39,7 +39,9 @@
                 "graphql",
                 "postgresql",
                 "noop",
-                "appdependencies"
+                "appdependencies",
+                "deploymentcallback",
+                "singlescriptflow"
               ]
             }
           }
@@ -61,7 +63,9 @@
                 "graphql",
                 "postgresql",
                 "noop",
-                "appdependencies"
+                "appdependencies",
+                "deploymentcallback",
+                "singlescriptflow"
               ]
             }
           }

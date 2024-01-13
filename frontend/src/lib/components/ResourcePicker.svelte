@@ -1,9 +1,7 @@
 <script lang="ts">
 	import { ResourceService } from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
-	import { faPen, faPlus, faRotateRight } from '@fortawesome/free-solid-svg-icons'
-	import { createEventDispatcher, onMount } from 'svelte'
-	import Icon from 'svelte-awesome'
+	import { createEventDispatcher } from 'svelte'
 	import Select from './apps/svelte-select/lib/index'
 	import { SELECT_INPUT_DEFAULT_STYLE } from '../defaults'
 	import AppConnect from './AppConnect.svelte'
@@ -11,6 +9,7 @@
 	import ResourceEditor from './ResourceEditor.svelte'
 	import DBSchemaExplorer from './DBSchemaExplorer.svelte'
 	import DarkModeObserver from './DarkModeObserver.svelte'
+	import { Pen, Plus, RotateCw } from 'lucide-svelte'
 
 	const dispatch = createEventDispatcher()
 
@@ -61,21 +60,9 @@
 	let resourceEditor: ResourceEditor
 
 	let darkMode: boolean = false
-
-	function onThemeChange() {
-		if (document.documentElement.classList.contains('dark')) {
-			darkMode = true
-		} else {
-			darkMode = false
-		}
-	}
-
-	onMount(() => {
-		onThemeChange()
-	})
 </script>
 
-<DarkModeObserver on:change={onThemeChange} />
+<DarkModeObserver bind:darkMode />
 
 <AppConnect
 	on:refresh={async (e) => {
@@ -120,9 +107,13 @@
 		/>
 
 		{#if value && value != ''}
-			<Button variant="border" size="xs" on:click={() => resourceEditor?.initEdit?.(value ?? '')}>
-				<Icon scale={0.8} data={faPen} /></Button
-			>
+			<Button
+				variant="border"
+				size="xs"
+				on:click={() => resourceEditor?.initEdit?.(value ?? '')}
+				startIcon={{ icon: Pen }}
+				iconOnly
+			/>
 		{/if}
 
 		<Button
@@ -130,9 +121,9 @@
 			variant="border"
 			size="xs"
 			on:click={() => appConnect?.open?.(resourceType)}
-		>
-			<Icon scale={0.8} data={faPlus} />
-		</Button>
+			startIcon={{ icon: Plus }}
+			iconOnly
+		/>
 		<Button
 			variant="border"
 			color="light"
@@ -140,9 +131,9 @@
 			on:click={() => {
 				loadResources(resourceType)
 			}}
-		>
-			<Icon scale={0.8} data={faRotateRight} />
-		</Button>
+			startIcon={{ icon: RotateCw }}
+			iconOnly
+		/>
 	</div>
 	{#if showSchemaExplorer}
 		<DBSchemaExplorer {resourceType} resourcePath={value} />

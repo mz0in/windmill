@@ -2,13 +2,14 @@ export const BUTTON_COLORS = ['blue', 'red', 'dark', 'light', 'green', 'gray', '
 
 export namespace ButtonType {
 	export type Size = 'xs2' | 'xs' | 'sm' | 'md' | 'lg' | 'xl'
-	export type Color = (typeof BUTTON_COLORS)[number]
+	export type Color = string;
 	export type Variant = 'contained' | 'border' | 'divider'
 	export type Target = '_self' | '_blank'
 	export type Element = HTMLButtonElement | HTMLAnchorElement
 	export interface Icon {
-		icon: any
+		icon?: any | undefined
 		classes?: string
+		faIcon?: any | undefined
 	}
 
 	export const FontSizeClasses: Record<ButtonType.Size, string> = {

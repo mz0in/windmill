@@ -3,15 +3,19 @@ pub const CUSTOM_TAGS_SETTING: &str = "custom_tags";
 pub const BASE_URL_SETTING: &str = "base_url";
 pub const OAUTH_SETTING: &str = "oauths";
 pub const RETENTION_PERIOD_SECS_SETTING: &str = "retention_period_secs";
+pub const JOB_DEFAULT_TIMEOUT_SECS_SETTING: &str = "job_default_timeout";
 pub const REQUEST_SIZE_LIMIT_SETTING: &str = "request_size_limit_mb";
 pub const LICENSE_KEY_SETTING: &str = "license_key";
 pub const NPM_CONFIG_REGISTRY_SETTING: &str = "npm_config_registry";
+pub const BUNFIG_INSTALL_SCOPES_SETTING: &str = "bunfig_install_scopes";
+
 pub const EXTRA_PIP_INDEX_URL_SETTING: &str = "pip_extra_index_url";
 pub const UNIQUE_ID_SETTING: &str = "uid";
 pub const DISABLE_STATS_SETTING: &str = "disable_stats";
 pub const EXPOSE_METRICS_SETTING: &str = "expose_metrics";
 pub const EXPOSE_DEBUG_METRICS_SETTING: &str = "expose_debug_metrics";
 pub const KEEP_JOB_DIR_SETTING: &str = "keep_job_dir";
+pub const REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING: &str = "require_preexisting_user_for_oauth";
 
 pub const ENV_SETTINGS: [&str; 54] = [
     "DISABLE_NSJAIL",

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     error::{self, Error},
     flow_status::{FlowStatus, RestartedFrom},
-    flows::FlowValue,
+    flows::{FlowValue, Retry},
     get_latest_deployed_hash_for_path,
     scripts::{ScriptHash, ScriptLang},
 };
@@ -24,10 +24,12 @@ pub enum JobKind {
     Dependencies,
     Flow,
     FlowPreview,
+    SingleScriptFlow,
     Identity,
     FlowDependencies,
     AppDependencies,
     Noop,
+    DeploymentCallback,
 }
 
 #[derive(sqlx::FromRow, Debug, Serialize, Clone)]
@@ -281,17 +283,21 @@ pub enum JobPayload {
     Dependencies {
         path: String,
         hash: ScriptHash,
-        dependencies: String,
         language: ScriptLang,
+        dedicated_worker: Option<bool>,
     },
     FlowDependencies {
         path: String,
+        dedicated_worker: Option<bool>,
     },
     AppDependencies {
         path: String,
         version: i64,
     },
-    Flow(String),
+    Flow {
+        path: String,
+        dedicated_worker: Option<bool>,
+    },
     RestartedFlow {
         completed_job_id: Uuid,
         step_id: String,
@@ -301,6 +307,20 @@ pub enum JobPayload {
         value: FlowValue,
         path: Option<String>,
         restarted_from: Option<RestartedFrom>,
+    },
+    SingleScriptFlow {
+        path: String,
+        hash: ScriptHash,
+        args: HashMap<String, serde_json::Value>,
+        retry: Retry, // for now only used to retry the script, so retry is necessarily present
+        concurrent_limit: Option<i32>,
+        concurrency_time_window_s: Option<i32>,
+        cache_ttl: Option<i32>,
+        priority: Option<i16>,
+        tag_override: Option<String>,
+    },
+    DeploymentCallback {
+        path: String,
     },
     Identity,
     Noop,
@@ -315,6 +335,7 @@ pub struct RawCode {
     pub concurrent_limit: Option<i32>,
     pub concurrency_time_window_s: Option<i32>,
     pub cache_ttl: Option<i32>,
+    pub dedicated_worker: Option<bool>,
 }
 
 type Tag = String;
@@ -325,9 +346,14 @@ pub async fn script_path_to_payload(
     script_path: &str,
     db: &DB,
     w_id: &str,
-) -> error::Result<(JobPayload, Option<Tag>)> {
-    let (job_payload, tag) = if script_path.starts_with("hub/") {
-        (JobPayload::ScriptHub { path: script_path.to_owned() }, None)
+) -> error::Result<(JobPayload, Option<Tag>, Option<bool>, Option<i32>)> {
+    let (job_payload, tag, delete_after_use, script_timeout) = if script_path.starts_with("hub/") {
+        (
+            JobPayload::ScriptHub { path: script_path.to_owned() },
+            None,
+            None,
+            None,
+        )
     } else {
         let (
             script_hash,
@@ -338,6 +364,8 @@ pub async fn script_path_to_payload(
             language,
             dedicated_worker,
             priority,
+            delete_after_use,
+            script_timeout,
         ) = get_latest_deployed_hash_for_path(db, w_id, script_path).await?;
         (
             JobPayload::ScriptHash {
@@ -351,9 +379,11 @@ pub async fn script_path_to_payload(
                 priority,
             },
             tag,
+            delete_after_use,
+            script_timeout,
         )
     };
-    Ok((job_payload, tag))
+    Ok((job_payload, tag, delete_after_use, script_timeout))
 }
 
 pub async fn script_hash_to_tag_and_limits<'c>(
@@ -368,9 +398,11 @@ pub async fn script_hash_to_tag_and_limits<'c>(
     ScriptLang,
     Option<bool>,
     Option<i16>,
+    Option<bool>,
+    Option<i32>,
 )> {
     let script = sqlx::query!(
-        "select tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority from script where hash = $1 AND workspace_id = $2",
+        "select tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority, delete_after_use, timeout from script where hash = $1 AND workspace_id = $2",
         script_hash.0,
         w_id
     )
@@ -389,6 +421,8 @@ pub async fn script_hash_to_tag_and_limits<'c>(
         script.language,
         script.dedicated_worker,
         script.priority,
+        script.delete_after_use,
+        script.timeout,
     ))
 }
 
@@ -397,13 +431,21 @@ pub async fn get_payload_tag_from_prefixed_path(
     db: &DB,
     w_id: &str,
 ) -> Result<(JobPayload, Option<String>), Error> {
-    let (payload, tag) = if path.starts_with("script/") {
+    let (payload, tag, _, _) = if path.starts_with("script/") {
         script_path_to_payload(path.strip_prefix("script/").unwrap(), &db, w_id).await?
     } else if path.starts_with("flow/") {
-        (
-            JobPayload::Flow(path.strip_prefix("flow/").unwrap().to_string()),
-            None,
+        let path = path.strip_prefix("flow/").unwrap().to_string();
+        let r = sqlx::query!(
+            "SELECT tag, dedicated_worker from flow WHERE path = $1 and workspace_id = $2",
+            &path,
+            &w_id,
         )
+        .fetch_optional(db)
+        .await?;
+        let (tag, dedicated_worker) = r
+            .map(|x| (x.tag, x.dedicated_worker))
+            .unwrap_or_else(|| (None, None));
+        (JobPayload::Flow { path, dedicated_worker }, tag, None, None)
     } else {
         return Err(Error::BadRequest(format!(
             "path must start with script/ or flow/ (got {})",

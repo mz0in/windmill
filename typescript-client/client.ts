@@ -1,5 +1,6 @@
-import { ResourceService, VariableService, JobService } from "./index";
+import { ResourceService, VariableService, JobService, HelpersService } from "./index";
 import { OpenAPI } from "./index";
+import type { DenoS3LightClientSettings } from "./index";
 
 export {
   AdminService,
@@ -80,7 +81,9 @@ export async function getResource(
     if (undefinedIfEmpty && e.status === 404) {
       return undefined;
     } else {
-      throw Error(`Resource not found at ${path} or not visible to you`);
+      throw Error(
+        `Resource not found at ${path} or not visible to you: ${e.body}`
+      );
     }
   }
 }
@@ -99,7 +102,7 @@ export async function resolveDefaultResource(obj: any): Promise<any> {
 }
 
 export function getStatePath(): string {
-  const state_path = getEnv("WM_STATE_PATH_NEW");
+  const state_path = getEnv("WM_STATE_PATH_NEW") ?? getEnv("WM_STATE_PATH");
   if (state_path === undefined) {
     throw Error("State path not set");
   }
@@ -200,7 +203,9 @@ export async function getVariable(path: string): Promise<string> {
   try {
     return await VariableService.getVariableValue({ workspace, path });
   } catch (e: any) {
-    throw Error(`Variable not found at ${path} or not visible to you`);
+    throw Error(
+      `Variable not found at ${path} or not visible to you: ${e.body}`
+    );
   }
 }
 
@@ -243,10 +248,46 @@ export async function databaseUrlFromResource(path: string): Promise<string> {
   return `postgresql://${resource.user}:${resource.password}@${resource.host}:${resource.port}/${resource.dbname}?sslmode=${resource.sslmode}`;
 }
 
+// TODO(gb): need to investigate more how Polars and DuckDB work in TS
+// export async function polarsConnectionSettings(s3_resource_path: string | undefined): Promise<any> {
+//   const workspace = getWorkspace();
+//   return await HelpersService.polarsConnectionSettingsV2({
+//     workspace: workspace,
+// 		requestBody: {
+// 			s3_resource_path: s3_resource_path
+// 		}
+//   });
+// }
+
+// export async function duckdbConnectionSettings(s3_resource_path: string | undefined): Promise<any> {
+//   const workspace = getWorkspace();
+//   return await HelpersService.duckdbConnectionSettingsV2({
+//     workspace: workspace,
+// 		requestBody: {
+// 			s3_resource_path: s3_resource_path
+// 		}
+//   });
+// }
+
+export async function denoS3LightClientSettings(s3_resource_path: string | undefined): Promise<DenoS3LightClientSettings> {
+  !clientSet && setClient();
+  const workspace = getWorkspace();
+  const s3Resource = await HelpersService.s3ResourceInfo({
+    workspace: workspace,
+    requestBody: {
+      s3_resource_path: s3_resource_path
+    }
+  });
+  let settings: DenoS3LightClientSettings = {
+    ...s3Resource,
+  }
+  return settings;
+}
+
 /**
  * Get URLs needed for resuming a flow after this step
  * @param approver approver name
- * @returns approval page UI URL, resume and cancel API URLs for resumeing the flow
+ * @returns approval page UI URL, resume and cancel API URLs for resuming the flow
  */
 export async function getResumeUrls(approver?: string): Promise<{
   approvalPage: string;

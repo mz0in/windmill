@@ -1,21 +1,22 @@
 <script lang="ts">
 	import { classNames } from '$lib/utils'
-	import { faWarning } from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher } from 'svelte'
-	import Icon from 'svelte-awesome'
 	import { fade } from 'svelte/transition'
 	import Button from '../button/Button.svelte'
 	import Badge from '../badge/Badge.svelte'
+	import { AlertTriangle, Loader2 } from 'lucide-svelte'
 
 	export let title: string
 	export let confirmationText: string
+	export let keyListen: boolean = true
+	export let loading: boolean = false
 
 	export let open: boolean = false
 
 	const dispatch = createEventDispatcher()
 
 	function onKeyDown(event: KeyboardEvent) {
-		if (open) {
+		if (open && keyListen) {
 			event.stopPropagation()
 			event.preventDefault()
 			switch (event.key) {
@@ -33,7 +34,7 @@
 	}
 </script>
 
-<svelte:window on:keydown={onKeyDown} />
+<svelte:window on:keydown|capture={onKeyDown} />
 
 {#if open}
 	<div
@@ -62,7 +63,7 @@
 						<div
 							class="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-800/50"
 						>
-							<Icon data={faWarning} class="text-red-500 dark:text-red-400" />
+							<AlertTriangle class="text-red-500 dark:text-red-400" />
 						</div>
 						<div class="ml-4 text-left flex-1">
 							<h3 class="text-lg font-medium text-primary">
@@ -74,11 +75,24 @@
 						</div>
 					</div>
 					<div class="flex items-center space-x-2 flex-row-reverse space-x-reverse mt-4">
-						<Button on:click={() => dispatch('confirmed')} color="red" size="sm">
-							<span>{confirmationText} <Badge>Enter</Badge></span>
+						<Button disabled={loading} on:click={() => dispatch('confirmed')} color="red" size="sm">
+							{#if loading}
+								<Loader2 class="animate-spin" />
+							{/if}
+							<span
+								>{confirmationText}
+								{#if keyListen}<Badge>Enter</Badge>{/if}</span
+							>
 						</Button>
-						<Button on:click={() => dispatch('canceled')} color="light" size="sm">
-							<span>Cancel <Badge color="dark-gray">Escape</Badge></span>
+						<Button
+							disabled={loading}
+							on:click={() => dispatch('canceled')}
+							color="light"
+							size="sm"
+						>
+							<span
+								>Cancel {#if keyListen}<Badge color="dark-gray">Escape</Badge>{/if}</span
+							>
 						</Button>
 					</div>
 				</div>

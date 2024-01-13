@@ -1,103 +1,77 @@
 <script lang="ts">
-	import { userWorkspaces, workspaceStore } from '$lib/stores'
-	import { classNames } from '$lib/utils'
-	import { Building } from 'lucide-svelte'
+	import { superadmin, userStore, userWorkspaces, workspaceStore } from '$lib/stores'
+	import { Building, Plus, Settings } from 'lucide-svelte'
 
-	import Menu from '../common/menu/Menu.svelte'
-	import { faCog, faPlus } from '@fortawesome/free-solid-svg-icons'
-	import { Icon } from 'svelte-awesome'
+	import Menu from '../common/menu/MenuV2.svelte'
 	import { goto } from '$app/navigation'
-	import { dirtyStore } from '../common/confirmationModal/dirtyStore'
 	import { page } from '$app/stores'
 	import { switchWorkspace } from '$lib/storeUtils'
-	export let isCollapsed: boolean = false
+	import MultiplayerMenu from './MultiplayerMenu.svelte'
+	import { enterpriseLicense } from '$lib/stores'
+	import MenuButton from './MenuButton.svelte'
+	import { MenuItem } from '@rgossiaux/svelte-headlessui'
 
-	function waitForNextUpdate(store) {
-		return new Promise((resolve) => {
-			let firstEmission = true
-			store.subscribe((value) => {
-				if (firstEmission) {
-					firstEmission = false
-					return
-				}
-				resolve(value)
-			})
-		})
-	}
+	export let isCollapsed: boolean = false
 
 	async function toggleSwitchWorkspace(id: string) {
 		if ($workspaceStore === id) {
 			return
 		}
 
-		const editPages = ['/scripts/edit/', '/flows/edit/', '/apps/edit/']
+		const editPages = [
+			'/scripts/edit/',
+			'/flows/edit/',
+			'/apps/edit/',
+			'/scripts/get/',
+			'/flows/get/',
+			'/apps/get/'
+		]
 		const isOnEditPage = editPages.some((editPage) => $page.route.id?.includes(editPage) ?? false)
 
-		// Check if we have unsaved changes
-		const wasDirty = $dirtyStore
-		// Try to go to the home page
-
-		// If we weren't dirty, we can directly switch workspaces
-		if (!wasDirty && !isOnEditPage) {
+		if (!isOnEditPage) {
 			switchWorkspace(id)
 		} else {
 			await goto('/')
-
-			const isStillDirty = await waitForNextUpdate(dirtyStore)
-
-			if (!isStillDirty) {
-				switchWorkspace(id)
-			}
+			switchWorkspace(id)
 		}
 	}
 </script>
 
-<Menu placement="bottom-start" let:close>
-	<button
-		title="Workspace Menu"
-		slot="trigger"
-		type="button"
-		class={classNames(
-			'group w-full flex items-center text-white hover:bg-gray-50 hover:text-gray-900 focus:ring-4 focus:outline-none focus:ring-gray-300 px-2 py-2 text-sm font-medium rounded-md h-8 '
-		)}
-	>
-		<div class="center-center mr-2">
-			<Building size={16} />
-		</div>
-
-		{#if !isCollapsed}
-			<span class={classNames('whitespace-pre truncate')}> {$workspaceStore} </span>
-		{/if}
-	</button>
+<Menu>
+	<div slot="trigger">
+		<MenuButton class="!text-xs" icon={Building} label={$workspaceStore ?? ''} {isCollapsed} />
+	</div>
 
 	<div class="divide-y" role="none">
 		<div class="py-1">
 			{#each $userWorkspaces as workspace}
-				<button
-					class="text-xs min-w-0 w-full overflow-hidden flex flex-col py-1.5
+				<MenuItem>
+					<button
+						class="text-xs min-w-0 w-full overflow-hidden flex flex-col py-1.5
 						{$workspaceStore === workspace.id
-						? 'cursor-default bg-surface-selected'
-						: 'cursor-pointer hover:bg-surface-hover'}"
-					on:click={async () => {
-						await toggleSwitchWorkspace(workspace.id)
-						close()
-					}}
-				>
-					<div class="text-primary pl-4 truncate text-left text-[1.2em]">{workspace.name}</div>
-					<div class="text-tertiary font-mono pl-4 text-2xs whitespace-nowrap truncate text-left">
-						{workspace.id}
-					</div>
-				</button>
+							? 'cursor-default bg-surface-selected'
+							: 'cursor-pointer hover:bg-surface-hover'}"
+						on:click={async () => {
+							await toggleSwitchWorkspace(workspace.id)
+						}}
+					>
+						<div class="text-primary pl-4 truncate text-left text-[1.2em]">{workspace.name}</div>
+						<div class="text-tertiary font-mono pl-4 text-2xs whitespace-nowrap truncate text-left">
+							{workspace.id}
+						</div>
+					</button>
+				</MenuItem>
 			{/each}
 		</div>
 		<div class="py-1" role="none">
 			<a
 				href="/user/create_workspace"
-				class="text-primary block px-4 py-2 text-xs hover:bg-surface-hover hover:text-primary"
+				class="text-primary px-4 py-2 text-xs hover:bg-surface-hover hover:text-primary flex flex-flow gap-2"
 				role="menuitem"
 				tabindex="-1"
 			>
-				<Icon data={faPlus} class="-mt-0.5 pr-0.5" /> Workspace
+				<Plus size={16} />
+				Workspace
 			</a>
 		</div>
 		<div class="py-1" role="none">
@@ -113,15 +87,23 @@
 				All workspaces & invites
 			</a>
 		</div>
-		<div class="py-1" role="none">
-			<a
-				href="/workspace_settings"
-				class="text-secondary block px-4 py-2 text-xs hover:bg-surface-hover hover:text-primary"
-				role="menuitem"
-				tabindex="-1"
-			>
-				<Icon class="pr-0.5" data={faCog} /> Workspace Settings
-			</a>
-		</div>
+		{#if $userStore?.is_admin || $superadmin}
+			<div class="py-1" role="none">
+				<MenuItem>
+					<a
+						href="/workspace_settings"
+						class="text-secondary px-4 py-2 text-xs hover:bg-surface-hover hover:text-primary flex flex-flow gap-2"
+						role="menuitem"
+						tabindex="-1"
+					>
+						<Settings size={16} />
+						Workspace Settings
+					</a>
+				</MenuItem>
+			</div>
+		{/if}
 	</div>
+	{#if $enterpriseLicense}
+		<MultiplayerMenu />
+	{/if}
 </Menu>

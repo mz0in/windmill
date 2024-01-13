@@ -1,20 +1,31 @@
 <script lang="ts">
 	import { capitalize } from '$lib/utils'
-	import { faExternalLink } from '@fortawesome/free-solid-svg-icons'
 	import DataTable from '$lib/components/table/DataTable.svelte'
 	import Cell from '$lib/components/table/Cell.svelte'
 	import { WorkspaceService, type User, UserService } from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
 	import { Button } from '../common'
 	import Tooltip from '../Tooltip.svelte'
-	import { Badge } from 'lucide-svelte'
+	import { ExternalLink } from 'lucide-svelte'
+	import { twMerge } from 'tailwind-merge'
 
 	export let plan: string | undefined
 	export let customer_id: string | undefined
 
 	let users: User[] | undefined = undefined
 
-	let premium_info: { premium: boolean; usage?: number } | undefined = undefined
+	let premiumInfo:
+		| {
+				premium: boolean
+				usage: number
+				seats: number
+				developerNb: number
+				operatorNb: number
+				seatsFromUsers: number
+				seatsFromComps: number
+				usedSeats: number
+		  }
+		| undefined = undefined
 	const plans = {
 		Free: [
 			'Users use their individual global free-tier quotas when doing executions in this workspace',
@@ -23,15 +34,14 @@
 		Team: [
 			`<b>$10/mo</b> per seat`,
 			`Every seat includes <b>10 000</b> executions`,
-			`Every seat includes either 1 user OR 2 operators`
+			`Every seat includes either 1 developer OR 2 operators`
 		],
 		Enterprise: [
-			`<b>Dedicated</b> and isolated database and workers available (EU/US/Asia)`,
-			`<b>Dedicated</b> entire cluster available for (EU/US/Asia)`,
-			`<b>SAML</b> support with group syncing`,
-			`<b>SLA</b>`,
-			`<b>Priority Support 24/7 with 3h response time and automation engineer assistance</b>`,
-			`<b>Design partners for Roadmap</b>`,
+			`Dedicated and isolated database and workers available (EU/US/Asia)`,
+			`Dedicated entire cluster available for (EU/US/Asia)`,
+			`SAML support with group syncing`,
+			`SLA & Priority Support 24/7 with 3h response time and automation engineer assistance`,
+			`Design partners for Roadmap`,
 			`<div class="mt-4">Self-hosted licenses also available</div>`
 		]
 	}
@@ -48,7 +58,22 @@
 	}
 
 	async function loadPremiumInfo() {
-		premium_info = await WorkspaceService.getPremiumInfo({ workspace: $workspaceStore! })
+		const info = await WorkspaceService.getPremiumInfo({ workspace: $workspaceStore! })
+		const developerNb = users?.filter((x) => !x.operator)?.length ?? 0
+		const operatorNb = users?.filter((x) => x.operator)?.length ?? 0
+		const seatsFromUsers = Math.ceil(developerNb + operatorNb / 2)
+		const seatsFromComps = Math.ceil((info.usage ?? 0) / 10000)
+		const usedSeats = Math.max(seatsFromUsers, seatsFromComps)
+		premiumInfo = {
+			...info,
+			usage: info.usage ?? 0,
+			seats: info.seats ?? 1,
+			developerNb,
+			operatorNb,
+			seatsFromUsers,
+			seatsFromComps,
+			usedSeats
+		}
 	}
 </script>
 
@@ -59,7 +84,7 @@
 {#if customer_id}
 	<div class="mt-2 mb-2">
 		<Button
-			endIcon={{ icon: faExternalLink }}
+			endIcon={{ icon: ExternalLink }}
 			href="/api/w/{$workspaceStore}/workspaces/billing_portal">Customer Portal</Button
 		>
 		<p class="text-xs text-tertiary mt-1">
@@ -69,37 +94,33 @@
 {/if}
 
 <div class="text-xs my-4">
-	{#if premium_info?.premium}
+	{#if premiumInfo?.premium}
 		<div class="flex flex-col gap-0.5">
 			{#if plan}
 				<div class="text-base inline font-bold leading-8 mb-2">
-					Current plan: {capitalize(plan ?? 'free')} plan
+					Current plan: {capitalize(plan)} plan{plan === 'team'
+						? ` (${premiumInfo.seats} seat${premiumInfo.seats > 1 ? 's' : ''})`
+						: ''}
 				</div>
 			{:else}
 				<div class="inline text-lg font-bold">Current plan: Free plan</div>
 			{/if}
 
 			{#if plan}
-				{@const team_factor = plan == 'team' ? 10 : 40}
-				{@const user_nb = users?.filter((x) => !x.operator)?.length ?? 0}
-				{@const operator_nb = users?.filter((x) => x.operator)?.length ?? 0}
-				{@const seats_from_users = Math.ceil(user_nb + operator_nb / 2)}
-				{@const seats_from_comps = Math.ceil((premium_info?.usage ?? 0) / 10000)}
-
 				<div class="w-full">
 					<DataTable>
 						<tbody class="divide-y">
 							<tr>
 								<Cell first>
-									Authors
-									<Tooltip light>
+									Developers
+									<Tooltip>
 										Actual pricing is calculated on the MAXIMUM number of users in a given billing
 										period, see the customer portal for more info.
 									</Tooltip>
 								</Cell>
 								<Cell last numeric>
-									<div class="text-base font-bold">
-										{user_nb}
+									<div class="text-base">
+										{premiumInfo.developerNb}
 									</div>
 								</Cell>
 							</tr>
@@ -112,53 +133,86 @@
 									</Tooltip>
 								</Cell>
 								<Cell last numeric>
-									<div class="text-base font-bold">
-										{operator_nb}
+									<div class="text-base">
+										{premiumInfo.operatorNb}
 									</div>
 								</Cell>
 							</tr>
 							<tr>
-								<Cell first>Seats from authors + operators</Cell>
+								<Cell first
+									><div class="font-semibold">Minimum number of seats needed for users</div></Cell
+								>
 								<Cell last numeric>
 									<div class="text-base font-bold">
-										ceil({user_nb} + {operator_nb}/2) = {seats_from_users}
+										u = ceil({premiumInfo.developerNb} + {premiumInfo.operatorNb}/2) = {premiumInfo.seatsFromUsers}
 									</div>
 								</Cell>
 							</tr>
 							<tr>
 								<Cell first>Computations executed this month</Cell>
 								<Cell last numeric>
-									<div class="text-base font-bold">
-										{premium_info?.usage ?? 0}
+									<div class="text-base">
+										{premiumInfo.usage}
 									</div>
 								</Cell>
 							</tr>
 							<tr>
-								<Cell first>Seats from computations</Cell>
+								<Cell first
+									><div class="font-semibold">Minimum number of seats needed for computations</div
+									></Cell
+								>
 								<Cell last numeric>
 									<div class="text-base font-bold">
-										ceil({premium_info?.usage ?? 0} / 10 000) = {seats_from_comps}
+										c = ceil({premiumInfo.usage} / 10 000) = {premiumInfo.seatsFromComps}
 									</div>
 								</Cell>
 							</tr>
 							<tr>
-								<Cell first>Total seats</Cell>
+								<Cell first
+									><div
+										class={twMerge(
+											'font-semibold',
+											plan === 'team' && premiumInfo.usedSeats > premiumInfo.seats
+												? 'text-red-500'
+												: ''
+										)}
+										>Used seats <Tooltip
+											>Highest between seats from developers + operators and seats from computations
+										</Tooltip>{plan === 'team' && premiumInfo.usedSeats > premiumInfo.seats
+											? ' > Paid seats'
+											: ''}</div
+									></Cell
+								>
 								<Cell last numeric>
-									<div class="text-base font-bold">
-										max({seats_from_comps}, {seats_from_users}) * {team_factor} = ${Math.max(
-											seats_from_comps,
-											seats_from_users
-										) * team_factor}/mo
+									<div
+										class={twMerge(
+											'text-base font-bold',
+											plan === 'team' && premiumInfo.usedSeats > premiumInfo.seats
+												? 'text-red-500'
+												: ''
+										)}
+									>
+										max(u, c) = max({premiumInfo.seatsFromUsers}, {premiumInfo.seatsFromComps}) = {premiumInfo.usedSeats}{premiumInfo.usedSeats >
+										premiumInfo.seats
+											? ` > ${premiumInfo.seats}`
+											: ''}
 									</div>
 								</Cell>
 							</tr>
 						</tbody>
 					</DataTable>
+
+					{#if plan === 'team' && premiumInfo.usedSeats > premiumInfo.seats}
+						<p class="text-red-500 mt-2 text-right text-base"
+							>You have exceeded your allowed number of seats, please update your plan in the
+							customer portal.
+						</p>
+					{/if}
 				</div>
 			{/if}
 		</div>
 	{:else}
-		This workspace is <b>NOT</b> on a team plan. Users use their global free-tier quotas when doing executions
+		This workspace is <b>not</b> on a team plan. Users use their global free-tier quotas when doing executions
 		in this workspace. Upgrade to a Team or Enterprise plan to unlock unlimited executions in this workspace.
 	{/if}
 </div>
@@ -166,26 +220,36 @@
 <div class="text-base font-bold leading-8 mb-2 pt-8"> All plans </div>
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-	{#each Object.entries(plans) as [planTitle, planDesc]}
-		<div class="box p-4 text-xs flex flex-col h-full overflow-hidden prose-sm rounded-md">
-			<h2 class="mb-4">{planTitle}</h2>
-			<ul class="list-disc text-sm p-4">
-				{#each planDesc as item}
-					<li class="mt-2">{@html item}</li>
-				{/each}
-			</ul>
+    {#each Object.entries(plans) as [planTitle, planDesc]}
+        <div class="box p-4 text-xs flex flex-col h-full overflow-hidden prose-sm rounded-md">
+            <h2 class="mb-4 {planTitle === 'Team' ? 'text-blue-500' : planTitle === 'Enterprise' ? 'text-teal-600' : ''}">
+                {planTitle}
+            </h2>
+            <ul class="list-disc text-sm p-4">
+                {#each planDesc as item}
+                    <li class="mt-2">{@html item}</li>
+                {/each}
+            </ul>
 
 			<div class="grow" />
 			{#if planTitle == 'Team'}
 				{#if plan != 'team'}
 					<div class="mt-4 mx-auto">
-						<Button
-							size="lg"
-							color="dark"
-							href="/api/w/{$workspaceStore}/workspaces/checkout?plan=team"
-						>
-							Upgrade to the Team plan</Button
-						>
+						{#if plan != 'enterprise'}
+							<Button
+								size="xs"
+								color="bg-blue-500 text-white"
+								href="/api/w/{$workspaceStore}/workspaces/checkout?plan=team{premiumInfo?.usedSeats
+									? `&seats=${premiumInfo.usedSeats}`
+									: ''}"
+							>
+								Upgrade to Team plan</Button
+							>
+						{:else}
+							<div class="mx-auto font-semibold text-center">
+								Cancel your plan in the customer portal then upgrade to a team plan
+							</div>
+						{/if}
 					</div>
 				{:else}
 					<div class="mx-auto text-md font-semibold">Workspace is on the team plan</div>
@@ -193,31 +257,32 @@
 			{:else if planTitle == 'Enterprise'}
 				{#if plan != 'enterprise'}
 					<div class="mt-4 mx-auto">
-						<Button size="xs" color="dark" href="https://www.windmill.dev/pricing" target="_blank">
+						<Button size="xs" color="bg-teal-600 text-white" href="https://www.windmill.dev/pricing" target="_blank">
 							See more
 						</Button>
 					</div>
 				{:else}
-					<div class="mx-auto text-lg font-semibold">Workspace is on enterprise plan</div>
+					<div class="mx-auto text-md font-semibold">Workspace is on enterprise plan</div>
 				{/if}
-			{:else if !plan}
-				<Badge class="mx-auto text-lg font-semibold">Workspace is on the free plan</Badge>
-			{:else}
-				<div class="mt-4 w-full">
-					<Button href="/api/w/{$workspaceStore}/workspaces/checkout" color="dark"
-						>Upgrade to the {planTitle} plan
-					</Button>
+			{:else if planTitle === 'Free'}
+				{#if plan}
+					<div class="mx-auto font-semibold text-center">
+						Cancel your plan in the customer portal to downgrade to the free plan
+					</div>
+				{:else}
+				<div class="mx-auto font-semibold text-center">
+					Workspace is on the free plan
 				</div>
+				{/if}
 			{/if}
 		</div>
 	{/each}
 </div>
 <div class="flex flex-col gap-1 my-8 w-full items-center">
-	<div class="text-primary text-md font-semibold"> Frequently asked questions </div>
-
+	<div class="text-primary text-md font-semibold"> Frequently asked questions </div><br/>
 	<div class="flex flex-col gap-4">
 		<div>
-			<div class="text-sm mb-1 text-secondary"> What is an execution? </div>
+			<div class="text-sm mb-1 text-secondary font-medium"> What is an execution? </div>
 			<div class="text-xs max-w-xl border-b pb-4 text-tertiary">
 				The single credit-unit is called an "execution". An execution corresponds to a single job
 				whose duration is less than 1s. For any additional seconds of computation, an additional
@@ -226,11 +291,11 @@
 			</div>
 		</div>
 		<div>
-			<div class="text-sm mb-1 text-secondary">
-				What is the difference between an author and an operator?
+			<div class="text-sm mb-1 text-secondary font-medium">
+				What is the difference between a developer and an operator?
 			</div>
 			<div class="text-xs max-w-xl text-tertiary">
-				An author can write scripts/flows/apps/variables/resources. An operator can only run/view
+				A developer can write scripts/flows/apps/variables/resources. An operator can only run/view
 				them.
 			</div>
 		</div>

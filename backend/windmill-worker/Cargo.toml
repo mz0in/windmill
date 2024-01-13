@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-enterprise = ["windmill-queue/enterprise", "dep:gcp_auth", "dep:jsonwebtoken", "dep:pem", "dep:sha2"]
+enterprise = ["windmill-queue/enterprise", "windmill-git-sync/enterprise", "dep:gcp_auth", "dep:jsonwebtoken", "dep:pem", "dep:sha2", "dep:tiberius", "dep:tokio-util"]
 benchmark = ["windmill-queue/benchmark"]
 flamegraph = []
 
@@ -31,6 +31,7 @@ windmill-parser-py-imports.workspace = true
 windmill-parser-bash.workspace = true
 windmill-parser-sql.workspace = true
 windmill-parser-graphql.workspace = true
+windmill-git-sync.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 tracing.workspace = true
@@ -60,6 +61,7 @@ deno_console.workspace = true
 deno_url.workspace = true
 deno_core.workspace = true
 deno_ast.workspace = true
+deno_tls.workspace = true
 postgres-native-tls.workspace = true
 native-tls.workspace = true
 mysql_async.workspace = true
@@ -74,6 +76,8 @@ nix.workspace = true
 bytes.workspace = true
 reqwest.workspace = true
 hex.workspace = true
+tiberius = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 
 [build-dependencies]
 deno_fetch.workspace = true

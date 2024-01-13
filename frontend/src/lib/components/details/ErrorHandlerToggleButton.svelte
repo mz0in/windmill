@@ -5,6 +5,7 @@
 	import { FlowService, ScriptService } from '$lib/gen'
 	import { sendUserToast } from '$lib/toast'
 	import { workspaceStore } from '$lib/stores'
+	import Tooltip from '../Tooltip.svelte'
 
 	export let kind: 'script' | 'flow'
 	export let scriptOrFlowPath: string
@@ -54,20 +55,23 @@
 	size="xs"
 	on:click={toggleErrorHandler}
 	color="light"
+	startIcon={{
+		icon: errorHandlerMuted === undefined || !errorHandlerMuted ? Bell : BellOff
+	}}
+	{iconOnly}
 >
 	{#if errorHandlerMuted === undefined || !errorHandlerMuted}
 		<div class="flex flex-row items-center">
 			{#if !iconOnly}
 				Mute
 			{/if}
-			<Bell class="w-4" size={12} fill="currentcolor" />
 		</div>
 	{:else}
 		<div class="flex flex-row items-center">
 			{#if !iconOnly}
 				Unmute
 			{/if}
-			<BellOff class="w-4" size={12} fill="currentcolor" />
 		</div>
 	{/if}
+	<Tooltip>Disable workspace error handler, EE only</Tooltip>
 </Button>

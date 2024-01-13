@@ -1,10 +1,7 @@
 <script lang="ts">
-	import { faPlus } from '@fortawesome/free-solid-svg-icons'
-
-	import { setInputCat as computeInputCat } from '$lib/utils'
+	import { setInputCat as computeInputCat, emptyString } from '$lib/utils'
 	import { Badge, Button } from './common'
 	import { createEventDispatcher } from 'svelte'
-	import Icon from 'svelte-awesome'
 	import FieldHeader from './FieldHeader.svelte'
 	import type { SchemaProperty } from '$lib/common'
 	import autosize from 'svelte-autosize'
@@ -14,10 +11,12 @@
 	import type { ComponentCustomCSS } from './apps/types'
 	import { twMerge } from 'tailwind-merge'
 	import { fade } from 'svelte/transition'
-	import { X } from 'lucide-svelte'
+	import { Plus, X } from 'lucide-svelte'
 	import LightweightResourcePicker from './LightweightResourcePicker.svelte'
 	import LightweightObjectResourceInput from './LightweightObjectResourceInput.svelte'
 	import DateTimeInput from './DateTimeInput.svelte'
+	import CurrencyInput from './apps/components/inputs/currency/CurrencyInput.svelte'
+	import Multiselect from 'svelte-multiselect'
 
 	export let css: ComponentCustomCSS<'schemaformcomponent'> | undefined = undefined
 	export let label: string = ''
@@ -39,18 +38,19 @@
 				type?: 'string' | 'number' | 'bytes' | 'object'
 				contentEncoding?: 'base64'
 				enum?: string[]
+				multiselect?: string[]
 		  }
 		| undefined = undefined
 	export let displayHeader = true
 	export let properties: { [name: string]: SchemaProperty } | undefined = undefined
+	export let nestedRequired: string[] | undefined = undefined
 	export let extra: Record<string, any> = {}
 	export let displayType: boolean = true
+	export let customErrorMessage: string | undefined = undefined
 
 	const dispatch = createEventDispatcher()
 
 	$: maxHeight = maxRows ? `${1 + maxRows * 1.2}em` : `auto`
-
-	$: validateInput(pattern, value)
 
 	export let error: string = ''
 
@@ -70,10 +70,8 @@
 	}
 
 	$: {
-		error = ''
 		if (inputCat === 'object') {
 			evalValueToRaw()
-			validateInput(pattern, value)
 		}
 	}
 
@@ -104,17 +102,23 @@
 		}
 	}
 
-	function validateInput(pattern: string | undefined, v: any): void {
+	function validateInput(pattern: string | undefined, v: any, required: boolean): void {
 		if (required && (v == undefined || v == null || v === '')) {
 			error = 'Required'
-			valid = false
+			valid && (valid = false)
 		} else {
 			if (pattern && !testRegex(pattern, v)) {
-				error = `Should match ${pattern}`
-				valid = false
+				if (!emptyString(customErrorMessage)) {
+					error = customErrorMessage ?? ''
+				} else if (format == 'email') {
+					error = 'invalid email address'
+				} else {
+					error = `should match ${pattern}`
+				}
+				valid && (valid = false)
 			} else {
 				error = ''
-				valid = true
+				!valid && (valid = true)
 			}
 		}
 	}
@@ -142,6 +146,8 @@
 			}
 		}
 	}
+
+	$: validateInput(pattern, value, required)
 
 	$: inputCat = computeInputCat(type, format, itemsType?.type, enum_, contentEncoding)
 </script>
@@ -178,6 +184,18 @@
 						<span>{extra['max']}</span>
 						<span class="mx-2"><Badge large color="blue">{value}</Badge></span>
 					</div>
+				{:else if extra?.currency}
+					<CurrencyInput
+						inputClasses={{
+							formatted: twMerge('px-2 w-full py-1.5 text-black'),
+							wrapper: 'w-full windmillapp',
+							formattedZero: twMerge('text-black')
+						}}
+						style="color:black;"
+						bind:value
+						currency={extra?.currency}
+						locale={extra?.currencyLocale ?? 'en-US'}
+					/>
 				{:else}
 					<input
 						on:focus={(e) => {
@@ -210,69 +228,91 @@
 				{/if}
 			{:else if inputCat == 'list'}
 				<div class="w-full">
-					<div class="w-full">
-						{#each value ?? [] as v, i}
-							<div class="flex flex-row max-w-md mt-1 w-full">
-								{#if itemsType?.type == 'number'}
-									<input type="number" bind:value={v} />
-								{:else if itemsType?.type == 'string' && itemsType?.contentEncoding == 'base64'}
-									<input
-										type="file"
-										class="my-6"
-										on:change={(x) => fileChanged(x, (val) => (value[i] = val))}
-										multiple={false}
-									/>
-								{:else if Array.isArray(itemsType?.enum)}
-									<select
-										on:focus={(e) => {
-											dispatch('focus')
-										}}
-										class="px-6"
-										bind:value={v}
-									>
-										{#each itemsType?.enum ?? [] as e}
-											<option>{e}</option>
-										{/each}
-									</select>
-								{:else}
-									<input type="text" bind:value={v} />
-								{/if}
-								<button
-									transition:fade|local={{ duration: 100 }}
-									class="rounded-full p-1 bg-surface-secondary duration-200 hover:bg-surface-hover ml-2"
-									aria-label="Clear"
-									on:click={() => {
-										value = value.filter((el) => el != v)
-										if (value.length == 0) {
-											value = undefined
-										}
-									}}
-								>
-									<X size={14} />
-								</button>
-							</div>
-						{/each}
-					</div>
-					<div class="flex my-2">
-						<Button
-							variant="border"
-							color="light"
-							size="sm"
-							btnClasses="mt-1"
-							on:click={() => {
-								if (value == undefined || !Array.isArray(value)) {
-									value = []
-								}
-								value = value.concat('')
-							}}
-						>
-							<Icon data={faPlus} class="mr-2" />
-							Add
-						</Button>
-					</div>
-					<span class="ml-2">
-						{(value ?? []).length} item{(value ?? []).length > 1 ? 's' : ''}
-					</span>
+					{#if Array.isArray(itemsType?.multiselect) && Array.isArray(value)}
+						<div class="items-start">
+							<Multiselect
+								bind:selected={value}
+								options={itemsType?.multiselect ?? []}
+								selectedOptionsDraggable={true}
+							/>
+						</div>
+					{:else if Array.isArray(itemsType?.enum) && Array.isArray(value)}
+						<div class="items-start">
+							<Multiselect
+								bind:selected={value}
+								options={itemsType?.enum ?? []}
+								selectedOptionsDraggable={true}
+							/>
+						</div>
+					{:else}
+						<div class="w-full">
+							{#if Array.isArray(value)}
+								{#each value ?? [] as v, i}
+									<div class="flex flex-row max-w-md mt-1 w-full">
+										{#if itemsType?.type == 'number'}
+											<input type="number" bind:value={v} />
+										{:else if itemsType?.type == 'string' && itemsType?.contentEncoding == 'base64'}
+											<input
+												type="file"
+												class="my-6"
+												on:change={(x) => fileChanged(x, (val) => (value[i] = val))}
+												multiple={false}
+											/>
+										{:else if Array.isArray(itemsType?.enum)}
+											<select
+												on:focus={(e) => {
+													dispatch('focus')
+												}}
+												class="px-6"
+												bind:value={v}
+											>
+												{#each itemsType?.enum ?? [] as e}
+													<option>{e}</option>
+												{/each}
+											</select>
+										{:else}
+											<input type="text" bind:value={v} />
+										{/if}
+										<button
+											transition:fade|local={{ duration: 100 }}
+											class="rounded-full p-1 bg-surface-secondary duration-200 hover:bg-surface-hover ml-2"
+											aria-label="Clear"
+											on:click={() => {
+												value = value.filter((el) => el != v)
+												if (value.length == 0) {
+													value = undefined
+												}
+											}}
+										>
+											<X size={14} />
+										</button>
+									</div>
+								{/each}
+							{:else}
+								List is not an array
+							{/if}
+						</div>
+						<div class="flex my-2">
+							<Button
+								variant="border"
+								color="light"
+								size="sm"
+								btnClasses="mt-1"
+								on:click={() => {
+									if (value == undefined || !Array.isArray(value)) {
+										value = []
+									}
+									value = value.concat('')
+								}}
+								startIcon={{ icon: Plus }}
+							>
+								Add
+							</Button>
+						</div>
+						<span class="ml-2">
+							{(value ?? []).length} item{(value ?? []).length != 1 ? 's' : ''}
+						</span>
+					{/if}
 				</div>
 			{:else if inputCat == 'resource-object'}
 				<LightweightObjectResourceInput {format} bind:value />
@@ -280,7 +320,7 @@
 				{#if properties && Object.keys(properties).length > 0}
 					<div class="p-4 pl-8 border rounded w-full">
 						<LightweightSchemaForm
-							schema={{ properties, $schema: '', required: [], type: 'object' }}
+							schema={{ properties, $schema: '', required: nestedRequired ?? [], type: 'object' }}
 							bind:args={value}
 						/>
 					</div>
@@ -314,12 +354,16 @@
 			{:else if inputCat == 'date'}
 				<DateTimeInput bind:value />
 			{:else if inputCat == 'base64'}
-				<input
-					type="file"
-					class="my-6"
-					on:change={(x) => fileChanged(x, (val) => (value = val))}
-					multiple={false}
-				/>
+				<div class="flex flex-col my-6 w-full">
+					<input
+						type="file"
+						on:change={(x) => fileChanged(x, (val) => (value = val))}
+						multiple={false}
+					/>
+					{#if value?.length}
+						<div class="text-2xs text-tertiary mt-1">File length: {value.length} base64 chars</div>
+					{/if}
+				</div>
 			{:else if inputCat == 'resource-string'}
 				<div class="flex flex-row gap-x-1 w-full">
 					<LightweightResourcePicker
@@ -329,6 +373,25 @@
 							: undefined}
 					/>
 				</div>
+			{:else if inputCat == 'email'}
+				<input
+					on:focus
+					type="email"
+					class={valid
+						? ''
+						: 'border border-red-700 border-opacity-30 focus:border-red-700 focus:border-opacity-3'}
+					placeholder={defaultValue ?? ''}
+					bind:value
+				/>
+			{:else if inputCat == 'currency'}
+				<input
+					type="number"
+					class={valid
+						? ''
+						: 'border border-red-700 border-opacity-30 focus:border-red-700 focus:border-opacity-3'}
+					placeholder={defaultValue ?? ''}
+					bind:value
+				/>
 			{:else if inputCat == 'string'}
 				<div class="flex flex-col w-full">
 					<div class="flex flex-row w-full items-center justify-between">
@@ -365,3 +428,16 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	input::-webkit-outer-spin-button,
+	input::-webkit-inner-spin-button {
+		-webkit-appearance: none !important;
+		margin: 0;
+	}
+
+	/* Firefox */
+	input[type='number'] {
+		-moz-appearance: textfield !important;
+	}
+</style>

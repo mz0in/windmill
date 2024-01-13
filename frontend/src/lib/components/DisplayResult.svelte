@@ -4,9 +4,10 @@
 	import TableCustom from './TableCustom.svelte'
 	import { copyToClipboard, roughSizeOfObject, truncate } from '$lib/utils'
 	import { Button, Drawer, DrawerContent } from './common'
-	import { ClipboardCopy, Download, Expand } from 'lucide-svelte'
+	import { ClipboardCopy, Download, Expand, PanelRightOpen } from 'lucide-svelte'
 	import Portal from 'svelte-portal'
 	import ObjectViewer from './propertyPicker/ObjectViewer.svelte'
+	import S3FilePicker from './S3FilePicker.svelte'
 
 	export let result: any
 	export let requireHtmlApproval = false
@@ -28,6 +29,9 @@
 		| 'approval'
 		| 'svg'
 		| 'filename'
+		| 's3object'
+		| 's3object-list'
+		| 'plain'
 		| undefined
 
 	$: resultKind = inferResultKind(result)
@@ -69,7 +73,7 @@
 			return 'json'
 		}
 
-		if (result) {
+		if (result !== undefined) {
 			try {
 				let keys = Object.keys(result)
 
@@ -97,6 +101,11 @@
 					return 'html'
 				} else if (keys.length == 1 && keys[0] == 'file') {
 					return 'file'
+				} else if (
+					keys.includes('windmill_content_type') &&
+					result['windmill_content_type'].startsWith('text/')
+				) {
+					return 'plain'
 				} else if (keys.length == 1 && keys[0] == 'error') {
 					return 'error'
 				} else if (keys.length === 2 && keys.includes('file') && keys.includes('filename')) {
@@ -117,12 +126,18 @@
 					}
 					return 'file'
 				} else if (
-					keys.length == 3 &&
 					keys.includes('resume') &&
 					keys.includes('cancel') &&
 					keys.includes('approvalPage')
 				) {
 					return 'approval'
+				} else if (keys.length === 1 && keys.includes('s3')) {
+					return 's3object'
+				} else if (
+					Array.isArray(result) &&
+					result.every((elt) => inferResultKind(elt) === 's3object')
+				) {
+					return 's3object-list'
 				}
 			} catch (err) {}
 		}
@@ -130,9 +145,10 @@
 	}
 
 	let jsonViewer: Drawer
+	let s3FileViewer: S3FilePicker
 
 	function toJsonStr(result: any) {
-		return JSON.stringify(result, null, 4)
+		return JSON.stringify(result ?? null, null, 4) ?? 'null'
 	}
 
 	function contentOrRootString(obj: string | { filename: string; content: string }) {
@@ -146,24 +162,27 @@
 
 <div class="inline-highlight relative grow min-h-[200px]">
 	{#if result != undefined && length != undefined && largeObject != undefined}
-		{#if resultKind && resultKind != 'json'}
+		{#if resultKind && !['json', 's3object', 's3object-list'].includes(resultKind)}
 			<div class="top-0 flex flex-row w-full justify-between items-center"
 				><div class="mb-2 text-tertiary text-sm">
 					as JSON&nbsp;<input class="windmillapp" type="checkbox" bind:checked={forceJson} /></div
 				>
 				<slot name="copilot-fix" />
 			</div>
-		{/if}{#if typeof result == 'object' && Object.keys(result).length > 0}<div
-				class="top-0 mb-2 w-full min-w-[400px] text-sm relative"
+		{/if}
+		{#if typeof result == 'object' && Object.keys(result).length > 0}
+			<div class="top-0 mb-2 w-full min-w-[400px] text-sm relative"
 				>{#if !disableExpand}
-					<div class="text-tertiary text-xs absolute top-5.5 right-0 inline-flex gap-2">
+					<div class="text-tertiary text-xs absolute top-5.5 right-0 inline-flex gap-2 z-10">
 						<button on:click={() => copyToClipboard(toJsonStr(result))}
 							><ClipboardCopy size={16} /></button
 						>
 						<button on:click={jsonViewer.openDrawer}><Expand size={16} /></button>
 					</div>
 				{/if}</div
-			>{/if}{#if !forceJson && resultKind == 'table-col'}<div
+			>
+		{/if}
+		{#if !forceJson && resultKind == 'table-col'}<div
 				class="grid grid-flow-col-dense border rounded-md"
 			>
 				{#each Object.keys(result) as col}
@@ -255,6 +274,10 @@
 					src="data:image/gif;base64,{contentOrRootString(result.gif)}"
 				/>
 			</div>
+		{:else if !forceJson && resultKind == 'plain'}
+			<div class="h-full text-2xs">
+				<pre>{result?.['result']}</pre>
+			</div>
 		{:else if !forceJson && resultKind == 'file'}
 			<div
 				><a
@@ -290,14 +313,49 @@
 					><a rel="noreferrer" target="_blank" href={result['approvalPage']}>Approval Page</a></div
 				>
 			</div>
-		{:else if largeObject}<div class="text-sm text-tertiary"
-				><a
-					download="{filename ?? 'result'}.json"
-					href={workspaceId && jobId
-						? `/api/w/${workspaceId}/jobs_u/completed/get_result/${jobId}`
-						: `data:text/json;charset=utf-8,${encodeURIComponent(toJsonStr(result))}`}>Download</a
-				>
+		{:else if !forceJson && resultKind == 's3object'}
+			<div class="absolute top-1 h-full w-full">
+				<Highlight class="" language={json} code={toJsonStr(result).replace(/\\n/g, '\n')} />
+				<button
+					class="text-secondary underline text-2xs whitespace-nowrap"
+					on:click={() => {
+						s3FileViewer?.open?.(result)
+					}}
+					><span class="flex items-center gap-1"><PanelRightOpen size={12} />open preview</span>
+				</button>
 			</div>
+		{:else if !forceJson && resultKind == 's3object-list'}
+			<div class="absolute top-1 h-full w-full">
+				{#each result as s3object}
+					<Highlight class="" language={json} code={toJsonStr(s3object).replace(/\\n/g, '\n')} />
+					<button
+						class="text-secondary text-2xs whitespace-nowrap"
+						on:click={() => {
+							s3FileViewer?.open?.(s3object)
+						}}
+						><span class="flex items-center gap-1"><PanelRightOpen size={12} />open preview</span>
+					</button>
+				{/each}
+			</div>
+		{:else if largeObject}
+			{#if 'filename' in result && 'file' in result}
+				<div
+					><a
+						download={result.filename ?? result.file?.filename ?? 'windmill.file'}
+						href="data:application/octet-stream;base64,{contentOrRootString(result.file)}"
+						>Download</a
+					>
+				</div>
+			{:else}
+				<div class="text-sm text-tertiary"
+					><a
+						download="{filename ?? 'result'}.json"
+						href={workspaceId && jobId
+							? `/api/w/${workspaceId}/jobs_u/completed/get_result/${jobId}`
+							: `data:text/json;charset=utf-8,${encodeURIComponent(toJsonStr(result))}`}>Download</a
+					>
+				</div>
+			{/if}
 			<div class="mb-21">JSON is too large to be displayed in full</div>
 			{#if result && result != 'WINDMILL_TOO_BIG'}
 				<ObjectViewer json={result} />
@@ -311,7 +369,7 @@
 			</div>
 		{:else}
 			<Highlight
-				class={forceJson ? '' : 'absolute top-1 h-full'}
+				class={forceJson ? '' : 'absolute top-1 h-full w-full'}
 				language={json}
 				code={toJsonStr(result).replace(/\\n/g, '\n')}
 			/>
@@ -361,5 +419,9 @@
 				{/if}
 			</DrawerContent>
 		</Drawer>
+	</Portal>
+
+	<Portal>
+		<S3FilePicker bind:this={s3FileViewer} readOnlyMode={true} />
 	</Portal>
 {/if}

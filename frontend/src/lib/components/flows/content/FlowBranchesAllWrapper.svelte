@@ -12,7 +12,10 @@
 	import FlowModuleSleep from './FlowModuleSleep.svelte'
 	import FlowModuleSuspend from './FlowModuleSuspend.svelte'
 	import FlowModuleMock from './FlowModuleMock.svelte'
+	import FlowModuleDeleteAfterUse from './FlowModuleDeleteAfterUse.svelte'
+	import { enterpriseLicense } from '$lib/stores'
 
+	export let noEditor: boolean
 	export let flowModule: FlowModule
 	export let previousModule: FlowModule | undefined
 
@@ -23,11 +26,11 @@
 </script>
 
 <div class="h-full flex flex-col w-full" id="flow-editor-branch-all-wrapper">
-	<FlowCard title={value.type == 'branchall' ? 'Run all branches' : 'Run one branch'}>
+	<FlowCard {noEditor} title={value.type == 'branchall' ? 'Run all branches' : 'Run one branch'}>
 		<SplitPanesWrapper>
 			<Splitpanes horizontal>
 				<Pane size={flowModule ? 60 : 100}>
-					<Alert notRounded type="info" title="All branches will be run" class="m-2">
+					<Alert notRounded type="info" title="All branches will be run" tooltip="Branch all" documentationLink="https://www.windmill.dev/docs/flows/flow_branches#branch-all" class="m-2">
 						The result of this step is the list of the result of each branch.
 					</Alert>
 
@@ -35,6 +38,7 @@
 						<h3 class="mb-4"
 							>{value.branches.length} branch{value.branches.length > 1 ? 'es' : ''}</h3
 						>
+						<p>Add branches and steps directly on the graph.</p>
 						<div class="flex flex-col gap-y-4 py-2 w-full">
 							{#each value.branches as branch, i}
 								<div class="flex flex-row gap-x-4 w-full items-center">
@@ -69,6 +73,7 @@
 							<Tab value="suspend">Suspend/Approval</Tab>
 							<Tab value="sleep">Sleep</Tab>
 							<Tab value="mock">Mock</Tab>
+							<Tab value="lifetime">Lifetime</Tab>
 							<svelte:fragment slot="content">
 								<div class="overflow-hidden bg-surface">
 									<TabContent value="early-stop" class="flex flex-col flex-1 h-full">
@@ -89,6 +94,11 @@
 									<TabContent value="mock" class="flex flex-col flex-1 h-full">
 										<div class="p-4 overflow-y-auto">
 											<FlowModuleMock bind:flowModule />
+										</div>
+									</TabContent>
+									<TabContent value="lifetime" class="flex flex-col flex-1 h-full">
+										<div class="p-4 overflow-y-auto">
+											<FlowModuleDeleteAfterUse bind:flowModule disabled={!$enterpriseLicense} />
 										</div>
 									</TabContent>
 								</div>

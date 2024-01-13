@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte'
-	import Icon from 'svelte-awesome'
 	import { ButtonType } from './model'
 	import { Loader2 } from 'lucide-svelte'
 	import { twMerge } from 'tailwind-merge'
@@ -10,7 +9,7 @@
 
 	export let size: ButtonType.Size = 'md'
 	export let spacingSize: ButtonType.Size = size
-	export let color: ButtonType.Color = 'blue'
+	export let color: ButtonType.Color | string = 'blue';
 	export let variant: ButtonType.Variant = 'contained'
 	export let btnClasses: string = ''
 	export let wrapperClasses: string = ''
@@ -19,8 +18,9 @@
 	export let href: string | undefined = undefined
 	export let target: '_self' | '_blank' | undefined = undefined
 	export let iconOnly: boolean = false
-	export let startIcon: ButtonType.Icon | undefined = undefined
-	export let endIcon: ButtonType.Icon | undefined = undefined
+
+	export let clickableWhileLoading = false
+
 	export let element: ButtonType.Element | undefined = undefined
 	export let id: string = ''
 	export let nonCaptureEvent: boolean = false
@@ -29,6 +29,9 @@
 	export let title: string | undefined = undefined
 	export let style: string = ''
 	export let download: string | undefined = undefined
+
+	export let startIcon: ButtonType.Icon | undefined = undefined
+	export let endIcon: ButtonType.Icon | undefined = undefined
 
 	type MenuItem = {
 		label: string
@@ -44,6 +47,10 @@
 		} else {
 			return dropdownItems
 		}
+	}
+
+	export function focus() {
+		element?.focus({})
 	}
 
 	const dispatch = createEventDispatcher()
@@ -64,8 +71,8 @@
 		},
 		red: {
 			border:
-				'border-red-600 hover:border-red-700 bg-surface hover:bg-red-100 text-red-600 hover:text-red-700 focus:ring-red-300',
-			contained: 'bg-red-600 hover:bg-red-700 text-white focus:ring-red-300',
+				'border-red-600/60 hover:border-red-600 bg-surface hover:bg-red-100 text-red-600 hover:text-red-700 focus:ring-red-300',
+			contained: 'bg-red-600 hover:bg-red-600 text-white focus:ring-red-300',
 			divider: 'divide-x divide-red-700'
 		},
 		green: {
@@ -108,22 +115,35 @@
 		}
 	}
 
-	$: isSmall = size === 'xs' || size === 'sm'
-	$: startIconClass = twMerge(iconOnly ? undefined : isSmall ? 'mr-1' : 'mr-2', startIcon?.classes)
-	$: endIconClass = twMerge(iconOnly ? undefined : isSmall ? 'ml-1' : 'ml-2', endIcon?.classes)
+	function getColorClass(color, variant) {
+        if (color in colorVariants) {
+            return colorVariants[color][variant];
+        } else {
+            return color;
+        }
+    }
 
-	$: buttonClass = twMerge(
-		'w-full',
-		colorVariants?.[color]?.[variant],
-		variant === 'border' ? 'border' : '',
-		ButtonType.FontSizeClasses[size],
-		ButtonType.SpacingClasses[spacingSize][variant],
-		'focus:ring-2 font-semibold',
-		dropdownItems ? 'rounded-l-md h-full' : 'rounded-md',
-		'justify-center items-center text-center whitespace-nowrap inline-flex',
-		btnClasses,
-		'transition-all '
-	)
+    $: buttonClass = twMerge(
+        'w-full',
+        getColorClass(color, variant),
+        variant === 'border' ? 'border' : '',
+        ButtonType.FontSizeClasses[size],
+        ButtonType.SpacingClasses[spacingSize][variant],
+        'focus:ring-2 font-semibold',
+        dropdownItems ? 'rounded-l-md h-full' : 'rounded-md',
+        'justify-center items-center text-center whitespace-nowrap inline-flex gap-2',
+        btnClasses,
+        'transition-all'
+    );
+
+	const iconMap = {
+		xs: 14,
+		sm: 16,
+		md: 16,
+		lg: 18
+	}
+
+	$: lucideIconSize = iconMap[size] ?? 12
 </script>
 
 <div
@@ -158,15 +178,15 @@
 		>
 			{#if loading}
 				<Loader2 class="animate-spin mr-1" size={14} />
-			{:else if startIcon}
-				<Icon data={startIcon.icon} class={startIconClass} scale={ButtonType.IconScale[size]} />
+			{:else if startIcon?.icon}
+				<svelte:component this={startIcon.icon} class={startIcon.classes} size={lucideIconSize} />
 			{/if}
 
 			{#if !iconOnly}
 				<slot />
 			{/if}
-			{#if endIcon}
-				<Icon data={endIcon.icon} class={endIconClass} scale={ButtonType.IconScale[size]} />
+			{#if endIcon?.icon}
+				<svelte:component this={endIcon.icon} class={endIcon.classes} size={lucideIconSize} />
 			{/if}
 		</a>
 	{:else}
@@ -184,20 +204,20 @@
 			tabindex={disabled ? -1 : 0}
 			{title}
 			{...$$restProps}
-			disabled={disabled || loading}
+			disabled={disabled || (loading && !clickableWhileLoading)}
 			{style}
 		>
 			{#if loading}
 				<Loader2 class="animate-spin mr-1" size={14} />
-			{:else if startIcon}
-				<Icon data={startIcon.icon} class={startIconClass} scale={ButtonType.IconScale[size]} />
+			{:else if startIcon?.icon}
+				<svelte:component this={startIcon.icon} class={startIcon.classes} size={lucideIconSize} />
 			{/if}
 
 			{#if !iconOnly}
 				<slot />
 			{/if}
-			{#if endIcon}
-				<Icon data={endIcon.icon} class={endIconClass} scale={ButtonType.IconScale[size]} />
+			{#if endIcon?.icon}
+				<svelte:component this={endIcon.icon} class={endIcon.classes} size={lucideIconSize} />
 			{/if}
 		</button>
 	{/if}
@@ -216,7 +236,7 @@
 								)}
 							>
 								{#if item.icon}
-									<svelte:component this={item.icon} class="w-4 h-4" />
+									<svelte:component this={item.icon} class="w-4 h-4" size={lucideIconSize} />
 								{/if}
 								{item.label}
 							</div>

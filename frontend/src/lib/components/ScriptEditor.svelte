@@ -5,14 +5,12 @@
 	import { CompletedJob, Job, JobService, SettingsService } from '$lib/gen'
 	import { enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
 	import { copyToClipboard, emptySchema, getModifierKey, sendUserToast } from '$lib/utils'
-	import { faClipboard, faPlay } from '@fortawesome/free-solid-svg-icons'
 	import Editor from './Editor.svelte'
 	import { inferArgs } from '$lib/infer'
 	import type { Preview } from '$lib/gen/models/Preview'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
 	import SchemaForm from './SchemaForm.svelte'
 	import LogPanel from './scriptEditor/LogPanel.svelte'
-	import { faGithub } from '@fortawesome/free-brands-svg-icons'
 	import EditorBar, { EDITOR_BAR_WIDTH_THRESHOLD } from './EditorBar.svelte'
 	import TestJobLoader from './TestJobLoader.svelte'
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte'
@@ -23,8 +21,8 @@
 	import { scriptLangToEditorLang } from '$lib/scripts'
 	import { WebsocketProvider } from 'y-websocket'
 	import Modal from './common/modal/Modal.svelte'
-	import { Icon } from 'svelte-awesome'
 	import DiffEditor from './DiffEditor.svelte'
+	import { Clipboard, Github, Play } from 'lucide-svelte'
 
 	// Exported
 	export let schema: Schema | any = emptySchema()
@@ -41,6 +39,8 @@
 	export let diffEditor: DiffEditor | undefined = undefined
 	export let collabMode = false
 	export let edit = true
+	export let noHistory = false
+	export let saveToWorkspace = false
 
 	let websocketAlive = {
 		pyright: false,
@@ -48,8 +48,7 @@
 		deno: false,
 		go: false,
 		ruff: false,
-		shellcheck: false,
-		bun: false
+		shellcheck: false
 	}
 
 	let width = 1200
@@ -108,6 +107,7 @@
 
 		try {
 			await inferArgs(nlang ?? lang, code, nschema)
+
 			validCode = true
 			schema = nschema
 		} catch (e) {
@@ -202,7 +202,7 @@
 	}
 
 	function collabUrl() {
-		let url = new URL(window.location.toString())
+		let url = new URL(window.location.toString().split('#')[0])
 		url.search = ''
 		return `${url}?collab=1` + (edit ? '' : `&path=${path}`)
 	}
@@ -221,9 +221,13 @@
 	<div>Have others join by sharing the following url:</div>
 	<div class="flex gap-2 pr-4">
 		<input type="text" disabled value={collabUrl()} />
-		<button on:click={() => copyToClipboard(collabUrl())} class="text-secondary ml-2">
-			<Icon data={faClipboard} />
-		</button>
+
+		<Button
+			color="light"
+			startIcon={{ icon: Clipboard }}
+			iconOnly
+			on:click={() => copyToClipboard(collabUrl())}
+		/>
 	</div>
 </Modal>
 <div class="border-b-2 shadow-sm px-1 pr-4" bind:clientWidth={width}>
@@ -244,12 +248,15 @@
 			on:collabPopup={() => (showCollabPopup = true)}
 			{editor}
 			{lang}
+			on:createScriptFromInlineScript
 			{websocketAlive}
 			collabUsers={peers}
 			kind={asKind(kind)}
 			{template}
 			{diffEditor}
 			{args}
+			{noHistory}
+			{saveToWorkspace}
 		/>
 		{#if !noSyncFromGithub}
 			<div class="py-1">
@@ -258,9 +265,9 @@
 					href="https://www.windmill.dev/docs/cli_local_dev/vscode-extension"
 					color="light"
 					size="xs"
-					btnClasses="mr-1 hidden lg:block"
+					btnClasses="hidden lg:flex"
 					startIcon={{
-						icon: faGithub
+						icon: Github
 					}}
 				>
 					Use VScode
@@ -300,7 +307,7 @@
 						}}
 						class="flex flex-1 h-full !overflow-visible"
 						lang={scriptLangToEditorLang(lang)}
-						deno={lang == 'deno'}
+						scriptLang={lang}
 						automaticLayout={true}
 						{fixedOverflowWidgets}
 						{args}
@@ -337,7 +344,7 @@
 							btnClasses="w-full"
 							size="xs"
 							startIcon={{
-								icon: faPlay,
+								icon: Play,
 								classes: 'animate-none'
 							}}
 						>

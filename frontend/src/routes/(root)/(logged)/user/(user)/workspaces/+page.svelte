@@ -5,17 +5,16 @@
 	import { logout, logoutWithRedirect } from '$lib/logout'
 	import { UserService, type WorkspaceInvite, WorkspaceService } from '$lib/gen'
 	import { superadmin, usersWorkspaceStore, userWorkspaces, workspaceStore } from '$lib/stores'
-	import { faCrown, faUserCog } from '@fortawesome/free-solid-svg-icons'
-	import Icon from 'svelte-awesome'
 	import { Button, Skeleton } from '$lib/components/common'
 	import Toggle from '$lib/components/Toggle.svelte'
 	import UserSettings from '$lib/components/UserSettings.svelte'
 	import SuperadminSettings from '$lib/components/SuperadminSettings.svelte'
 	import { WindmillIcon } from '$lib/components/icons'
-	import { onMount } from 'svelte'
 	import CenteredModal from '$lib/components/CenteredModal.svelte'
 	import { USER_SETTINGS_HASH } from '$lib/components/sidebar/settings'
 	import { switchWorkspace } from '$lib/storeUtils'
+	import { Cog, Crown } from 'lucide-svelte'
+	import { isCloudHosted } from '$lib/cloud'
 
 	let invites: WorkspaceInvite[] = []
 	let list_all_as_super_admin: boolean = false
@@ -73,10 +72,25 @@
 	$: nonAdminWorkspaces = (workspaces ?? []).filter((x) => x.id != 'admins')
 	$: noWorkspaces = $superadmin && nonAdminWorkspaces.length == 0
 
-	onMount(() => {
-		loadInvites()
-		loadWorkspaces()
-	})
+	async function getCreateWorkspaceRequireSuperadmin() {
+		const r = await fetch('/api/workspaces/create_workspace_require_superadmin')
+		const t = await r.text()
+		createWorkspace = t != 'true'
+	}
+
+	let createWorkspace = $superadmin || isCloudHosted()
+
+	$: if ($superadmin) {
+		createWorkspace = true
+	}
+
+	if (!createWorkspace) {
+		getCreateWorkspaceRequireSuperadmin()
+	}
+
+	loadInvites()
+	loadWorkspaces()
+
 	let loading = false
 </script>
 
@@ -117,16 +131,18 @@
 	{#if workspaces && $usersWorkspaceStore}
 		{#if workspaces.length == 0}
 			<p class="text-sm text-tertiary mt-2">
-				You are not a member of any workspace yet. Accept an invitation or create your own
+				You are not a member of any workspace yet. Accept an invitation {#if createWorkspace}or
+					create your own{/if}
 				workspace.
 			</p>
 		{/if}
-		{#each nonAdminWorkspaces as workspace}
+		{#each nonAdminWorkspaces as workspace (workspace.id)}
 			<label class="block pb-2">
 				<button
 					class="block w-full mx-auto py-1 px-2 rounded-md border
 				shadow-sm text-sm font-normal mt-1 hover:ring-1 hover:ring-indigo-300"
 					on:click={async () => {
+						workspaceStore.set(undefined)
 						workspaceStore.set(workspace.id)
 						loading = true
 						await goto(rd ?? '/')
@@ -160,16 +176,18 @@
 		{/each}
 	{/if}
 
-	<div class="flex flex-row-reverse pt-4">
-		<Button
-			size="sm"
-			btnClasses={noWorkspaces ? 'animate-bounce hover:animate-none' : ''}
-			color={noWorkspaces ? 'dark' : 'blue'}
-			href="/user/create_workspace{rd ? `?rd=${encodeURIComponent(rd)}` : ''}"
-			variant={noWorkspaces ? 'contained' : 'border'}
-			>+&nbsp;Create a new workspace
-		</Button>
-	</div>
+	{#if createWorkspace}
+		<div class="flex flex-row-reverse pt-4">
+			<Button
+				size="sm"
+				btnClasses={noWorkspaces ? 'animate-bounce hover:animate-none' : ''}
+				color={noWorkspaces ? 'dark' : 'blue'}
+				href="/user/create_workspace{rd ? `?rd=${encodeURIComponent(rd)}` : ''}"
+				variant={noWorkspaces ? 'contained' : 'border'}
+				>+&nbsp;Create a new workspace
+			</Button>
+		</div>
+	{/if}
 
 	<h2 class="mt-6 mb-4">Invites to join a Workspace</h2>
 	{#if invites.length == 0}
@@ -215,13 +233,16 @@
 	{/each}
 	<div class="flex justify-between items-center mt-10 flex-wrap gap-2">
 		{#if $superadmin}
-			<Button variant="border" size="sm" on:click={superadminSettings.openDrawer}>
-				<Icon data={faCrown} class="mr-1" scale={1} />
+			<Button
+				variant="border"
+				size="sm"
+				on:click={superadminSettings.openDrawer}
+				startIcon={{ icon: Crown }}
+			>
 				Superadmin settings
 			</Button>
 		{/if}
-		<Button variant="border" size="sm" on:click={userSettings.openDrawer}>
-			<Icon data={faUserCog} class="mr-1" scale={1} />
+		<Button variant="border" size="sm" on:click={userSettings.openDrawer} startIcon={{ icon: Cog }}>
 			User settings
 		</Button>
 

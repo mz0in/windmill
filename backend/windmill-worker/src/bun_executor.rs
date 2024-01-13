@@ -5,17 +5,18 @@ use itertools::Itertools;
 use regex::Regex;
 use serde_json::value::RawValue;
 use uuid::Uuid;
+use windmill_queue::CanceledBy;
 
 #[cfg(feature = "enterprise")]
 use crate::common::build_envs_map;
 
 use crate::{
     common::{
-        create_args_and_out_file, get_reserved_variables, handle_child, read_result, set_logs,
-        start_child_process, write_file, write_file_binary,
+        create_args_and_out_file, get_reserved_variables, handle_child, parse_npm_config,
+        read_result, set_logs, start_child_process, write_file, write_file_binary,
     },
-    AuthedClientBackgroundTask, BUN_CACHE_DIR, BUN_PATH, DISABLE_NSJAIL, DISABLE_NUSER, HOME_ENV,
-    NPM_CONFIG_REGISTRY, NSJAIL_PATH, PATH_ENV, TZ_ENV,
+    AuthedClientBackgroundTask, BUNFIG_INSTALL_SCOPES, BUN_CACHE_DIR, BUN_PATH, DISABLE_NSJAIL,
+    DISABLE_NUSER, HOME_ENV, NPM_CONFIG_REGISTRY, NSJAIL_PATH, PATH_ENV, TZ_ENV,
 };
 
 use tokio::{
@@ -48,11 +49,13 @@ pub const EMPTY_FILE: &str = "<empty>";
 
 lazy_static::lazy_static! {
     pub static ref TRUSTED_DEP: Regex = Regex::new(r"//\s?trustedDependencies:(.*)\n").unwrap();
+
 }
 
 pub async fn gen_lockfile(
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job_id: &Uuid,
     w_id: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
@@ -82,6 +85,41 @@ pub async fn gen_lockfile(
     )
     .await?;
 
+    // if custom NPM registry is being used, write bunfig.toml at the root of the job dir
+    let registry = NPM_CONFIG_REGISTRY.read().await.clone();
+    let bunfig_install_scopes = BUNFIG_INSTALL_SCOPES.read().await.clone();
+    if registry.is_some() || bunfig_install_scopes.is_some() {
+        let (url, token_opt) = if let Some(ref s) = registry {
+            let url = s.trim();
+            if url.is_empty() {
+                ("https://registry.npmjs.org".to_string(), None)
+            } else {
+                parse_npm_config(s)
+            }
+        } else {
+            ("https://registry.npmjs.org".to_string(), None)
+        };
+        let registry_toml_string = if let Some(token) = token_opt {
+            format!("{{ url = \"{url}\", token = \"{token}\" }}")
+        } else {
+            format!("\"{url}\"")
+        };
+        let bunfig_toml = format!(
+            r#"
+[install]
+registry = {}
+
+{}
+"#,
+            registry_toml_string,
+            bunfig_install_scopes
+                .map(|x| format!("[install.scopes]\n{x}"))
+                .unwrap_or("".to_string())
+        );
+        tracing::debug!("Writing following bunfig.toml: {bunfig_toml}");
+        let _ = write_file(&job_dir, "bunfig.toml", &bunfig_toml).await?;
+    }
+
     let common_bun_proc_envs: HashMap<String, String> =
         get_common_bun_proc_envs(&base_internal_url).await;
 
@@ -100,6 +138,7 @@ pub async fn gen_lockfile(
         db,
         logs,
         mem_peak,
+        canceled_by,
         child_process,
         false,
         worker_name,
@@ -144,6 +183,7 @@ pub async fn gen_lockfile(
     install_lockfile(
         logs,
         mem_peak,
+        canceled_by,
         job_id,
         w_id,
         db,
@@ -180,6 +220,7 @@ pub async fn gen_lockfile(
 pub async fn install_lockfile(
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job_id: &Uuid,
     w_id: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
@@ -202,6 +243,7 @@ pub async fn install_lockfile(
         db,
         logs,
         mem_peak,
+        canceled_by,
         child_process,
         false,
         worker_name,
@@ -236,6 +278,7 @@ pub async fn handle_bun_job(
     requirements_o: Option<String>,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job: &QueuedJob,
     db: &sqlx::Pool<sqlx::Postgres>,
     client: &AuthedClientBackgroundTask,
@@ -279,6 +322,7 @@ pub async fn handle_bun_job(
             install_lockfile(
                 logs,
                 mem_peak,
+                canceled_by,
                 &job.id,
                 &job.workspace_id,
                 db,
@@ -296,25 +340,26 @@ pub async fn handle_bun_job(
         let trusted_deps = get_trusted_deps(inner_content);
         let empty_trusted_deps = trusted_deps.len() == 0;
         let has_custom_config_registry = common_bun_proc_envs.contains_key("NPM_CONFIG_REGISTRY");
-        if !*DISABLE_NSJAIL || !empty_trusted_deps || has_custom_config_registry {
-            logs.push_str("\n\n--- BUN INSTALL ---\n");
-            set_logs(&logs, &job.id, &db).await;
-            let _ = gen_lockfile(
-                logs,
-                mem_peak,
-                &job.id,
-                &job.workspace_id,
-                db,
-                &client.get_token().await,
-                &job.script_path(),
-                job_dir,
-                base_internal_url,
-                worker_name,
-                false,
-                trusted_deps,
-            )
-            .await?;
-        }
+        // if !*DISABLE_NSJAIL || !empty_trusted_deps || has_custom_config_registry {
+        logs.push_str("\n\n--- BUN INSTALL ---\n");
+        set_logs(&logs, &job.id, &db).await;
+        let _ = gen_lockfile(
+            logs,
+            mem_peak,
+            canceled_by,
+            &job.id,
+            &job.workspace_id,
+            db,
+            &client.get_token().await,
+            &job.script_path(),
+            job_dir,
+            base_internal_url,
+            worker_name,
+            false,
+            trusted_deps,
+        )
+        .await?;
+        // }
 
         if empty_trusted_deps && !has_custom_config_registry {
             let node_modules_path = format!("{}/node_modules", job_dir);
@@ -489,6 +534,7 @@ plugin(p)
         db,
         logs,
         mem_peak,
+        canceled_by,
         child,
         false,
         worker_name,
@@ -502,7 +548,7 @@ plugin(p)
 }
 
 pub async fn get_common_bun_proc_envs(base_internal_url: &str) -> HashMap<String, String> {
-    let mut bun_envs: HashMap<String, String> = HashMap::from([
+    let bun_envs: HashMap<String, String> = HashMap::from([
         (String::from("PATH"), PATH_ENV.clone()),
         (String::from("HOME"), HOME_ENV.clone()),
         (String::from("TZ"), TZ_ENV.clone()),
@@ -519,10 +565,6 @@ pub async fn get_common_bun_proc_envs(base_internal_url: &str) -> HashMap<String
             BUN_CACHE_DIR.to_string(),
         ),
     ]);
-
-    if let Some(ref s) = NPM_CONFIG_REGISTRY.read().await.clone() {
-        bun_envs.insert(String::from("NPM_CONFIG_REGISTRY"), s.clone());
-    }
     return bun_envs;
 }
 
@@ -549,6 +591,7 @@ pub async fn start_worker(
 ) -> Result<()> {
     let mut logs = "".to_string();
     let mut mem_peak: i32 = 0;
+    let mut canceled_by: Option<CanceledBy> = None;
     let _ = write_file(job_dir, "main.ts", inner_content).await?;
     let common_bun_proc_envs: HashMap<String, String> =
         get_common_bun_proc_envs(&base_internal_url).await;
@@ -566,45 +609,56 @@ pub async fn start_worker(
         None,
     )
     .await;
-    let context_envs = build_envs_map(context.to_vec());
+    let context_envs = build_envs_map(context.to_vec()).await;
     if let Some(reqs) = requirements_o {
         let splitted = reqs.split(BUN_LOCKB_SPLIT).collect::<Vec<&str>>();
         if splitted.len() != 2 {
             return Err(error::Error::ExecutionErr(
-                format!("Invalid requirements, expectd to find //bun.lockb split pattern in reqs. Found: |{reqs}|")
+                format!("Invalid requirements, expected to find //bun.lockb split pattern in reqs. Found: |{reqs}|")
             ));
         }
         let _ = write_file(job_dir, "package.json", &splitted[0]).await?;
         let lockb = splitted[1];
         if lockb != EMPTY_FILE {
-            let _ = write_file_binary(
+            let has_trusted_deps = &splitted[0].contains("trustedDependencies");
+
+            if !has_trusted_deps {
+                let _ = write_file_binary(
+                    job_dir,
+                    "bun.lockb",
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(&splitted[1])
+                        .map_err(|_| {
+                            error::Error::InternalErr("Could not decode bun.lockb".to_string())
+                        })?,
+                )
+                .await?;
+            }
+
+            install_lockfile(
+                &mut logs,
+                &mut mem_peak,
+                &mut canceled_by,
+                &Uuid::nil(),
+                &w_id,
+                db,
                 job_dir,
-                "bun.lockb",
-                &base64::engine::general_purpose::STANDARD
-                    .decode(&splitted[1])
-                    .map_err(|_| {
-                        error::Error::InternalErr("Could not decode bun.lockb".to_string())
-                    })?,
+                worker_name,
+                common_bun_proc_envs.clone(),
             )
             .await?;
+            if !has_trusted_deps {
+                remove_dir_all(format!("{}/node_modules", job_dir)).await?;
+            }
+            tracing::info!("dedicated worker requirements installed: {reqs}");
         }
-        install_lockfile(
-            &mut logs,
-            &mut mem_peak,
-            &Uuid::nil(),
-            &w_id,
-            db,
-            job_dir,
-            worker_name,
-            common_bun_proc_envs.clone(),
-        )
-        .await?;
     } else if !*DISABLE_NSJAIL {
         let trusted_deps = get_trusted_deps(inner_content);
         logs.push_str("\n\n--- BUN INSTALL ---\n");
         let _ = gen_lockfile(
             &mut logs,
             &mut mem_peak,
+            &mut canceled_by,
             &Uuid::nil(),
             &w_id,
             db,
@@ -649,14 +703,12 @@ BigInt.prototype.toJSON = function () {{
 {dates}
 
 let stdout = Bun.stdout.writer();
-// let stdout = Bun.file("output.txt").writer();
 stdout.write('start\n'); 
 
 for await (const chunk of Bun.stdin.stream()) {{
     const lines = Buffer.from(chunk).toString();
     let exit = false;
     for (const line of lines.trim().split("\n")) {{
-        // stdout.write('s: ' + line + 'EE\n'); 
         if (line === "end") {{
             exit = true;
             break;
@@ -664,9 +716,9 @@ for await (const chunk of Bun.stdin.stream()) {{
         try {{
             let {{ {spread} }} = JSON.parse(line) 
             let res: any = await main(...[ {spread} ]);
-            stdout.write(JSON.stringify(res ?? null, (key, value) => typeof value === 'undefined' ? null : value) + '\n');
+            stdout.write("wm_res[success]:" + JSON.stringify(res ?? null, (key, value) => typeof value === 'undefined' ? null : value) + '\n');
         }} catch (e) {{
-            stdout.write(JSON.stringify({{ error: {{ message: e.message, name: e.name, stack: e.stack, line: line }}}}) + '\n');
+            stdout.write("wm_res[error]:" + JSON.stringify({{ message: e.message, name: e.name, stack: e.stack, line: line }}) + '\n');
         }}
         stdout.flush();
     }}
@@ -718,6 +770,7 @@ plugin(p)
         job_completed_tx,
         token,
         jobs_rx,
+        worker_name,
     )
     .await
 }

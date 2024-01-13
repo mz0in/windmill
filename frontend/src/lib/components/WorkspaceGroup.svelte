@@ -1,19 +1,21 @@
 <script lang="ts">
-	import { X } from 'lucide-svelte'
+	import { Plus, X } from 'lucide-svelte'
 	import { Alert, Button, Drawer } from './common'
 	import Multiselect from 'svelte-multiselect'
 	import ToggleButton from './common/toggleButton-v2/ToggleButton.svelte'
 	import ToggleButtonGroup from './common/toggleButton-v2/ToggleButtonGroup.svelte'
-	import { ConfigService } from '$lib/gen'
+	import { ConfigService, Preview } from '$lib/gen'
 	import ConfirmationModal from './common/confirmationModal/ConfirmationModal.svelte'
 	import { createEventDispatcher } from 'svelte'
 	import { sendUserToast } from '$lib/toast'
+	import { emptyString } from '$lib/utils'
 	import { enterpriseLicense, superadmin } from '$lib/stores'
 	import Tooltip from './Tooltip.svelte'
 	import Editor from './Editor.svelte'
 	import DrawerContent from './common/drawer/DrawerContent.svelte'
 	import Section from './Section.svelte'
 	import Label from './Label.svelte'
+	import AutoComplete from 'simple-svelte-autocomplete'
 
 	export let name: string
 	export let config:
@@ -24,19 +26,61 @@
 				priority_tags?: Map<string, number>
 				cache_clear?: number
 				init_bash?: string
+				additional_python_paths?: string[]
+				pip_local_dependencies?: string[]
 		  }
 	export let activeWorkers: number
+	export let customTags: string[] | undefined
 
-	let nconfig: any = config
-		? config.worker_tags != undefined || config.dedicated_worker != undefined
-			? config
+	let nconfig: {
+		dedicated_worker?: string
+		worker_tags?: string[]
+		priority_tags?: Map<string, number>
+		cache_clear?: number
+		init_bash?: string
+		env_vars_static?: Map<string, string>
+		env_vars_allowlist?: string[]
+		additional_python_paths?: string[]
+		pip_local_dependencies?: string[]
+	} = {}
+
+	function loadNConfig() {
+		nconfig = config
+			? config.worker_tags != undefined || config.dedicated_worker != undefined
+				? config
+				: {
+						worker_tags: []
+				  }
 			: {
 					worker_tags: []
 			  }
-		: {
-				worker_tags: []
-		  }
+		if (nconfig.priority_tags === undefined) {
+			nconfig.priority_tags = new Map<string, number>()
+		}
+		customEnvVars = []
+		if (nconfig.env_vars_allowlist === undefined) {
+			nconfig.env_vars_allowlist = []
+		} else {
+			for (const key of nconfig.env_vars_allowlist) {
+				customEnvVars.push({ key, type: 'dynamic', value: undefined })
+			}
+		}
+		if (nconfig.env_vars_static === undefined) {
+			nconfig.env_vars_static = new Map<string, string>()
+		} else {
+			for (const [key, value] of Object.entries(nconfig.env_vars_static)) {
+				customEnvVars.push({ key, type: 'static', value })
+			}
+		}
+		customEnvVars.sort((a, b) => (a.key < b.key ? -1 : 1))
+	}
+
 	let selectedPriorityTags: string[] = []
+	let customEnvVars: {
+		key: string
+		type: 'static' | 'dynamic'
+		value: string | undefined
+	}[] = []
 
 	const defaultTags = [
 		'deno',
@@ -50,7 +94,29 @@
 		'other',
 		'bun'
 	]
-	const nativeTags = ['nativets', 'postgresql', 'mysql', 'graphql', 'snowflake', 'bigquery']
+	const nativeTags = [
+		'nativets',
+		'postgresql',
+		'mysql',
+		'graphql',
+		'snowflake',
+		'mssql',
+		'bigquery'
+	]
+	const aws_env_vars_preset = [
+		'AWS_REGION',
+		'AWS_DEFAULT_REGION',
+		'AWS_ACCESS_KEY_ID',
+		'AWS_SECRET_ACCESS_KEY',
+		'AWS_ENDPOINT_URL'
+	]
+	const ssl_env_vars_preset = [
+		'DENO_CERT',
+		'PIP_INDEX_CERT',
+		'REQUESTS_CA_BUNDLE',
+		'SSL_CERT_FILE',
+		'SSL_CERT_DIR'
+	]
 
 	let newTag: string = ''
 	$: selected = nconfig?.dedicated_worker != undefined ? 'dedicated' : 'normal'
@@ -75,6 +141,8 @@
 	let openClean = false
 
 	let drawer: Drawer
+
+	let createdTags: string[] = []
 </script>
 
 <ConfirmationModal
@@ -128,8 +196,8 @@
 	<DrawerContent on:close={() => drawer.closeDrawer()} title="Edit worker config '{name}'">
 		{#if !$enterpriseLicense}
 			<Alert type="warning" title="Worker management UI is EE only">
-				Workers can still have their WORKER_TAGS passed as env. Dedicated workers are an enterprise
-				only feature.
+				Workers can still have their WORKER_TAGS, INIT_SCRIPT and WHITELIST_ENVS passed as env.
+				Dedicated workers are an enterprise only feature.
 			</Alert>
 			<div class="pb-4" />
 		{/if}
@@ -156,7 +224,7 @@
 				position="dedicated"
 				value="dedicated"
 				size="sm"
-				label="Dedicated to a script"
+				label="Dedicated to a script/flow"
 			/>
 		</ToggleButtonGroup>
 		{#if selected == 'normal'}
@@ -173,7 +241,9 @@
 										if (nconfig != undefined) {
 											dirty = true
 											nconfig.worker_tags = nconfig?.worker_tags?.filter((t) => t != tag) ?? []
-											delete nconfig.priority_tags[tag]
+											if (nconfig.priority_tags) {
+												delete nconfig.priority_tags[tag]
+											}
 											selectedPriorityTags = selectedPriorityTags.filter((t) => t != tag) ?? []
 										}
 									}}
@@ -184,26 +254,50 @@
 						{/each}
 					</div>
 					<div class="max-w-md">
-						<input type="text" placeholder="new tag" bind:value={newTag} />
-						<div class="mt-1" />
-						<Button
-							variant="contained"
-							color="blue"
-							size="xs"
-							disabled={newTag == '' || nconfig.worker_tags?.includes(newTag)}
-							on:click={() => {
-								if (nconfig != undefined) {
-									nconfig.worker_tags = [
-										...(nconfig?.worker_tags ?? []),
-										newTag.replaceAll(' ', '_')
-									]
-									newTag = ''
-									dirty = true
-								}
+						<AutoComplete
+							noInputStyles
+							items={[...(customTags ?? []), ...createdTags, ...defaultTags, ...nativeTags].filter(
+								(x) => !nconfig?.worker_tags?.includes(x)
+							)}
+							bind:selectedItem={newTag}
+							hideArrow={true}
+							inputClassName={'flex !font-gray-600 !font-primary !bg-surface-primary"'}
+							dropdownClassName="!text-sm !py-2 !rounded-sm  !border-gray-200 !border !shadow-md"
+							className="w-full !font-gray-600 !font-primary !bg-surface-primary"
+							onFocus={() => {
+								dispatch('focus')
 							}}
-						>
-							Add tag
-						</Button>
+							create
+							onCreate={(c) => {
+								createdTags.push(c)
+								createdTags = [...createdTags]
+								return c
+							}}
+							createText="Press enter to use this non-predefined value"
+						/>
+
+						<div class="mt-1" />
+						<div class="flex">
+							<Button
+								variant="contained"
+								color="blue"
+								size="xs"
+								startIcon={{ icon: Plus }}
+								disabled={newTag == '' || nconfig.worker_tags?.includes(newTag)}
+								on:click={() => {
+									if (nconfig != undefined) {
+										nconfig.worker_tags = [
+											...(nconfig?.worker_tags ?? []),
+											newTag.replaceAll(' ', '_')
+										]
+										newTag = ''
+										dirty = true
+									}
+								}}
+							>
+								Add tag
+							</Button>
+						</div>
 					</div>
 					<div class="flex flex-wrap mt-2 items-center gap-1 pt-2">
 						<Button
@@ -246,7 +340,7 @@
 							Reset to native tags <Tooltip>{nativeTags.join(', ')}</Tooltip>
 						</Button>
 					</div>
-					<div class="max-w-md mt-2 items-center gap-1 pt-2">
+					<div class="max-w mt-2 items-center gap-1 pt-2">
 						{#if nconfig?.worker_tags !== undefined && nconfig?.worker_tags.length > 0}
 							<Label label="High-priority tags">
 								<svelte:fragment slot="header">
@@ -259,15 +353,19 @@
 									</Tooltip>
 								</svelte:fragment>
 								<Multiselect
-									outerDivClass="text-secondary"
+									outerDivClass="text-secondary !bg-surface-disabled"
 									disabled={!$enterpriseLicense}
 									bind:selected={selectedPriorityTags}
 									on:change={(e) => {
 										if (e.detail.type === 'add') {
-											nconfig.priority_tags[e.detail.option] = 100
+											if (nconfig.priority_tags) {
+												nconfig.priority_tags[e.detail.option] = 100
+											}
 											dirty = true
 										} else if (e.detail.type === 'remove') {
-											delete nconfig.priority_tags[e.detail.option]
+											if (nconfig.priority_tags) {
+												delete nconfig.priority_tags[e.detail.option]
+											}
 											dirty = true
 										} else {
 											console.error(
@@ -295,14 +393,242 @@
 					}}
 					bind:value={nconfig.dedicated_worker}
 				/>
-				<p class="text-2xs text-tertiary max-w-md mt-2"
+				<div class="py-2"
+					><Alert
+						type="info"
+						title="Script's runtime setting 'dedicated worker' must be toggled on as well"
+					/></div
+				>
+				<p class="text-2xs text-tertiary mt-2"
 					>Workers will get killed upon detecting this setting change. It is assumed they are in an
 					environment where the supervisor will restart them. Upon restart, they will pick the new
 					dedicated worker config.</p
 				>
 			{/if}
 		{/if}
-		<div class="mt-4" />
+
+		<div class="mt-8" />
+		<Section
+			label="Python runtime settings"
+			collapsable={true}
+			tooltip="Add Python runtime specific settings like additional python paths and PIP local dependencies"
+		>
+			<div class="flex flex-col gap-3 gap-y-2 pb-2 max-w">
+				<span class="text-sm text-primary">Additional Python Paths</span>
+				{#each nconfig.additional_python_paths ?? [] as additional_python_path, i}
+					<div class="flex gap-1 items-center">
+						<input
+							type="text"
+							placeholder="/path/to/python3.X/site-packages"
+							bind:value={additional_python_path}
+						/>
+						<button
+							class="rounded-full bg-surface/60 hover:bg-gray-200"
+							aria-label="Clear"
+							on:click={() => {
+								if (
+									nconfig.additional_python_paths === undefined ||
+									nconfig.additional_python_paths.length == 0
+								) {
+									return
+								}
+								nconfig.additional_python_paths.splice(i, 1)
+								nconfig.additional_python_paths = [...nconfig.additional_python_paths]
+								dirty = true
+							}}
+						>
+							<X size={14} />
+						</button>
+					</div>
+				{/each}
+				<div class="flex">
+					<Button
+						variant="contained"
+						color="blue"
+						size="xs"
+						startIcon={{ icon: Plus }}
+						on:click={() => {
+							if (nconfig.additional_python_paths === undefined) {
+								nconfig.additional_python_paths = []
+							}
+							nconfig.additional_python_paths.push('')
+							nconfig.additional_python_paths = [...nconfig.additional_python_paths]
+							dirty = true
+						}}
+					>
+						Add Additional Python Path
+					</Button>
+				</div>
+
+				<span class="text-sm text-primary">PIP local dependencies</span>
+				{#each nconfig.pip_local_dependencies ?? [] as pip_local_dependency, i}
+					<div class="flex gap-1 items-center">
+						<input type="text" placeholder="httpx" bind:value={pip_local_dependency} />
+						<button
+							class="rounded-full bg-surface/60 hover:bg-gray-200"
+							aria-label="Clear"
+							on:click={() => {
+								if (
+									nconfig.pip_local_dependencies === undefined ||
+									nconfig.pip_local_dependencies.length == 0
+								) {
+									return
+								}
+								nconfig.pip_local_dependencies.splice(i, 1)
+								nconfig.pip_local_dependencies = [...nconfig.pip_local_dependencies]
+								dirty = true
+							}}
+						>
+							<X size={14} />
+						</button>
+					</div>
+				{/each}
+				<div class="flex">
+					<Button
+						variant="contained"
+						color="blue"
+						size="xs"
+						startIcon={{ icon: Plus }}
+						on:click={() => {
+							if (nconfig.pip_local_dependencies === undefined) {
+								nconfig.pip_local_dependencies = []
+							}
+							nconfig.pip_local_dependencies.push('')
+							nconfig.pip_local_dependencies = [...nconfig.pip_local_dependencies]
+							dirty = true
+						}}
+					>
+						Add PIP local dependency
+					</Button>
+				</div>
+			</div>
+		</Section>
+
+		<div class="mt-8" />
+
+		<Section
+			label="Environment Variables passed to Jobs"
+			collapsable={true}
+			tooltip="Add static and dynamic environment variables that will be passed to jobs handled by this worker group. Dynamic environment variable values will be loaded from the worker host environment variables while static environment variables will be set directly from their values below."
+		>
+			<div class="flex flex-col gap-3 gap-y-2 pb-2 max-w">
+				{#each customEnvVars as envvar, i}
+					<div class="flex gap-1 items-center">
+						<input type="text" placeholder="ENV_VAR_NAME" bind:value={envvar.key} />
+						<ToggleButtonGroup
+							class="w-128"
+							bind:selected={envvar.type}
+							on:selected={(e) => {
+								dirty = true
+								if (e.detail === 'dynamic') {
+									envvar.value = undefined
+								}
+							}}
+						>
+							<ToggleButton position="left" value="dynamic" label="Dynamic" />
+							<ToggleButton position="right" value="static" label="Static" />
+						</ToggleButtonGroup>
+						<input
+							type="text"
+							disabled={envvar.type === 'dynamic'}
+							placeholder={envvar.type === 'dynamic'
+								? 'value read from worker env var'
+								: 'static value'}
+							bind:value={envvar.value}
+						/>
+						<button
+							class="rounded-full bg-surface/60 hover:bg-gray-200"
+							aria-label="Clear"
+							on:click={() => {
+								if (nconfig.env_vars_static?.[envvar.key] !== undefined) {
+									delete nconfig.env_vars_static[envvar.key]
+								}
+								if (nconfig.env_vars_allowlist?.includes(envvar.key)) {
+									nconfig.env_vars_allowlist = nconfig.env_vars_allowlist.filter(
+										(k) => k != envvar.key
+									)
+								}
+								customEnvVars.splice(i, 1)
+								customEnvVars = [...customEnvVars]
+								dirty = true
+							}}
+						>
+							<X size={14} />
+						</button>
+					</div>
+				{/each}
+				<div class="flex">
+					<Button
+						variant="contained"
+						color="blue"
+						size="xs"
+						startIcon={{ icon: Plus }}
+						on:click={() => {
+							customEnvVars.push({ key: '', type: 'dynamic', value: undefined })
+							customEnvVars = [...customEnvVars]
+							dirty = true
+						}}
+					>
+						Add Environment Variable
+					</Button>
+				</div>
+			</div>
+			<div class="flex flex-wrap items-center gap-1 pt-2">
+				<Button
+					variant="contained"
+					color="light"
+					size="xs"
+					on:click={() => {
+						let updated = false
+						aws_env_vars_preset.forEach((envvar) => {
+							if (!customEnvVars.some((e) => e.key === envvar)) {
+								updated = true
+								customEnvVars.push({
+									key: envvar,
+									type: 'dynamic',
+									value: undefined
+								})
+							}
+						})
+						if (updated) {
+							customEnvVars = [...customEnvVars]
+							dirty = true
+						}
+					}}
+				>
+					AWS env var preset <Tooltip
+						>{`${aws_env_vars_preset.join(
+							', '
+						)} - see https://docs.aws.amazon.com/fr_fr/cli/latest/userguide/cli-configure-envvars.html for more options`}</Tooltip
+					>
+				</Button>
+				<Button
+					variant="contained"
+					color="light"
+					size="xs"
+					on:click={() => {
+						let updated = false
+						ssl_env_vars_preset.forEach((envvar) => {
+							if (!customEnvVars.some((e) => e.key === envvar)) {
+								updated = true
+								customEnvVars.push({
+									key: envvar,
+									type: 'dynamic',
+									value: undefined
+								})
+							}
+						})
+						if (updated) {
+							customEnvVars = [...customEnvVars]
+							dirty = true
+						}
+					}}
+				>
+					SSL env var preset <Tooltip>{`${ssl_env_vars_preset.join(', ')}`}</Tooltip>
+				</Button>
+			</div>
+		</Section>
+		<div class="mt-8" />
 
 		<Section
 			label="Init Script"
@@ -319,7 +645,7 @@
 						class="flex flex-1 grow h-full w-full"
 						automaticLayout
 						lang="shell"
-						deno={false}
+						scriptLang={Preview.language.BASH}
 						useWebsockets={false}
 						fixedOverflowWidgets={false}
 						listenEmptyChanges
@@ -350,6 +676,19 @@
 						variant="contained"
 						color="dark"
 						on:click={async () => {
+							customEnvVars.forEach((envvar) => {
+								if (
+									nconfig.env_vars_static !== undefined &&
+									nconfig.env_vars_allowlist !== undefined &&
+									!emptyString(envvar.key)
+								) {
+									if (envvar.type === 'dynamic') {
+										nconfig.env_vars_allowlist.push(envvar.key)
+									} else {
+										nconfig.env_vars_static[envvar.key] = envvar.value
+									}
+								}
+							})
 							await ConfigService.updateConfig({ name: 'worker__' + name, requestBody: nconfig })
 							sendUserToast('Configuration set')
 							dispatch('reload')
@@ -369,10 +708,18 @@
 <div class="flex gap-2 items-center"
 	><h4 class="py-4 truncate w-40 text-primary">{name}</h4>
 	{#if $superadmin}
-		<Button color="light" size="xs" on:click={drawer.openDrawer}>
-			<div class="flex flex-row gap-1 items-center"
-				>{config == undefined ? 'create' : 'edit'} config</div
-			>
+		<Button
+			color="light"
+			size="xs"
+			on:click={() => {
+				dirty = false
+				loadNConfig()
+				drawer.openDrawer()
+			}}
+		>
+			<div class="flex flex-row gap-1 items-center">
+				{config == undefined ? 'create' : 'edit'} config
+			</div>
 		</Button>
 
 		{#if config}

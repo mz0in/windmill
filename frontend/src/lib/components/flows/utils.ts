@@ -1,11 +1,11 @@
 import {
 	JobService,
-	ScriptService,
 	type Flow,
 	type FlowModule,
 	type InputTransform,
 	type Job,
-	type RestartedFrom
+	type RestartedFrom,
+	type OpenFlow
 } from '$lib/gen'
 import { workspaceStore } from '$lib/stores'
 import { cleanExpr, emptySchema } from '$lib/utils'
@@ -68,7 +68,9 @@ export function evalValue(
 	return v
 }
 
-export function cleanInputs(flow: Flow | any): Flow {
+export function cleanInputs(
+	flow: OpenFlow | any
+): OpenFlow & { tag?: string; ws_error_handler_muted?: boolean; dedicated_worker?: boolean } {
 	const newFlow: Flow = JSON.parse(JSON.stringify(flow))
 	newFlow.value.modules.forEach((mod) => {
 		if (mod.value.type == 'rawscript' || mod.value.type == 'script') {
@@ -109,16 +111,21 @@ export function jobsToResults(jobs: Job[]) {
 	})
 }
 
-export async function runFlowPreview(args: Record<string, any>, flow: Flow, restartedFrom: RestartedFrom | undefined) {
+export async function runFlowPreview(
+	args: Record<string, any>,
+	flow: OpenFlow & { tag?: string },
+	path: string,
+	restartedFrom: RestartedFrom | undefined
+) {
 	const newFlow = flow
 	return await JobService.runFlowPreview({
 		workspace: get(workspaceStore) ?? '',
 		requestBody: {
 			args,
 			value: newFlow.value,
-			path: newFlow.path,
+			path: path,
 			tag: newFlow.tag,
-			restarted_from: restartedFrom,
+			restarted_from: restartedFrom
 		}
 	})
 }
@@ -142,27 +149,5 @@ export function emptyFlowModuleState(): FlowModuleState {
 	return {
 		schema: emptySchema(),
 		previewResult: NEVER_TESTED_THIS_FAR
-	}
-}
-
-export async function findNextAvailablePath(path: string): Promise<string> {
-	try {
-		await ScriptService.getScriptByPath({
-			workspace: get(workspaceStore)!,
-			path
-		})
-
-		const [_, version] = path.split(/.*_([0-9]*)/)
-
-		if (version.length > 0) {
-			path = path.slice(0, -(version.length + 1))
-		}
-
-		path = `${path}_${Number(version) + 1}`
-
-		return findNextAvailablePath(path)
-	} catch (e) {
-		// Catching an error means the path is available
-		return path
 	}
 }

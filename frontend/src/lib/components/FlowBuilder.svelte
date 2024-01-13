@@ -8,7 +8,9 @@
 		type PathScript,
 		ScriptService,
 		Script,
-		type HubScriptKind
+		type HubScriptKind,
+		type OpenFlow,
+		type RawScript
 	} from '$lib/gen'
 	import { initHistory, push, redo, undo } from '$lib/history'
 	import {
@@ -18,16 +20,20 @@
 		userStore,
 		workspaceStore
 	} from '$lib/stores'
-	import { encodeState, formatCron, sleep } from '$lib/utils'
+	import {
+		cleanValueProperties,
+		encodeState,
+		formatCron,
+		orderedJsonStringify,
+		sleep
+	} from '$lib/utils'
 	import { sendUserToast } from '$lib/toast'
 	import type { Drawer } from '$lib/components/common'
 
-	import { faCalendarAlt, faSave } from '@fortawesome/free-solid-svg-icons'
 	import { setContext, tick } from 'svelte'
 	import { writable, type Writable } from 'svelte/store'
 	import CenteredPage from './CenteredPage.svelte'
 	import { Badge, Button, Kbd, UndoRedo } from './common'
-	import { dirtyStore } from './common/confirmationModal/dirtyStore'
 	import FlowEditor from './flows/FlowEditor.svelte'
 	import ScriptEditorDrawer from './flows/content/ScriptEditorDrawer.svelte'
 	import type { FlowState } from './flows/flowState'
@@ -38,7 +44,7 @@
 	import { loadFlowSchedule, type Schedule } from './flows/scheduleUtils'
 	import type { FlowEditorContext } from './flows/types'
 	import { cleanInputs, emptyFlowModuleState } from './flows/utils'
-	import { Pen } from 'lucide-svelte'
+	import { Calendar, Pen, Save, DiffIcon } from 'lucide-svelte'
 	import { createEventDispatcher } from 'svelte'
 	import Awareness from './Awareness.svelte'
 	import { getAllModules } from './flows/flowExplorer'
@@ -52,20 +58,31 @@
 	import FlowCopilotDrawer from './copilot/FlowCopilotDrawer.svelte'
 	import FlowCopilotStatus from './copilot/FlowCopilotStatus.svelte'
 	import { fade } from 'svelte/transition'
-	import { loadFlowModuleState } from './flows/flowStateUtils'
+	import { loadFlowModuleState, pickScript } from './flows/flowStateUtils'
 	import FlowCopilotInputsModal from './copilot/FlowCopilotInputsModal.svelte'
 	import { snakeCase } from 'lodash'
 	import FlowBuilderTutorials from './FlowBuilderTutorials.svelte'
 
 	import FlowTutorials from './FlowTutorials.svelte'
 	import { ignoredTutorials } from './tutorials/ignoredTutorials'
+	import type DiffDrawer from './DiffDrawer.svelte'
+	import UnsavedConfirmationModal from './common/confirmationModal/UnsavedConfirmationModal.svelte'
+	import { cloneDeep } from 'lodash'
+	import { goto } from '$app/navigation'
 
 	export let initialPath: string = ''
+	export let newFlow: boolean
 	export let selectedId: string | undefined
 	export let initialArgs: Record<string, any> = {}
 	export let loading = false
-	export let flowStore: Writable<Flow>
+	export let flowStore: Writable<OpenFlow>
 	export let flowStateStore: Writable<FlowState>
+	export let savedFlow:
+		| (Flow & {
+				draft?: Flow | undefined
+		  })
+		| undefined = undefined
+	export let diffDrawer: DiffDrawer | undefined = undefined
 
 	const dispatch = createEventDispatcher()
 
@@ -93,20 +110,45 @@
 	let loadingSave = false
 	let loadingDraft = false
 
-	async function saveDraft(): Promise<void> {
+	async function saveDraft(forceSave = false): Promise<void> {
+		if (!newFlow && !savedFlow) {
+			return
+		}
+		if (savedFlow) {
+			const draftOrDeployed = cleanValueProperties(savedFlow.draft || savedFlow)
+			const current = cleanValueProperties({ ...$flowStore, path: $pathStore })
+			if (!forceSave && orderedJsonStringify(draftOrDeployed) === orderedJsonStringify(current)) {
+				sendUserToast('No changes detected, ignoring', false, [
+					{
+						label: 'Save anyway',
+						callback: () => {
+							saveDraft(true)
+						}
+					}
+				])
+				return
+			}
+		}
 		loadingDraft = true
 		try {
 			const flow = cleanInputs($flowStore)
-
-			$dirtyStore = false
-			localStorage.removeItem('flow')
-			localStorage.removeItem(`flow-${flow.path}`)
-
-			if (initialPath == '') {
+			try {
+				localStorage.removeItem('flow')
+				localStorage.removeItem(`flow-${$pathStore}`)
+			} catch (e) {
+				console.error('error interacting with local storage', e)
+			}
+			if (newFlow || savedFlow?.draft_only) {
+				if (savedFlow?.draft_only) {
+					await FlowService.deleteFlowByPath({
+						workspace: $workspaceStore!,
+						path: initialPath
+					})
+				}
 				await FlowService.createFlow({
 					workspace: $workspaceStore!,
 					requestBody: {
-						path: flow.path,
+						path: $pathStore,
 						summary: flow.summary,
 						description: flow.description ?? '',
 						value: flow.value,
@@ -119,11 +161,36 @@
 			}
 			await DraftService.createDraft({
 				workspace: $workspaceStore!,
-				requestBody: { path: initialPath == '' ? flow.path : initialPath, typ: 'flow', value: flow }
+				requestBody: {
+					path: newFlow || savedFlow?.draft_only ? $pathStore : initialPath,
+					typ: 'flow',
+					value: {
+						...flow,
+						path: $pathStore
+					}
+				}
 			})
-			if (initialPath == '') {
-				$dirtyStore = false
-				dispatch('saveInitial')
+
+			savedFlow = {
+				...(newFlow || savedFlow?.draft_only
+					? {
+							...cloneDeep($flowStore),
+							path: $pathStore,
+							draft_only: true
+					  }
+					: savedFlow),
+				draft: {
+					...cloneDeep($flowStore),
+					path: $pathStore
+				}
+			} as Flow & {
+				draft?: Flow
+			}
+
+			if (newFlow) {
+				dispatch('saveInitial', $pathStore)
+			} else if (savedFlow?.draft_only && $pathStore !== initialPath) {
+				goto(`/flows/edit/${$pathStore}?selected=${getSelectedId()}`)
 			}
 			sendUserToast('Saved as draft')
 		} catch (error) {
@@ -148,52 +215,50 @@
 			// loadingSave = false // del
 			// return
 			const { cron, timezone, args, enabled } = $scheduleStore
-			$dirtyStore = false
-			if (initialPath === '') {
-				localStorage.removeItem('flow')
-				localStorage.removeItem(`flow-${flow.path}`)
+			if (newFlow) {
+				try {
+					localStorage.removeItem('flow')
+					localStorage.removeItem(`flow-${$pathStore}`)
+				} catch (e) {
+					console.error('error interacting with local storage', e)
+				}
 				await FlowService.createFlow({
 					workspace: $workspaceStore!,
 					requestBody: {
-						path: flow.path,
+						path: $pathStore,
 						summary: flow.summary,
 						description: flow.description ?? '',
 						value: flow.value,
 						schema: flow.schema,
-						ws_error_handler_muted: flow.ws_error_handler_muted
+						ws_error_handler_muted: flow.ws_error_handler_muted,
+						tag: flow.tag,
+						dedicated_worker: flow.dedicated_worker
 					}
 				})
 				if (enabled) {
-					await createSchedule(flow.path)
+					await createSchedule($pathStore)
 				}
 			} else {
-				localStorage.removeItem(`flow-${initialPath}`)
-				await FlowService.updateFlow({
-					workspace: $workspaceStore!,
-					path: initialPath,
-					requestBody: {
-						path: flow.path,
-						summary: flow.summary,
-						description: flow.description ?? '',
-						value: flow.value,
-						schema: flow.schema,
-						tag: flow.tag,
-						ws_error_handler_muted: flow.ws_error_handler_muted
-					}
-				})
+				try {
+					localStorage.removeItem(`flow-${initialPath}`)
+				} catch (e) {
+					console.error('error interacting with local storage', e)
+				}
+
 				const scheduleExists = await ScheduleService.existsSchedule({
 					workspace: $workspaceStore ?? '',
-					path: flow.path
+					path: initialPath
 				})
+
 				if (scheduleExists) {
 					const schedule = await ScheduleService.getSchedule({
 						workspace: $workspaceStore ?? '',
-						path: flow.path
+						path: initialPath
 					})
 					if (JSON.stringify(schedule.args) != JSON.stringify(args) || schedule.schedule != cron) {
 						await ScheduleService.updateSchedule({
 							workspace: $workspaceStore ?? '',
-							path: flow.path,
+							path: initialPath,
 							requestBody: {
 								schedule: formatCron(cron),
 								timezone,
@@ -204,17 +269,35 @@
 					if (enabled != schedule.enabled) {
 						await ScheduleService.setScheduleEnabled({
 							workspace: $workspaceStore ?? '',
-							path: flow.path,
+							path: initialPath,
 							requestBody: { enabled }
 						})
 					}
 				} else if (enabled) {
-					await createSchedule(flow.path)
+					await createSchedule(initialPath)
 				}
+
+				await FlowService.updateFlow({
+					workspace: $workspaceStore!,
+					path: initialPath,
+					requestBody: {
+						path: $pathStore,
+						summary: flow.summary,
+						description: flow.description ?? '',
+						value: flow.value,
+						schema: flow.schema,
+						tag: flow.tag,
+						dedicated_worker: flow.dedicated_worker,
+						ws_error_handler_muted: flow.ws_error_handler_muted
+					}
+				})
 			}
+			savedFlow = {
+				...cloneDeep($flowStore),
+				path: $pathStore
+			} as Flow
 			loadingSave = false
-			$dirtyStore = false
-			dispatch('deploy')
+			dispatch('deploy', $pathStore)
 		} catch (err) {
 			sendUserToast(`The flow could not be saved: ${err.body}`, true)
 			loadingSave = false
@@ -234,9 +317,10 @@
 		timeout = setTimeout(() => {
 			try {
 				localStorage.setItem(
-					initialPath ? `flow-${initialPath}` : 'flow',
+					initialPath && initialPath != '' ? `flow-${initialPath}` : 'flow',
 					encodeState({
 						flow: $flowStore,
+						path: $pathStore,
 						selectedId: $selectedIdStore
 					})
 				)
@@ -262,6 +346,9 @@
 	const scriptEditorDrawer = writable<ScriptEditorDrawer | undefined>(undefined)
 	const moving = writable<{ module: FlowModule; modules: FlowModule[] } | undefined>(undefined)
 	const history = initHistory($flowStore)
+	const pathStore = writable<string>(initialPath)
+
+	$: $pathStore = initialPath
 
 	const testStepStore = writable<Record<string, any>>({})
 
@@ -278,6 +365,7 @@
 		history,
 		flowStateStore,
 		flowStore,
+		pathStore,
 		testStepStore,
 		saveDraft,
 		initialPath
@@ -300,7 +388,7 @@
 
 	$: selectedId && select(selectedId)
 
-	$: initialPath && $workspaceStore && loadSchedule()
+	$: initialPath && initialPath != '' && $workspaceStore && loadSchedule()
 
 	function onKeyDown(event: KeyboardEvent) {
 		let classes = event.target?.['className']
@@ -363,14 +451,16 @@
 	const dropdownItems: Array<{
 		label: string
 		onClick: () => void
-	}> = [
-		{
-			label: 'Exit & see details',
-			onClick: () => dispatch('details')
-		}
-	]
+	}> = []
 
-	if (initialPath != '') {
+	if (savedFlow?.draft_only === false || savedFlow?.draft_only === undefined) {
+		dropdownItems.push({
+			label: 'Exit & see details',
+			onClick: () => dispatch('details', $pathStore)
+		})
+	}
+
+	if (!newFlow) {
 		dropdownItems.push({
 			label: 'Fork',
 			onClick: () => window.open(`/flows/add?template=${initialPath}`)
@@ -381,7 +471,10 @@
 		drawerStore: writable<Drawer | undefined>(undefined),
 		modulesStore: writable<FlowCopilotModule[]>([]),
 		currentStepStore: writable<string | undefined>(undefined),
-		genFlow: undefined
+		genFlow: undefined,
+		shouldUpdatePropertyType: writable<{
+			[key: string]: 'static' | 'javascript' | undefined
+		}>({})
 	}
 
 	setContext('FlowCopilotContext', flowCopilotContext)
@@ -389,7 +482,8 @@
 	const {
 		drawerStore: copilotDrawerStore,
 		modulesStore: copilotModulesStore,
-		currentStepStore: copilotCurrentStepStore
+		currentStepStore: copilotCurrentStepStore,
+		shouldUpdatePropertyType
 	} = flowCopilotContext
 
 	let doneTs = 0
@@ -405,8 +499,7 @@
 				})
 			).map((s) => ({
 				...s,
-				path: `hub/${s.version_id}/${s.app}/${s.summary.toLowerCase().replaceAll(/\s+/g, '_')}`,
-				summary: `${s.summary} (${s.app})`
+				path: `hub/${s.version_id}/${s.app}/${s.summary.toLowerCase().replaceAll(/\s+/g, '_')}`
 			}))
 			if (ts < doneTs) return
 			doneTs = ts
@@ -477,7 +570,7 @@
 
 	function clearFlowInputsFromStep(id: string | undefined) {
 		const module: FlowModule | undefined = dfs(id, $flowStore)[0]
-		if (module?.value.type === 'rawscript') {
+		if (module?.value.type === 'rawscript' || module?.value.type === 'script') {
 			// clear step inputs that start with flow_input. but not flow_input.iter
 			for (const key in module.value.input_transforms) {
 				const input = module.value.input_transforms[key]
@@ -490,6 +583,7 @@
 						type: 'static',
 						value: undefined
 					}
+					$shouldUpdatePropertyType[key] = 'static'
 				}
 			}
 		}
@@ -539,23 +633,9 @@
 				$scheduleStore.enabled = true
 			}
 
-			let hubScript:
-				| {
-						content: string
-						lockfile?: string | undefined
-						schema?: any
-						language: string
-						summary?: string | undefined
-				  }
-				| undefined = undefined
-
-			if (module.source === 'hub' && module.selectedCompletion) {
-				hubScript = await ScriptService.getHubScriptByPath({
-					path: module.selectedCompletion.path
-				})
-			}
-
-			const flowModule = {
+			const flowModule: FlowModule & {
+				value: RawScript | PathScript
+			} = {
 				id: module.id,
 				stop_after_if:
 					module.type === 'trigger'
@@ -567,13 +647,28 @@
 				value: {
 					input_transforms: {},
 					content: '',
-					language: (hubScript ? hubScript.language : module.lang ?? 'bun') as Script.language,
-					type: 'rawscript' as const
+					language: (module.lang ?? 'bun') as Script.language,
+					type: 'rawscript'
 				},
-				summary: module.selectedCompletion?.summary ?? module.description
+				summary: module.description
 			}
 
-			$flowStateStore[module.id] = emptyFlowModuleState()
+			let isHubStep = false
+			if (module.source === 'hub' && module.selectedCompletion) {
+				isHubStep = true
+				const [hubScriptModule, hubScriptState] = await pickScript(
+					module.selectedCompletion.path,
+					`${module.selectedCompletion.summary} (${module.selectedCompletion.app})`,
+					module.id,
+					undefined
+				)
+				flowModule.value = hubScriptModule.value
+				flowModule.summary = hubScriptModule.summary
+				$flowStateStore[module.id] = hubScriptState
+			} else {
+				$flowStateStore[module.id] = emptyFlowModuleState()
+			}
+
 			if (stepOnly) {
 				flowModules.splice(idx, 0, flowModule)
 			} else if (idx === 1 && $copilotModulesStore[idx - 1].type === 'trigger') {
@@ -597,7 +692,9 @@
 			}
 
 			$copilotDrawerStore?.closeDrawer()
+			await tick()
 			select(module.id)
+			await tick()
 			await tick()
 			focusCopilot()
 
@@ -609,13 +706,14 @@
 			) {
 				isFirstInLoop = true
 			}
-			const prevNodeId = getPreviousIds(module.id, $flowStore, false)[0]
-			const pastModule: FlowModule | undefined = dfs(prevNodeId, $flowStore, false)[0]
+			const prevNodeId = getPreviousIds(module.id, $flowStore, false)[0] as string | undefined
+			const pastModule = dfs(prevNodeId, $flowStore, false)[0] as FlowModule | undefined
 
-			if (hubScript) {
-				module.editor?.setCode(hubScript.content)
-			} else if (module.source === 'custom') {
-				module.editor?.setCode('')
+			if (!module.source) {
+				throw new Error('Invalid copilot module source')
+			}
+
+			if (module.source === 'custom') {
 				const deltaStore = writable<string>('')
 				const unsubscribe = deltaStore.subscribe(async (delta) => {
 					module.editor?.append(delta)
@@ -625,34 +723,38 @@
 				await stepCopilot(
 					module,
 					deltaStore,
-					pastModule?.value.type === 'rawscript' ? pastModule.value.content : '',
-					pastModule?.value.type === 'rawscript' ? pastModule.value.language : undefined,
-					pastModule === undefined,
+					$workspaceStore!,
+					pastModule?.value.type === 'rawscript' || pastModule?.value.type === 'script'
+						? (pastModule as FlowModule & {
+								value: RawScript | PathScript
+						  })
+						: undefined,
 					isFirstInLoop,
 					abortController
 				)
 				unsubscribe()
-			} else {
-				throw new Error('Invalid copilot module source')
 			}
 
 			copilotStatus = "Generating inputs for step '" + module.id + "'..."
 			await sleep(500) // make sure code was parsed
 
 			try {
-				if (flowModule.value.type === 'rawscript') {
+				if (
+					(flowModule.value.type === 'rawscript' || flowModule.value.type === 'script') &&
+					(pastModule === undefined ||
+						pastModule.value.type === 'rawscript' ||
+						pastModule.value.type === 'script')
+				) {
 					const stepSchema: Schema = JSON.parse(JSON.stringify($flowStateStore[module.id].schema)) // deep copy
-					if (
-						module.source === 'hub' &&
-						pastModule !== undefined &&
-						$copilotInfo.exists_openai_resource_path
-					) {
+					if (isHubStep && pastModule !== undefined && $copilotInfo.exists_openai_resource_path) {
 						// ask AI to set step inputs
 						abortController = new AbortController()
-						const inputs = await glueCopilot(
-							Object.keys(flowModule.value.input_transforms),
-							pastModule.value.type === 'rawscript' ? pastModule.value.content : '',
-							pastModule.value.type === 'rawscript' ? pastModule.value.language : undefined,
+						const { inputs, allExprs } = await glueCopilot(
+							flowModule.value.input_transforms,
+							$workspaceStore!,
+							pastModule as FlowModule & {
+								value: RawScript | PathScript
+							},
 							isFirstInLoop,
 							abortController
 						)
@@ -660,20 +762,34 @@
 						// create flow inputs used by AI for autocompletion
 						copilotFlowInputs = {}
 						copilotFlowRequiredInputs = []
-						Object.entries(inputs).forEach(([key, expr]) => {
-							const snakeKey = snakeCase(key)
-							if (
-								key in stepSchema.properties &&
-								expr.includes('flow_input.') &&
-								!expr.includes('flow_input.iter') &&
-								(!$flowStore.schema || !(snakeKey in $flowStore.schema.properties)) // prevent overriding flow inputs
-							) {
-								copilotFlowInputs[snakeKey] = stepSchema.properties[snakeKey]
-								if (stepSchema.required.includes(snakeKey)) {
-									copilotFlowRequiredInputs.push(snakeKey)
+						Object.entries(allExprs).forEach(([key, expr]) => {
+							if (expr.includes('flow_input.') && !expr.includes('flow_input.iter.')) {
+								const flowInputKey = expr.match(/flow_input\.([A-Za-z0-9_]+)/)?.[1]
+								if (
+									flowInputKey !== undefined &&
+									(!$flowStore.schema || !(flowInputKey in $flowStore.schema.properties)) // prevent overriding flow inputs
+								) {
+									if (key in stepSchema.properties) {
+										copilotFlowInputs[flowInputKey] = stepSchema.properties[key]
+										if (stepSchema.required.includes(key)) {
+											copilotFlowRequiredInputs.push(flowInputKey)
+										}
+									} else {
+										// when the key is nested (e.g. body.content)
+										const [firstKey, ...rest] = key.split('.')
+										const restKey = rest.join('.')
+										const firstKeyProperties = stepSchema.properties[firstKey]?.properties
+										if (firstKeyProperties !== undefined && restKey in firstKeyProperties) {
+											copilotFlowInputs[flowInputKey] = firstKeyProperties[restKey]
+											if (firstKeyProperties[restKey].required?.includes(flowInputKey)) {
+												copilotFlowRequiredInputs.push(flowInputKey)
+											}
+										}
+									}
 								}
 							}
 						})
+
 						if (!stepOnly) {
 							applyCopilotFlowInputs()
 						}
@@ -682,12 +798,13 @@
 						Object.entries(inputs).forEach(([key, expr]) => {
 							flowModule.value.input_transforms[key] = {
 								type: 'javascript',
-								expr: expr.replaceAll(/flow_input\.([A-Za-z0-9_]+)/g, (_, p1) => 'flow_input.' + p1)
+								expr
 							}
+							$shouldUpdatePropertyType[key] = 'javascript'
 						})
 					} else {
 						if (
-							module.source === 'hub' &&
+							isHubStep &&
 							pastModule !== undefined &&
 							!$copilotInfo.exists_openai_resource_path
 						) {
@@ -736,10 +853,24 @@
 											: 'flow_input.' + snakeKey
 										: 'flow_input.' + snakeKey
 							}
+							$shouldUpdatePropertyType[key] = 'javascript'
 						}
 					}
 
 					$flowStore = $flowStore // force rerendering
+				} else {
+					if (
+						pastModule !== undefined &&
+						pastModule.value.type !== 'rawscript' &&
+						pastModule.value.type !== 'script'
+					) {
+						sendUserToast(
+							`Linking to previous step ${pastModule.id} of type ${pastModule.value.type} is not yet supported`,
+							true
+						)
+					} else {
+						sendUserToast('Something went wrong, could not generate step inputs', true)
+					}
 				}
 			} catch (err) {
 				console.error(err)
@@ -781,45 +912,6 @@
 		copilotLoading = true
 		select('Input')
 		$copilotCurrentStepStore = 'Input'
-		copilotStatus = 'Setting flow inputs...'
-
-		// filter out unused flow inputs
-		const flowInputs: Record<string, SchemaProperty> = {}
-		const required = new Set<string>()
-		function getFlowInputs(modules: FlowModule[]) {
-			for (const module of modules) {
-				if (module.value.type === 'rawscript') {
-					for (const moduleAttr of Object.keys(module.value.input_transforms)) {
-						const input = module.value.input_transforms[moduleAttr]
-						if (
-							input.type === 'javascript' &&
-							input.expr.includes('flow_input.') &&
-							!input.expr.includes('flow_input.iter')
-						) {
-							const flowAttr = input.expr.split('.')[1]
-							const schema = $flowStateStore[module.id].schema
-							const schemaProperty = Object.entries(schema.properties).find(
-								(x) => x[0] === moduleAttr
-							)?.[1]
-							if (schemaProperty) {
-								flowInputs[flowAttr] = schemaProperty
-								required.add(flowAttr)
-							}
-						}
-					}
-				} else if (module.value.type === 'forloopflow') {
-					getFlowInputs(module.value.modules)
-				}
-			}
-		}
-		getFlowInputs($flowStore.value.modules)
-
-		$flowStore.schema = {
-			$schema: 'https://json-schema.org/draft/2020-12/schema',
-			properties: flowInputs,
-			required: Array.from(required),
-			type: 'object'
-		}
 
 		copilotStatus = "Done! Just check the flow's inputs and you're good to go!"
 		$copilotCurrentStepStore = undefined
@@ -868,6 +960,15 @@
 </script>
 
 <svelte:window on:keydown={onKeyDown} />
+
+<UnsavedConfirmationModal
+	{diffDrawer}
+	savedValue={savedFlow}
+	modifiedValue={{
+		...$flowStore,
+		path: $pathStore
+	}}
+/>
 
 {#key renderCount}
 	{#if !$userStore?.operator}
@@ -920,7 +1021,7 @@
 					{#if $scheduleStore.enabled}
 						<Button
 							btnClasses="hidden lg:inline-flex"
-							startIcon={{ icon: faCalendarAlt }}
+							startIcon={{ icon: Calendar }}
 							variant="contained"
 							color="light"
 							size="xs"
@@ -950,7 +1051,7 @@
 						<input
 							type="text"
 							readonly
-							value={$flowStore.path && $flowStore.path != '' ? $flowStore.path : 'Choose a path'}
+							value={$pathStore && $pathStore != '' ? $pathStore : 'Choose a path'}
 							class="font-mono !text-xs !min-w-[96px] !max-w-[300px] !w-full !h-[28px] !my-0 !py-0 !border-l-0 !rounded-l-none"
 							on:focus={({ currentTarget }) => {
 								currentTarget.select()
@@ -959,7 +1060,7 @@
 					</div>
 				</div>
 				<div class="flex flex-row space-x-2">
-					{#if $enterpriseLicense && initialPath != ''}
+					{#if $enterpriseLicense && !newFlow}
 						<Awareness />
 					{/if}
 					<FlowBuilderTutorials
@@ -967,6 +1068,29 @@
 							renderCount += 1
 						}}
 					/>
+					<Button
+						color="light"
+						variant="border"
+						size="xs"
+						on:click={() => {
+							if (!savedFlow) {
+								return
+							}
+							diffDrawer?.openDrawer()
+							diffDrawer?.setDiff({
+								mode: 'normal',
+								deployed: savedFlow,
+								draft: savedFlow['draft'],
+								current: { ...$flowStore, path: $pathStore }
+							})
+						}}
+						disabled={!savedFlow}
+					>
+						<div class="flex flex-row gap-2 items-center">
+							<DiffIcon size={14} />
+							Diff
+						</div>
+					</Button>
 
 					<FlowCopilotStatus
 						{copilotLoading}
@@ -982,17 +1106,18 @@
 					<Button
 						loading={loadingDraft}
 						size="xs"
-						startIcon={{ icon: faSave }}
+						startIcon={{ icon: Save }}
 						on:click={() => saveDraft()}
+						disabled={!newFlow && !savedFlow}
 					>
 						Save draft&nbsp;<Kbd small>Ctrl</Kbd><Kbd small>S</Kbd>
 					</Button>
 					<Button
 						loading={loadingSave}
 						size="xs"
-						startIcon={{ icon: faSave }}
+						startIcon={{ icon: Save }}
 						on:click={() => saveFlow()}
-						dropdownItems={initialPath != '' ? dropdownItems : undefined}
+						dropdownItems={!newFlow ? dropdownItems : undefined}
 					>
 						Deploy
 					</Button>

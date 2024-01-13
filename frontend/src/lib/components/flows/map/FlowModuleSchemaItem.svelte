@@ -39,6 +39,7 @@
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-static-element-interactions -->
 <div
 	class={classNames(
 		'w-full module flex rounded-sm cursor-pointer',
@@ -49,7 +50,7 @@
 	style="width: 275px; height: 34px; background-color: {bgColor};"
 	on:click
 >
-	<div class="absolute text-sm right-12 -bottom-3 flex flex-row gap-1 z-20">
+	<div class="absolute text-sm right-12 -bottom-3 flex flex-row gap-1 z-10">
 		{#if retry}
 			<Popover notClickable>
 				<div
@@ -145,22 +146,22 @@
 	</div>
 	{#if deletable}
 		<button
-			class="absolute -top-2 -right-2 rounded-full h-4 w-4 trash center-center text-primary
+			class="absolute -top-[10px] -right-[10px] rounded-full h-[20px] w-[20px] trash center-center text-primary
 	border-[1.5px] border-gray-700 bg-surface duration-150 hover:bg-red-400 hover:text-white
 	hover:border-red-700 {selected ? '' : '!hidden'}"
 			on:click|preventDefault|stopPropagation={(event) =>
 				dispatch('delete', { event, id, type: modType })}
 		>
-			<X size={12} strokeWidth={2} />
+			<X class="mx-[3px]" size={14} strokeWidth={2} />
 		</button>
 
 		<button
-			class="absolute -top-2 right-10 rounded-full h-4 w-4 trash center-center text-primary
+			class="absolute -top-[10px] right-[35px] rounded-full h-[20px] w-[20px] trash center-center text-primary
 border-[1.5px] border-gray-700 bg-surface duration-150 hover:bg-blue-400 hover:text-white
 hover:border-blue-700 {selected ? '' : '!hidden'}"
 			on:click|preventDefault|stopPropagation={(event) => dispatch('move')}
 		>
-			<Move size={12} strokeWidth={2} />
+			<Move class="mx-[3px]" size={14} strokeWidth={2} />
 		</button>
 	{/if}
 </div>

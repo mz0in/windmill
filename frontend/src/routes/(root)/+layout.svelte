@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation'
 	import { page } from '$app/stores'
-	import { OpenAPI, SettingsService, UserService, WorkspaceService } from '$lib/gen'
+	import { SettingsService, UserService, WorkspaceService } from '$lib/gen'
 	import { logoutWithRedirect } from '$lib/logout'
 	import { enterpriseLicense, userStore, usersWorkspaceStore, workspaceStore } from '$lib/stores'
 	import { getUserExt } from '$lib/user'
@@ -9,14 +9,9 @@
 	import { onDestroy, onMount } from 'svelte'
 
 	import { refreshSuperadmin } from '$lib/refreshUser'
-	import EditorTheme from '$lib/components/EditorTheme.svelte'
+	// import EditorTheme from '$lib/components/EditorTheme.svelte'
 	import { computeDrift } from '$lib/forLater'
-
-	let token = $page.url.searchParams.get('wm_token') ?? undefined
-	if (token) {
-		OpenAPI.WITH_CREDENTIALS = true
-		OpenAPI.TOKEN = $page.url.searchParams.get('wm_token')!
-	}
+	import ChartHighlightTheme from '$lib/components/ChartHighlightTheme.svelte'
 
 	const monacoEditorUnhandledErrors = [
 		'Model not found',
@@ -24,6 +19,7 @@
 		'Connection got disposed.',
 		'Stopping the server timed out',
 		'Canceled',
+		'Starting server failed',
 		'Missing service editorService',
 		'Unexpected usage',
 		'NetworkError when attempting to fetch resource.',
@@ -77,7 +73,7 @@
 		}
 	}
 
-	let interval: NodeJS.Timer | undefined = undefined
+	let interval: NodeJS.Timeout | undefined = undefined
 	onMount(() => {
 		window.onunhandledrejection = (event: PromiseRejectionEvent) => {
 			event.preventDefault()
@@ -93,7 +89,10 @@
 				// Unhandled errors from Monaco Editor don't logout the user
 				if (
 					monacoEditorUnhandledErrors.includes(message) ||
-					message.startsWith('Failed to fetch dynamically imported')
+					message.startsWith('Failed to fetch dynamically imported') ||
+					message.startsWith('Unable to figure out browser width and height') ||
+					message.startsWith('Unable to read file') ||
+					message.startsWith('Could not find source file')
 				) {
 					console.warn(message)
 					return
@@ -142,7 +141,7 @@
 
 				// every 1 hour
 				if (i % 12 == 0) {
-					UserService.refreshUserToken()
+					await UserService.refreshUserToken()
 				}
 
 				try {
@@ -176,6 +175,6 @@
 	}
 </script>
 
-<EditorTheme />
+<ChartHighlightTheme />
 
 <slot />

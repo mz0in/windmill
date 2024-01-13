@@ -7,7 +7,6 @@
 	import InlineScriptEditorDrawer from './InlineScriptEditorDrawer.svelte'
 	import { inferArgs, parseOutputs } from '$lib/infer'
 	import type { Schema } from '$lib/common'
-	import Badge from '$lib/components/common/badge/Badge.svelte'
 	import Editor from '$lib/components/Editor.svelte'
 	import { defaultIfEmptyString, emptySchema, getModifierKey, itemsExists } from '$lib/utils'
 	import { computeFields } from './utils'
@@ -130,6 +129,10 @@
 			? buildExtraLib($worldStore?.outputsById ?? {}, id, $state, true)
 			: undefined
 
+	// 	`
+	// /** The current's app state */
+	// const state: Record<string, any>;`
+
 	let drawerIsOpen: boolean | undefined = undefined
 
 	async function inferSuggestions(code: string) {
@@ -160,9 +163,12 @@
 			{editor}
 			bind:this={inlineScriptEditorDrawer}
 			bind:inlineScript
+			on:createScriptFromInlineScript={() => {
+				dispatch('createScriptFromInlineScript')
+				drawerIsOpen = false
+			}}
 		/>
 	{/if}
-
 	<div class="h-full flex flex-col gap-1">
 		<div class="flex justify-between w-full gap-2 px-2 pt-1 flex-row items-center">
 			{#if name !== undefined}
@@ -182,11 +188,10 @@
 				{/if}
 			{/if}
 			<div class="flex w-full flex-row gap-2 items-center justify-end">
-				{#if validCode}
-					<Badge color="green" baseClass="!text-2xs">Valid</Badge>
-				{:else}
-					<Badge color="red" baseClass="!text-2xs">Invalid</Badge>
-				{/if}
+				<div
+					title={validCode ? 'Main function parsable' : 'Main function not parsable'}
+					class="rounded-full w-2 h-2 {validCode ? 'bg-green-300' : 'bg-red-300'}"
+				/>
 				{#if inlineScript}
 					<CacheTtlPopup bind:cache_ttl={inlineScript.cache_ttl} />
 				{/if}
@@ -204,24 +209,24 @@
 				<Button
 					title="Delete"
 					size="xs"
-					color="light"
-					btnClasses="!px-2 !bg-red-100 hover:!bg-red-200"
+					color="red"
+					variant="border"
+					btnClasses="!px-2"
 					aria-label="Delete"
 					on:click={() => dispatch('delete')}
-				>
-					<Trash2 size={14} class="text-red-800" />
-				</Button>
+					endIcon={{ icon: Trash2 }}
+				/>
 				{#if inlineScript.language != 'frontend'}
 					<Button
 						size="xs"
 						color="light"
-						btnClasses="!px-2 !bg-surface-secondary hover:!bg-surface-hover"
+						title="Full Editor"
+						btnClasses="!px-2  !bg-surface-secondary hover:!bg-surface-hover"
 						on:click={() => {
 							inlineScriptEditorDrawer?.openDrawer()
 						}}
-					>
-						Full Editor&nbsp;<Maximize2 size={14} />
-					</Button>
+						endIcon={{ icon: Maximize2 }}
+					/>
 				{/if}
 
 				<Button
@@ -253,11 +258,12 @@
 			{#if !drawerIsOpen}
 				{#if inlineScript.language != 'frontend'}
 					<Editor
-						deno={inlineScript.language == 'deno'}
 						path={inlineScript.path}
 						bind:this={editor}
+						small
 						class="flex flex-1 grow h-full"
 						lang={scriptLangToEditorLang(inlineScript?.language)}
+						scriptLang={inlineScript.language}
 						bind:code={inlineScript.content}
 						fixedOverflowWidgets={true}
 						cmdEnterAction={async () => {
@@ -265,7 +271,9 @@
 								inlineScript.content = editor?.getCode() ?? ''
 							}
 							runLoading = true
-							await Promise.all($runnableComponents[id]?.cb?.map((f) => f?.(inlineScript)) ?? [])
+							await Promise.all(
+								$runnableComponents[id]?.cb?.map((f) => f?.(inlineScript, true)) ?? []
+							)
 							runLoading = false
 						}}
 						on:change={async (e) => {
@@ -294,13 +302,17 @@
 					<SimpleEditor
 						bind:this={simpleEditor}
 						class="h-full"
+						small
 						{extraLib}
 						bind:code={inlineScript.content}
 						lang="javascript"
+						domLib
 						cmdEnterAction={async () => {
 							runLoading = true
 							await await Promise.all(
-								$runnableComponents[id]?.cb?.map((f) => f(!transformer ? inlineScript : undefined))
+								$runnableComponents[id]?.cb?.map((f) =>
+									f(!transformer ? inlineScript : undefined, true)
+								)
 							)
 							runLoading = false
 						}}

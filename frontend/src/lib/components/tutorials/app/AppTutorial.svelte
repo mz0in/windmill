@@ -2,7 +2,6 @@
 	import { insertNewGridItem, appComponentFromType } from '$lib/components/apps/editor/appUtils'
 	import type { AppComponent, TypedComponent } from '$lib/components/apps/editor/component'
 	import type { AppViewerContext, AppEditorContext } from '$lib/components/apps/types'
-	import { dirtyStore } from '$lib/components/common/confirmationModal/dirtyStore'
 	import { push } from '$lib/history'
 	import { getContext } from 'svelte'
 	import Tutorial from '../Tutorial.svelte'
@@ -31,8 +30,6 @@
 	function addComponent(appComponentType: TypedComponent['type']): void {
 		push(history, $app)
 
-		$dirtyStore = true
-
 		const id = insertNewGridItem(
 			$app,
 			appComponentFromType(appComponentType) as (id: string) => AppComponent,
@@ -55,7 +52,7 @@
 		const steps = [
 			{
 				popover: {
-					title: 'Welcome to the App editor tutorial !',
+					title: 'App editor tutorial',
 					description:
 						'This tutorial will show you how to use the App editor, add components, background scripts and connect them.',
 					onNextClick: () => {
@@ -255,6 +252,8 @@
 						wrapper.appendChild(objectViewer)
 
 						popover.description.appendChild(wrapper)
+
+						tutorial?.renderControls(opts)
 					}
 				}
 			},

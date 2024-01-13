@@ -3,7 +3,7 @@ use std::{collections::HashMap, process::Stdio};
 use itertools::Itertools;
 use serde_json::value::RawValue;
 use tokio::{
-    fs::{DirBuilder, File},
+    fs::{create_dir, DirBuilder, File},
     io::AsyncReadExt,
     process::Command,
 };
@@ -14,6 +14,7 @@ use windmill_common::{
     utils::calculate_hash,
 };
 use windmill_parser_go::{parse_go_imports, REQUIRE_PARSE};
+use windmill_queue::CanceledBy;
 
 use crate::{
     common::{
@@ -35,6 +36,7 @@ lazy_static::lazy_static! {
 pub async fn handle_go_job(
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job: &QueuedJob,
     db: &sqlx::Pool<sqlx::Postgres>,
     client: &AuthedClientBackgroundTask,
@@ -48,23 +50,24 @@ pub async fn handle_go_job(
 ) -> Result<Box<RawValue>, Error> {
     //go does not like executing modules at temp root
     let job_dir = &format!("{job_dir}/go");
-    let bin_path = if let Some(requirements) = requirements_o.clone() {
-        Some(format!(
-            "{}/{}",
-            GO_BIN_CACHE_DIR,
-            calculate_hash(&format!("{}{}", inner_content, requirements))
+    let bin_path = format!(
+        "{}/{}",
+        GO_BIN_CACHE_DIR,
+        calculate_hash(&format!(
+            "{}{}",
+            inner_content,
+            requirements_o
+                .as_ref()
+                .map(|x| x.to_string())
+                .unwrap_or_default()
         ))
-    } else {
-        None
-    };
+    );
+    let bin_exists = tokio::fs::metadata(&bin_path).await.is_ok();
 
-    let bin_exists = if let Some(bin_path) = bin_path.clone() {
-        tokio::fs::metadata(bin_path).await.is_ok()
-    } else {
-        false
-    };
-
-    let (skip_go_mod, skip_tidy) = if let Some(requirements) = requirements_o {
+    let (skip_go_mod, skip_tidy) = if bin_exists {
+        create_dir(job_dir).await?;
+        (true, true)
+    } else if let Some(requirements) = requirements_o {
         gen_go_mod(inner_content, job_dir, &requirements).await?
     } else {
         (false, false)
@@ -79,6 +82,7 @@ pub async fn handle_go_job(
             inner_content,
             logs,
             mem_peak,
+            canceled_by,
             job_dir,
             db,
             true,
@@ -195,6 +199,7 @@ func Run(req Req) (interface{{}}, error){{
             db,
             logs,
             mem_peak,
+            canceled_by,
             build_go_process,
             false,
             worker_name,
@@ -205,14 +210,19 @@ func Run(req Req) (interface{{}}, error){{
         )
         .await?;
 
-        if let Some(bin_path) = bin_path.clone() {
-            tokio::fs::copy(format!("{job_dir}/main"), &bin_path).await?;
-            logs.push_str(&format!("write cached binary: {}\n", bin_path));
-        }
+        create_dir(&bin_path).await?;
+        tokio::fs::copy(format!("{job_dir}/main"), format!("{bin_path}/main")).await?;
+        logs.push_str(&format!("write cached binary: {}\n", bin_path));
     } else {
-        let path = bin_path.unwrap().clone();
-        logs.push_str(&format!("found cached binary: {}\n", path));
-        tokio::fs::copy(path, format!("{job_dir}/main")).await?;
+        let path = format!("{bin_path}/main");
+        logs.push_str(&format!("found cached binary: {path}\n"));
+        tokio::fs::copy(&path, format!("{job_dir}/main"))
+            .await
+            .map_err(|e| {
+                Error::ExecutionErr(format!(
+                    "could not copy cached binary from {path} to {job_dir}/main: {e:?}"
+                ))
+            })?;
         logs.push_str("\n\n--- GO CODE EXECUTION ---\n");
         set_logs(logs, &job.id, db).await;
         create_args_and_out_file(client, job, job_dir, db).await?;
@@ -275,6 +285,7 @@ func Run(req Req) (interface{{}}, error){{
         db,
         logs,
         mem_peak,
+        canceled_by,
         child,
         !*DISABLE_NSJAIL,
         worker_name,
@@ -313,6 +324,7 @@ pub async fn install_go_dependencies(
     code: &str,
     logs: &mut String,
     mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
     job_dir: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
     non_dep_job: bool,
@@ -336,6 +348,7 @@ pub async fn install_go_dependencies(
             db,
             logs,
             mem_peak,
+            canceled_by,
             child_process,
             false,
             worker_name,
@@ -400,6 +413,7 @@ pub async fn install_go_dependencies(
         db,
         logs,
         mem_peak,
+        canceled_by,
         child_process,
         false,
         worker_name,

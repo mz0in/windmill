@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation'
 	import { page } from '$app/stores'
-	import { dirtyStore } from '$lib/components/common/confirmationModal/dirtyStore'
-	import UnsavedConfirmationModal from '$lib/components/common/confirmationModal/UnsavedConfirmationModal.svelte'
 
 	import FlowBuilder from '$lib/components/FlowBuilder.svelte'
 	import type { FlowState } from '$lib/components/flows/flowState'
@@ -26,6 +24,8 @@
 
 	let selectedId: string = 'settings-metadata'
 	let loading = false
+
+	let initialPath: string | undefined = undefined
 
 	export const flowStore = writable<Flow>({
 		summary: '',
@@ -56,7 +56,7 @@
 		if ($importFlowStore) {
 			flow = $importFlowStore
 			$importFlowStore = undefined
-			sendUserToast('Flow loaded from JSON')
+			sendUserToast('Flow loaded from YAML/JSON')
 		} else if (!templatePath && !hubId && state) {
 			sendUserToast('Flow restored from draft', false, [
 				{
@@ -77,6 +77,7 @@
 			])
 
 			flow = state.flow
+			initialPath = state.path
 			state?.selectedId && (selectedId = state?.selectedId)
 		} else {
 			if (templatePath) {
@@ -85,15 +86,16 @@
 					path: templatePath
 				})
 				Object.assign(flow, template)
-				const oldPath = flow.path.split('/')
-				flow.path = `u/${$userStore?.username.split('@')[0]}/${oldPath[oldPath.length - 1]}_fork`
+				const oldPath = templatePath.split('/')
+				console.log(oldPath)
+				initialPath = `u/${$userStore?.username.split('@')[0]}/${oldPath[oldPath.length - 1]}_fork`
 				flow = flow
 				goto('?', { replaceState: true })
 				selectedId = 'settings-metadata'
 			} else if (hubId) {
 				const hub = await FlowService.getHubFlowById({ id: Number(hubId) })
 				delete hub['comments']
-				flow.path = `u/${$userStore?.username}/flow_${hubId}`
+				initialPath = `u/${$userStore?.username}/flow_${hubId}`
 				Object.assign(flow, hub.flow)
 				flow = flow
 				goto('?', { replaceState: true })
@@ -110,27 +112,26 @@
 
 	loadFlow()
 
-	$dirtyStore = true
-
 	let getSelectedId: (() => string) | undefined = undefined
 	let flowBuilder: FlowBuilder | undefined = undefined
 </script>
 
-<div id="monaco-widgets-root" class="monaco-editor" style="z-index: 1200;" />
-<UnsavedConfirmationModal />
+<!-- <div id="monaco-widgets-root" class="monaco-editor" style="z-index: 1200;" /> -->
 
 <FlowBuilder
-	on:saveInitial={() => {
-		goto(`/flows/edit/${$flowStore.path}?selected=${getSelectedId?.()}`)
+	on:saveInitial={(e) => {
+		goto(`/flows/edit/${e.detail}?selected=${getSelectedId?.()}`)
 	}}
-	on:deploy={() => {
-		goto(`/flows/get/${$flowStore.path}?workspace=${$workspaceStore}`)
+	on:deploy={(e) => {
+		goto(`/flows/get/${e.detail}?workspace=${$workspaceStore}`)
 	}}
-	on:details={() => {
-		goto(`/flows/get/${$flowStore.path}?workspace=${$workspaceStore}`)
+	on:details={(e) => {
+		goto(`/flows/get/${e.detail}?workspace=${$workspaceStore}`)
 	}}
+	{initialPath}
 	bind:getSelectedId
 	bind:this={flowBuilder}
+	newFlow
 	{flowStore}
 	{flowStateStore}
 	{selectedId}

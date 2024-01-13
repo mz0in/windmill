@@ -1,25 +1,28 @@
 <script lang="ts">
-	import Dropdown from '$lib/components/Dropdown.svelte'
+	import Dropdown from '$lib/components/DropdownV2.svelte'
 	import type MoveDrawer from '$lib/components/MoveDrawer.svelte'
 	import SharedBadge from '$lib/components/SharedBadge.svelte'
 	import type ShareModal from '$lib/components/ShareModal.svelte'
 	import { AppService, AppWithLastVersion, DraftService, type ListableApp } from '$lib/gen'
 	import { userStore, workspaceStore } from '$lib/stores'
-	import {
-		faCodeFork,
-		faEdit,
-		faExternalLink,
-		faFileExport,
-		faHistory,
-		faShare,
-		faTrashAlt
-	} from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher } from 'svelte'
 	import Button from '../button/Button.svelte'
 	import Row from './Row.svelte'
 	import DraftBadge from '$lib/components/DraftBadge.svelte'
 	import Badge from '../badge/Badge.svelte'
-	import { Eye } from 'lucide-svelte'
+	import {
+		ExternalLink,
+		Eye,
+		File,
+		FileJson,
+		FileUp,
+		GitFork,
+		Globe,
+		History,
+		Pen,
+		Share,
+		Trash
+	} from 'lucide-svelte'
 	import { goto } from '$app/navigation'
 	import { page } from '$app/stores'
 	import type DeployWorkspaceDrawer from '$lib/components/DeployWorkspaceDrawer.svelte'
@@ -34,17 +37,8 @@
 	export let moveDrawer: MoveDrawer
 	export let deploymentDrawer: DeployWorkspaceDrawer
 	export let deleteConfirmedCallback: (() => void) | undefined
-
-	let {
-		summary,
-		path,
-		extra_perms,
-		canWrite,
-		workspace_id,
-		has_draft,
-		draft_only,
-		execution_mode
-	} = app
+	export let depth: number = 0
+	export let menuOpen: boolean = false
 
 	const dispatch = createEventDispatcher()
 
@@ -52,34 +46,38 @@
 	let appDeploymentHistory: AppDeploymentHistory
 
 	async function loadAppJson() {
-		appExport.open(path)
+		appExport.open(app.path)
 	}
 
 	async function loadDeployements() {
-		const app: AppWithLastVersion = (await AppService.getAppByPath({
+		const napp: AppWithLastVersion = (await AppService.getAppByPath({
 			workspace: $workspaceStore!,
-			path
+			path: app.path
 		})) as unknown as AppWithLastVersion
 
-		appDeploymentHistory.open(app.versions)
+		appDeploymentHistory.open(napp.path)
 	}
 </script>
 
-<AppJsonEditor on:change bind:this={appExport} />
-<AppDeploymentHistory bind:this={appDeploymentHistory} />
+{#if menuOpen}
+	<AppJsonEditor on:change bind:this={appExport} />
+	<AppDeploymentHistory bind:this={appDeploymentHistory} />
+{/if}
+
 <Row
-	href={`/apps/get/${path}`}
+	href={`/apps/get/${app.path}`}
 	kind="app"
 	{marked}
-	{path}
-	{summary}
-	workspaceId={workspace_id ?? $workspaceStore ?? ''}
+	path={app.path}
+	summary={app.summary}
+	workspaceId={app.workspace_id ?? $workspaceStore ?? ''}
 	{starred}
 	on:change
-	canFavorite={!draft_only}
+	canFavorite={!app.draft_only}
+	{depth}
 >
 	<svelte:fragment slot="badges">
-		{#if execution_mode == 'anonymous'}
+		{#if app.execution_mode == 'anonymous'}
 			<Badge small>
 				<div class="flex gap-1 items-center">
 					<Eye size={14} />
@@ -87,21 +85,21 @@
 				</div></Badge
 			>
 		{/if}
-		<SharedBadge {canWrite} extraPerms={extra_perms} />
-		<DraftBadge {has_draft} {draft_only} />
+		<SharedBadge canWrite={app.canWrite} extraPerms={app.extra_perms} />
+		<DraftBadge has_draft={app.has_draft} draft_only={app.draft_only} />
 		<div class="w-8 center-center" />
 	</svelte:fragment>
 	<svelte:fragment slot="actions">
 		<span class="hidden md:inline-flex gap-x-1">
 			{#if !$userStore?.operator}
-				{#if canWrite}
+				{#if app.canWrite}
 					<div>
 						<Button
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faEdit }}
-							href="/apps/edit/{path}?nodraft=true"
+							startIcon={{ icon: Pen }}
+							href="/apps/edit/{app.path}?nodraft=true"
 						>
 							Edit
 						</Button>
@@ -112,8 +110,8 @@
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faCodeFork }}
-							href="/apps/add?template={path}"
+							startIcon={{ icon: GitFork }}
+							href="/apps/add?template={app.path}"
 						>
 							Fork
 						</Button>
@@ -122,14 +120,17 @@
 			{/if}
 		</span>
 		<Dropdown
-			placement="bottom-end"
-			dropdownItems={() => {
+			items={() => {
+				let { draft_only, canWrite, summary, execution_mode, path, has_draft } = app
+
 				if (draft_only) {
 					return [
 						{
 							displayName: 'Delete',
-							icon: faTrashAlt,
+							icon: Trash,
 							action: async (event) => {
+								// TODO
+								// @ts-ignore
 								if (event?.shiftKey) {
 									await AppService.deleteApp({ workspace: $workspaceStore ?? '', path })
 									dispatch('change')
@@ -145,7 +146,7 @@
 						},
 						{
 							displayName: 'View/Edit JSON',
-							icon: faFileExport,
+							icon: File,
 							action: () => {
 								loadAppJson()
 							}
@@ -155,12 +156,12 @@
 				return [
 					{
 						displayName: 'Duplicate/Fork',
-						icon: faCodeFork,
+						icon: GitFork,
 						href: `/apps/add?template=${path}`
 					},
 					{
 						displayName: 'Move/Rename',
-						icon: faFileExport,
+						icon: FileUp,
 						action: () => {
 							moveDrawer.openDrawer(path, summary, 'app')
 						},
@@ -168,26 +169,26 @@
 					},
 					{
 						displayName: 'Deploy to staging/prod',
-						icon: faFileExport,
+						icon: Globe,
 						action: () => {
 							deploymentDrawer.openDrawer(path, 'app')
 						}
 					},
 					{
 						displayName: 'View/Edit JSON',
-						icon: faFileExport,
+						icon: FileJson,
 						action: () => {
 							loadAppJson()
 						}
 					},
 					{
 						displayName: 'Deployments',
-						icon: faHistory,
+						icon: History,
 						action: () => loadDeployements()
 					},
 					{
 						displayName: canWrite ? 'Share' : 'See Permissions',
-						icon: faShare,
+						icon: Share,
 						action: () => {
 							shareModal.openDrawer && shareModal.openDrawer(path, 'app')
 						}
@@ -196,7 +197,7 @@
 						? [
 								{
 									displayName: 'Go to public page',
-									icon: faExternalLink,
+									icon: ExternalLink,
 									action: async () => {
 										let secretUrl = await AppService.getPublicSecretOfApp({
 											workspace: $workspaceStore ?? '',
@@ -215,7 +216,7 @@
 						? [
 								{
 									displayName: 'Delete Draft',
-									icon: faTrashAlt,
+									icon: Trash,
 									action: async () => {
 										await DraftService.deleteDraft({
 											workspace: $workspaceStore ?? '',
@@ -231,8 +232,10 @@
 						: []),
 					{
 						displayName: 'Delete',
-						icon: faTrashAlt,
+						icon: Trash,
 						action: async (event) => {
+							// TODO
+							// @ts-ignore
 							if (event?.shiftKey) {
 								await AppService.deleteApp({ workspace: $workspaceStore ?? '', path })
 								dispatch('change')
@@ -247,6 +250,9 @@
 						disabled: !canWrite
 					}
 				]
+			}}
+			on:open={() => {
+				menuOpen = true
 			}}
 		/>
 	</svelte:fragment>

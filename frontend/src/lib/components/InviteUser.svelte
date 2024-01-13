@@ -61,16 +61,13 @@
 		email = ''
 	}
 
-	let selected: 'operator' | 'author' | 'admin' = 'author'
+	let selected: 'operator' | 'developer' | 'admin' = 'developer'
 </script>
 
 <Popup floatingConfig={{ strategy: 'absolute', placement: 'bottom-end' }}>
 	<svelte:fragment slot="button">
-		<Button color="dark" size="xs" nonCaptureEvent={true}>
-			<div class="flex flex-row gap-1 items-center">
-				<MailPlus size={16} />
-				Invite
-			</div>
+		<Button color="dark" size="xs" nonCaptureEvent={true} startIcon={{ icon: MailPlus }}>
+			Invite
 		</Button>
 	</svelte:fragment>
 
@@ -92,10 +89,10 @@
 
 			<ToggleButton
 				position="center"
-				value="author"
+				value="developer"
 				size="sm"
-				label="Author"
-				tooltip="An Author can execute and view scripts/flows/apps, but they can also create new ones."
+				label="Developer"
+				tooltip="A Developer can execute and view scripts/flows/apps, but they can also create new ones and edit those they are allowed to by their path (either u/ or Writer or Admin of their folder found at /f)."
 			/>
 
 			<ToggleButton

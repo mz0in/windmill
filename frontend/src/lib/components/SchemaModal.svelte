@@ -1,5 +1,5 @@
 <script lang="ts" context="module">
-	import type { SchemaProperty, Schema } from '$lib/common'
+	import { type SchemaProperty, type ModalSchemaProperty, modalToSchema } from '$lib/common'
 	import Tab from './common/tabs/Tab.svelte'
 	import TabContent from './common/tabs/TabContent.svelte'
 	import Tabs from './common/tabs/Tabs.svelte'
@@ -7,20 +7,6 @@
 
 	export const ARG_TYPES = ['integer', 'number', 'string', 'boolean', 'object', 'array'] as const
 	export type ArgType = (typeof ARG_TYPES)[number]
-
-	export interface ModalSchemaProperty {
-		selectedType?: string
-		description: string
-		name: string
-		required: boolean
-		format?: string
-		pattern?: string
-		enum_?: string[]
-		default?: any
-		items?: { type?: 'string' | 'number' }
-		contentEncoding?: 'base64' | 'binary'
-		schema?: Schema
-	}
 
 	export function schemaToModal(
 		schema: SchemaProperty,
@@ -36,6 +22,14 @@
 			contentEncoding: schema.contentEncoding,
 			format: schema.format,
 			enum_: schema.enum,
+			min: schema.min,
+			max: schema.max,
+			currency: schema.currency,
+			currencyLocale: schema.currencyLocale,
+			multiselect: schema.multiselect,
+			items: schema.items?.type
+				? { type: schema.items.type as 'string' | 'number' | undefined, enum: schema.items.enum }
+				: undefined,
 			required,
 			schema:
 				schema.type == 'object'
@@ -45,7 +39,8 @@
 							properties: schema.properties ?? {},
 							required: schema.required ?? []
 					  }
-					: undefined
+					: undefined,
+			showExpr: schema.showExpr
 		}
 	}
 
@@ -68,11 +63,15 @@
 	import DrawerContent from './common/drawer/DrawerContent.svelte'
 	import Drawer from './common/drawer/Drawer.svelte'
 	import ArrayTypeNarrowing from './ArrayTypeNarrowing.svelte'
+	import LightweightSchemaForm from './LightweightSchemaForm.svelte'
+	import NumberTypeNarrowing from './NumberTypeNarrowing.svelte'
+	import SimpleEditor from './SimpleEditor.svelte'
 
 	export let error = ''
 	export let editing = false
 	export let oldArgName: string | undefined = undefined
 	export let isFlowInput = false
+	export let propsNames: string[] = []
 
 	const dispatch = createEventDispatcher()
 	let drawer: Drawer
@@ -106,7 +105,13 @@
 		property.selectedType = DEFAULT_PROPERTY.selectedType
 		property.format = undefined
 		property.schema = undefined
-
+		property.min = undefined
+		property.max = undefined
+		property.currency = undefined
+		property.currencyLocale = undefined
+		property.multiselect = undefined
+		property.items = undefined
+		property.showExpr = undefined
 		drawer.closeDrawer()
 	}
 
@@ -170,11 +175,17 @@
 								property.enum_ = undefined
 								property.pattern = undefined
 								property.default = undefined
+								property.min = undefined
+								property.max = undefined
+								property.currency = undefined
+								property.currencyLocale = undefined
+								property.multiselect = undefined
 								if (argType == 'array') {
 									property.items = { type: 'string' }
 								} else {
 									property.items = undefined
 								}
+								property.showExpr = undefined
 							}}
 							id={`schema-modal-type-${argType}`}
 						>
@@ -202,7 +213,11 @@
 						bind:value={property.default}
 						type={property.selectedType}
 						pattern={property.pattern}
+						customErrorMessage={property.customErrorMessage}
 						itemsType={property.items}
+						contentEncoding={property.contentEncoding}
+						format={property.format}
+						extra={property}
 					/>
 					<Toggle
 						options={{ right: 'Required' }}
@@ -219,44 +234,91 @@
 					>
 				{/if}
 			</div>
-			{#if property.selectedType !== 'boolean'}
-				<div>
-					<div class="font-semibold text-secondary mb-1">Advanced</div>
-					{#if property.selectedType == 'string'}
-						<StringTypeNarrowing
-							bind:format={property.format}
-							bind:pattern={property.pattern}
-							bind:enum_={property.enum_}
-							bind:contentEncoding={property.contentEncoding}
-						/>
-					{:else if property.selectedType == 'array'}
-						<ArrayTypeNarrowing bind:itemsType={property.items} />
-					{:else if property.selectedType == 'object'}
-						<Tabs selected="custom-object">
-							<Tab value="custom-object">Custom Object</Tab>
-							<Tab value="resource">Resource</Tab>
-							<svelte:fragment slot="content">
-								<div class="overflow-auto pt-2">
-									<TabContent value="custom-object">
-										<SchemaEditor bind:schema={property.schema} />
-									</TabContent>
+			<div>
+				<div class="font-semibold text-secondary mb-1">Advanced</div>
+				{#if property.selectedType == 'string'}
+					<StringTypeNarrowing
+						bind:customErrorMessage={property.customErrorMessage}
+						bind:format={property.format}
+						bind:pattern={property.pattern}
+						bind:enum_={property.enum_}
+						bind:contentEncoding={property.contentEncoding}
+						noExtra
+					/>
+				{:else if property.selectedType == 'array'}
+					<ArrayTypeNarrowing bind:itemsType={property.items} />
+				{:else if property.selectedType == 'number' || property.selectedType == 'integer'}
+					<NumberTypeNarrowing
+						bind:min={property.min}
+						bind:max={property.max}
+						bind:currency={property.currency}
+						bind:currencyLocale={property.currencyLocale}
+					/>
+				{:else if property.selectedType == 'object'}
+					<Tabs selected="custom-object">
+						<Tab value="custom-object">Custom Object</Tab>
+						<Tab value="resource">Resource</Tab>
+						<svelte:fragment slot="content">
+							<div class="overflow-auto pt-2">
+								<TabContent value="custom-object">
+									<SchemaEditor bind:schema={property.schema} />
+								</TabContent>
 
-									<TabContent value="resource">
-										<h3 class="mb-2 font-bold mt-4">Resource type</h3>
-										<ObjectTypeNarrowing bind:format={property.format} />
-									</TabContent>
-								</div>
-							</svelte:fragment>
-						</Tabs>
-					{:else}
-						<p>No advanced configuration for this type</p>
+								<TabContent value="resource">
+									<h3 class="mb-2 font-bold mt-4">Resource type</h3>
+									<ObjectTypeNarrowing bind:format={property.format} />
+								</TabContent>
+							</div>
+						</svelte:fragment>
+					</Tabs>
+				{/if}
+				<div class="pt-2">
+					<Toggle
+						options={{ right: 'Show this field only when conditions are met' }}
+						class="!justify-start"
+						checked={Boolean(property.showExpr)}
+						on:change={() => {
+							property.showExpr = property.showExpr ? undefined : 'true //fields.foo == 42'
+						}}
+					/>
+					{#if property.showExpr != undefined}
+						<div class="border">
+							<SimpleEditor
+								extraLib={`declare const fields: Record<${propsNames
+									.filter((x) => x != property.name)
+									.map((x) => `"${x}"`)
+									.join(' | ')}, any>;\n`}
+								lang="javascript"
+								bind:code={property.showExpr}
+								shouldBindKey={false}
+								fixedOverflowWidgets={false}
+								autoHeight
+							/>
+						</div>
+						<div class="flex flex-row-reverse text-2xs text-tertiary"
+							><div
+								>Other fields are available under <code>fields</code> (e.g:
+								<code>fields.foo == 42</code>)</div
+							></div
+						>
 					{/if}
 				</div>
-			{/if}
+			</div>
 		</div>
+		<div class="font-semibold text-secondary mb-1 pt-4">Preview</div>
+		<LightweightSchemaForm
+			displayType={false}
+			schema={{
+				properties: {
+					[property.name]: modalToSchema(property)
+				},
+				required: property.required ? [property.name] : []
+			}}
+		/>
 		<svelte:fragment slot="actions">
+			<div class="h-10" />
 			<Button
-				color="blue"
+				color="dark"
 				disabled={!property.name || error != ''}
 				on:click={() => {
 					dispatch('save', property)

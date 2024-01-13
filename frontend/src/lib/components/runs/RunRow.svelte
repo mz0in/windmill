@@ -2,12 +2,12 @@
 	import { goto } from '$app/navigation'
 	import type { Job } from '$lib/gen'
 	import { displayDate, msToSec, truncateHash, truncateRev } from '$lib/utils'
-	import { faRobot, faBarsStaggered } from '@fortawesome/free-solid-svg-icons'
-	import Icon from 'svelte-awesome'
 	import { Badge, Button } from '../common'
 	import ScheduleEditor from '../ScheduleEditor.svelte'
+	import BarsStaggered from '$lib/components/icons/BarsStaggered.svelte'
 
 	import {
+		Bot,
 		Calendar,
 		Check,
 		FastForward,
@@ -24,7 +24,6 @@
 	import Portal from 'svelte-portal'
 
 	const dispatch = createEventDispatcher()
-	const SMALL_ICON_SCALE = 0.7
 
 	export let job: Job
 	export let selectedId: string | undefined = undefined
@@ -48,11 +47,11 @@
 </Portal>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-static-element-interactions -->
 <div
 	class={twMerge(
 		'hover:bg-surface-hover cursor-pointer',
 		selectedId === job.id ? 'bg-blue-50 dark:bg-blue-900/50' : '',
-		'transition-all',
 		'flex flex-row items-center h-full'
 	)}
 	style="width: {containerWidth}px"
@@ -124,7 +123,7 @@
 					<div class="whitespace-nowrap text-xs font-semibold">
 						{#if job.script_path}
 							<div class="flex flex-row gap-1 items-center">
-								<a href="/run/{job.id}?workspace={job.workspace_id}" class="truncate w-8/12">
+								<a href="/run/{job.id}?workspace={job.workspace_id}" class="truncate w-30">
 									{job.script_path}
 								</a>
 								<Button
@@ -168,7 +167,7 @@
 		{#if job && job.parent_job}
 			{#if job.is_flow_step}
 				<div class="flex flex-row gap-1 items-center">
-					<Icon class="text-secondary" data={faBarsStaggered} scale={SMALL_ICON_SCALE} />
+					<BarsStaggered class="text-secondary" size={14} />
 					<span class="mx-1 text-xs">
 						Step of flow <a href={`/run/${job.parent_job}?workspace=${job.workspace_id}`}>
 							{truncateRev(job.parent_job, 6)}
@@ -177,7 +176,7 @@
 				</div>
 			{:else}
 				<div class="flex flex-row gap-1 items-center">
-					<Icon class="text-secondary" data={faRobot} scale={SMALL_ICON_SCALE} />
+					<Bot size={12} class="text-secondary" />
 					<span class="mx-1 text-xs">
 						Parent <a href={`/run/${job.parent_job}?workspace=${job.workspace_id}`}>
 							{job.parent_job}

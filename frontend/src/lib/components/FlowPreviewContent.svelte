@@ -1,17 +1,22 @@
 <script lang="ts">
-	import { Job, JobService, type Flow, type FlowModule, type RestartedFrom } from '$lib/gen'
+	import {
+		Job,
+		JobService,
+		type Flow,
+		type FlowModule,
+		type RestartedFrom,
+		type OpenFlow
+	} from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
-	import { faClose, faPlay, faRefresh } from '@fortawesome/free-solid-svg-icons'
 	import { Badge, Button, Drawer, Kbd, Popup } from './common'
 	import { createEventDispatcher, getContext } from 'svelte'
-	import Icon from 'svelte-awesome'
 	import type { FlowEditorContext } from './flows/types'
 	import { runFlowPreview } from './flows/utils'
 	import SchemaForm from './SchemaForm.svelte'
 	import FlowStatusViewer from '../components/FlowStatusViewer.svelte'
 	import FlowProgressBar from './flows/FlowProgressBar.svelte'
 	import CapturePayload from './flows/content/CapturePayload.svelte'
-	import { ArrowRight, Loader2 } from 'lucide-svelte'
+	import { AlertTriangle, ArrowRight, Play, RefreshCw, X } from 'lucide-svelte'
 	import { emptyString, getModifierKey } from '$lib/utils'
 	import DrawerContent from './common/drawer/DrawerContent.svelte'
 	import SavedInputs from './SavedInputs.svelte'
@@ -33,7 +38,11 @@
 	let isRunning: boolean = false
 	let jobProgressReset: () => void
 
-	const { selectedId, previewArgs, flowStateStore, flowStore, initialPath } =
+	export function test() {
+		runPreview($previewArgs, undefined)
+	}
+
+	const { selectedId, previewArgs, flowStateStore, flowStore, pathStore, initialPath } =
 		getContext<FlowEditorContext>('FlowEditorContext')
 	const dispatch = createEventDispatcher()
 
@@ -62,7 +71,7 @@
 			})
 	}
 
-	function extractFlow(previewMode: 'upTo' | 'whole'): Flow {
+	function extractFlow(previewMode: 'upTo' | 'whole'): OpenFlow {
 		if (previewMode === 'whole') {
 			return $flowStore
 		} else {
@@ -77,13 +86,15 @@
 		}
 	}
 
+	let lastPreviewFlow: undefined | string = undefined
 	export async function runPreview(
 		args: Record<string, any>,
 		restartedFrom: RestartedFrom | undefined
 	) {
+		lastPreviewFlow = JSON.stringify($flowStore)
 		jobProgressReset()
 		const newFlow = extractFlow(previewMode)
-		jobId = await runFlowPreview(args, newFlow, restartedFrom)
+		jobId = await runFlowPreview(args, newFlow, $pathStore, restartedFrom)
 		isRunning = true
 	}
 
@@ -148,18 +159,17 @@
 	</DrawerContent>
 </Drawer>
 
-<div
-	class="flex divide-y flex-col space-y-2 h-screen bg-surface px-6 py-2 w-full"
-	id="flow-preview-content"
->
+<div class="flex flex-col space-y-2 h-screen bg-surface px-6 py-2 w-full" id="flow-preview-content">
 	<div class="flex flex-row justify-between w-full items-center gap-x-2">
 		<div class="w-8">
-			<button
+			<Button
 				on:click={() => dispatch('close')}
-				class="hover:bg-surface-hover bg-surface-secondary rounded-full w-8 h-8 flex items-center justify-center transition-all"
-			>
-				<Icon data={faClose} class="text-secondary" />
-			</button>
+				startIcon={{ icon: X }}
+				iconOnly
+				size="sm"
+				color="light"
+				btnClasses="hover:bg-surface-hover  bg-surface-secondaryw-8 h-8 rounded-full p-0"
+			/>
 		</div>
 
 		{#if isRunning}
@@ -178,8 +188,9 @@
 				}}
 				size="sm"
 				btnClasses="w-full max-w-lg"
+				loading={true}
+				clickableWhileLoading
 			>
-				<Loader2 size={18} class="animate-spin mr-2" />
 				Cancel
 			</Button>
 		{:else}
@@ -198,7 +209,7 @@
 									branch_or_iteration_n: 0
 								})
 							}}
-							startIcon={{ icon: faPlay }}
+							startIcon={{ icon: Play }}
 						>
 							Re-start from
 							<Badge baseClass="ml-1" color="indigo">
@@ -212,7 +223,7 @@
 									title={`Re-start this flow from step ${selectedJobStep} (included).`}
 									variant="border"
 									color="blue"
-									startIcon={{ icon: faRefresh }}
+									startIcon={{ icon: RefreshCw }}
 									on:click={() => {
 										runPreview($previewArgs, {
 											flow_job_id: jobId,
@@ -275,7 +286,7 @@
 				{/if}
 				<Button
 					variant="contained"
-					startIcon={{ icon: isRunning ? faRefresh : faPlay }}
+					startIcon={{ icon: isRunning ? RefreshCw : Play }}
 					color="dark"
 					size="sm"
 					btnClasses="w-full max-w-lg"
@@ -309,10 +320,21 @@
 			>
 		</div>
 	</div>
-	<FlowProgressBar {job} bind:reset={jobProgressReset} />
-
-	<div class="overflow-y-auto grow divide-y divide-gray-600 pr-4">
-		<div class="max-h-1/2 overflow-auto border-b border-gray-700">
+	<div class="w-full flex flex-col gap-y-1">
+		{#if lastPreviewFlow && JSON.stringify($flowStore) != lastPreviewFlow}
+			<div class="pt-1">
+				<div
+					class="bg-orange-200 text-orange-600 border border-orange-600 p-2 flex items-center gap-2 rounded"
+				>
+					<AlertTriangle size={14} /> Flow changed since last preview
+					<div class="flex" />
+				</div>
+			</div>
+		{/if}
+		<FlowProgressBar {job} bind:reset={jobProgressReset} />
+	</div>
+	<div class="overflow-y-auto grow pr-4">
+		<div class="max-h-1/2 overflow-auto border-b">
 			<SchemaForm
 				noVariablePicker
 				compact

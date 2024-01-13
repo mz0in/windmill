@@ -20,6 +20,7 @@
 	import { setInputCat as computeInputCat, isCodeInjection } from '$lib/utils'
 	import { FunctionSquare, Plug } from 'lucide-svelte'
 	import { getResourceTypes } from './resourceTypesStore'
+	import type { FlowCopilotContext } from './copilot/flow'
 
 	export let schema: Schema
 	export let arg: InputTransform | any
@@ -47,11 +48,20 @@
 
 	let propertyType = getPropertyType(arg)
 
+	const { shouldUpdatePropertyType } =
+		getContext<FlowCopilotContext | undefined>('FlowCopilotContext') || {}
+
 	function updatePropertyType() {
-		propertyType = arg.type
+		propertyType = $shouldUpdatePropertyType?.[argName] || 'static'
+		shouldUpdatePropertyType?.set({
+			...$shouldUpdatePropertyType,
+			[argName]: undefined
+		})
 	}
 
-	$: arg?.type && arg.type !== propertyType && updatePropertyType()
+	$: $shouldUpdatePropertyType?.[argName] &&
+		arg?.type === $shouldUpdatePropertyType?.[argName] &&
+		updatePropertyType()
 
 	function getPropertyType(arg: InputTransform | any): 'static' | 'javascript' {
 		let type: 'static' | 'javascript' = arg?.type ?? 'static'
@@ -160,22 +170,25 @@
 				/>
 
 				{#if isStaticTemplate(inputCat)}
-					<span
-						class="bg-blue-100 text-blue-800 text-sm font-medium mr-2 px-2.5 py-0.5 rounded ml-2 {propertyType ==
-							'static' && arg.type === 'javascript'
-							? 'visible'
-							: 'invisible'}"
-					>
-						{'${...}'}
-					</span>
+					<div>
+						<span
+							class="bg-blue-100 text-blue-800 text-sm font-medium mr-2 px-2.5 !py-0.5 rounded ml-2 {propertyType ==
+								'static' && arg.type === 'javascript'
+								? 'visible'
+								: 'invisible'}"
+						>
+							{'${...}'}
+						</span>
+					</div>
 				{/if}
 			</div>
 			{#if !noDynamicToggle}
 				<div class="flex flex-row gap-x-6 gap-y-1 flex-wrap z-10">
 					<div>
 						<ToggleButtonGroup
-							bind:selected={propertyType}
+							selected={propertyType}
 							on:selected={(e) => {
+								if (e.detail == propertyType) return
 								const staticTemplate = isStaticTemplate(inputCat)
 								if (e.detail === 'javascript') {
 									if (arg.expr == undefined) {
@@ -267,6 +280,8 @@
 					Connect input &rightarrow;
 				</span>
 			{/if}
+			<!-- {inputCat}
+			{propertyType} -->
 			{#if isStaticTemplate(inputCat) && propertyType == 'static' && !noDynamicToggle}
 				<div class="mt-2 min-h-[28px]">
 					{#if arg}
@@ -300,6 +315,7 @@
 					contentEncoding={schema.properties[argName].contentEncoding}
 					bind:itemsType={schema.properties[argName].items}
 					properties={schema.properties[argName].properties}
+					nestedRequired={schema.properties[argName].required}
 					displayHeader={false}
 					extra={argExtra}
 					{variableEditor}
@@ -327,7 +343,7 @@
 				<DynamicInputHelpBox />
 				<div class="mb-2" />
 			{:else}
-				Not recognized input type {argName}
+				Not recognized input type {argName} ({arg.expr}, {propertyType})
 			{/if}
 		</div>
 	</div>

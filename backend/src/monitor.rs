@@ -21,27 +21,30 @@ use windmill_api::{
 use windmill_common::{
     error,
     global_settings::{
-        BASE_URL_SETTING, EXPOSE_DEBUG_METRICS_SETTING, EXPOSE_METRICS_SETTING,
-        EXTRA_PIP_INDEX_URL_SETTING, KEEP_JOB_DIR_SETTING, LICENSE_KEY_SETTING,
-        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, REQUEST_SIZE_LIMIT_SETTING,
+        BASE_URL_SETTING, BUNFIG_INSTALL_SCOPES_SETTING, EXPOSE_DEBUG_METRICS_SETTING,
+        EXPOSE_METRICS_SETTING, EXTRA_PIP_INDEX_URL_SETTING, JOB_DEFAULT_TIMEOUT_SECS_SETTING,
+        KEEP_JOB_DIR_SETTING, LICENSE_KEY_SETTING, NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING,
+        REQUEST_SIZE_LIMIT_SETTING, REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING,
         RETENTION_PERIOD_SECS_SETTING,
     },
     jobs::{JobKind, QueuedJob},
+    oauth2::REQUIRE_PREEXISTING_USER_FOR_OAUTH,
     server::load_server_config,
     users::truncate_token,
     worker::{load_worker_config, reload_custom_tags_setting, SERVER_CONFIG, WORKER_CONFIG},
     BASE_URL, DB, METRICS_DEBUG_ENABLED, METRICS_ENABLED,
 };
 use windmill_worker::{
-    create_token_for_owner, handle_job_error, AuthedClient, KEEP_JOB_DIR, NPM_CONFIG_REGISTRY,
-    PIP_EXTRA_INDEX_URL, SCRIPT_TOKEN_EXPIRY,
+    create_token_for_owner, handle_job_error, AuthedClient, SendResult, BUNFIG_INSTALL_SCOPES,
+    JOB_DEFAULT_TIMEOUT, KEEP_JOB_DIR, NPM_CONFIG_REGISTRY, PIP_EXTRA_INDEX_URL,
+    SCRIPT_TOKEN_EXPIRY,
 };
 
 #[cfg(feature = "enterprise")]
 use crate::ee::verify_license_key;
 
 #[cfg(feature = "enterprise")]
-use windmill_api::LICENSE_KEY_VALID;
+use windmill_common::ee::LICENSE_KEY_VALID;
 
 use crate::ee::set_license_key;
 
@@ -75,7 +78,6 @@ lazy_static::lazy_static! {
     ).unwrap();
 
     static ref JOB_RETENTION_SECS: Arc<RwLock<i64>> = Arc::new(RwLock::new(0));
-
 }
 
 pub async fn initial_load(
@@ -90,6 +92,10 @@ pub async fn initial_load(
 
     if let Err(e) = load_metrics_debug_enabled(db).await {
         tracing::error!("Error loading expose debug metrics: {e}");
+    }
+
+    if server_mode {
+        load_require_preexisting_user(db).await;
     }
 
     if worker_mode {
@@ -133,6 +139,9 @@ pub async fn initial_load(
     if worker_mode {
         reload_npm_config_registry_setting(&db).await;
     }
+    if worker_mode {
+        reload_bunfig_install_scopes_setting(&db).await;
+    }
 }
 
 pub async fn load_metrics_enabled(db: &DB) -> error::Result<()> {
@@ -162,15 +171,34 @@ pub async fn load_metrics_debug_enabled(db: &DB) -> error::Result<()> {
     };
     Ok(())
 }
+
 pub async fn load_keep_job_dir(db: &DB) {
-    let metrics_enabled = sqlx::query_scalar!(
+    let value = sqlx::query_scalar!(
         "SELECT value FROM global_settings WHERE name = $1",
         KEEP_JOB_DIR_SETTING
     )
     .fetch_optional(db)
     .await;
-    match metrics_enabled {
+    match value {
         Ok(Some(serde_json::Value::Bool(t))) => KEEP_JOB_DIR.store(t, Ordering::Relaxed),
+        Err(e) => {
+            tracing::error!("Error loading keep job dir metrics: {e}");
+        }
+        _ => (),
+    };
+}
+
+pub async fn load_require_preexisting_user(db: &DB) {
+    let value = sqlx::query_scalar!(
+        "SELECT value FROM global_settings WHERE name = $1",
+        REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING
+    )
+    .fetch_optional(db)
+    .await;
+    match value {
+        Ok(Some(serde_json::Value::Bool(t))) => {
+            REQUIRE_PREEXISTING_USER_FOR_OAUTH.store(t, Ordering::Relaxed)
+        }
         Err(e) => {
             tracing::error!("Error loading keep job dir metrics: {e}");
         }
@@ -227,53 +255,84 @@ pub async fn delete_expired_items(db: &DB) -> () {
 
     let job_retention_secs = *JOB_RETENTION_SECS.read().await;
     if job_retention_secs > 0 {
-        let deleted_jobs = sqlx::query_scalar!(
-                "DELETE FROM completed_job WHERE created_at <= now() - ($1::bigint::text || ' s')::interval  AND started_at + ((duration_ms/1000 + $1::bigint) || ' s')::interval <= now() RETURNING id",
-                job_retention_secs
-            )
-            .fetch_all(db)
-            .await;
+        match db.begin().await {
+            Ok(mut tx) => {
+                let r = sqlx::query!(
+                    "DELETE FROM job_stats WHERE job_id IN (SELECT id FROM completed_job WHERE created_at <= now() - ($1::bigint::text || ' s')::interval AND started_at + ((duration_ms/1000 + $1::bigint) || ' s')::interval <= now())",
+                    job_retention_secs
+                )
+                .fetch_all(&mut *tx)
+                .await;
+                match r {
+                    Ok(_) => {
+                        let deleted_jobs = sqlx::query_scalar!(
+                            "DELETE FROM completed_job WHERE created_at <= now() - ($1::bigint::text || ' s')::interval  AND started_at + ((duration_ms/1000 + $1::bigint) || ' s')::interval <= now() RETURNING id",
+                            job_retention_secs
+                        )
+                        .fetch_all(&mut *tx)
+                        .await;
 
-        match deleted_jobs {
-            Ok(deleted_jobs) => {
-                if deleted_jobs.len() > 0 {
-                    tracing::info!(
-                        "deleted {} jobs completed JOB_RETENTION_SECS {} ago: {:?}",
-                        deleted_jobs.len(),
-                        job_retention_secs,
-                        deleted_jobs,
-                    )
+                        match deleted_jobs {
+                            Ok(deleted_jobs) => {
+                                if deleted_jobs.len() > 0 {
+                                    tracing::info!(
+                                        "deleted {} jobs completed JOB_RETENTION_SECS {} ago: {:?}",
+                                        deleted_jobs.len(),
+                                        job_retention_secs,
+                                        deleted_jobs,
+                                    )
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Error deleting expired jobs: {:?}", e)
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!("Error deleting expired job stats: {:?}", err)
+                    }
+                }
+
+                match tx.commit().await {
+                    Ok(_) => (),
+                    Err(err) => tracing::error!("Error deleting expired jobs: {:?}", err),
                 }
             }
-            Err(e) => tracing::error!("Error deleting jobs: {}", e.to_string()),
+            Err(err) => {
+                tracing::error!("Error deleting expired jobs: {:?}", err)
+            }
         }
     }
 }
 
 pub async fn reload_extra_pip_index_url_setting(db: &DB) {
-    if let Err(e) = reload_option_string_setting(
+    reload_option_setting_with_tracing(
         db,
         EXTRA_PIP_INDEX_URL_SETTING,
         "PIP_EXTRA_INDEX_URL",
         PIP_EXTRA_INDEX_URL.clone(),
     )
-    .await
-    {
-        tracing::error!("Error reloading extra_pip_index_url period: {:?}", e)
-    }
+    .await;
 }
 
 pub async fn reload_npm_config_registry_setting(db: &DB) {
-    if let Err(e) = reload_option_string_setting(
+    reload_option_setting_with_tracing(
         db,
         NPM_CONFIG_REGISTRY_SETTING,
         "NPM_CONFIG_REGISTRY",
         NPM_CONFIG_REGISTRY.clone(),
     )
-    .await
-    {
-        tracing::error!("Error reloading npm_config_registry period: {:?}", e)
-    }
+    .await;
+}
+
+pub async fn reload_bunfig_install_scopes_setting(db: &DB) {
+    reload_option_setting_with_tracing(
+        db,
+        BUNFIG_INSTALL_SCOPES_SETTING,
+        "BUNFIG_INSTALL_SCOPES",
+        BUNFIG_INSTALL_SCOPES.clone(),
+    )
+    .await;
 }
 
 pub async fn reload_retention_period_setting(db: &DB) {
@@ -289,6 +348,16 @@ pub async fn reload_retention_period_setting(db: &DB) {
     {
         tracing::error!("Error reloading retention period: {:?}", e)
     }
+}
+
+pub async fn reload_job_default_timeout_setting(db: &DB) {
+    reload_option_setting_with_tracing(
+        db,
+        JOB_DEFAULT_TIMEOUT_SECS_SETTING,
+        "JOB_DEFAULT_TIMEOUT_SECS",
+        JOB_DEFAULT_TIMEOUT.clone(),
+    )
+    .await;
 }
 
 pub async fn reload_request_size(db: &DB) {
@@ -336,11 +405,21 @@ pub async fn reload_license_key(db: &DB) -> error::Result<()> {
     Ok(())
 }
 
-pub async fn reload_option_string_setting(
+pub async fn reload_option_setting_with_tracing<T: FromStr + DeserializeOwned>(
     db: &DB,
     setting_name: &str,
     std_env_var: &str,
-    lock: Arc<RwLock<Option<String>>>,
+    lock: Arc<RwLock<Option<T>>>,
+) {
+    if let Err(e) = reload_option_setting(db, setting_name, std_env_var, lock.clone()).await {
+        tracing::error!("Error reloading setting {}: {:?}", setting_name, e)
+    }
+}
+pub async fn reload_option_setting<T: FromStr + DeserializeOwned>(
+    db: &DB,
+    setting_name: &str,
+    std_env_var: &str,
+    lock: Arc<RwLock<Option<T>>>,
 ) -> error::Result<()> {
     let q = sqlx::query!(
         "SELECT value FROM global_settings WHERE name = $1",
@@ -349,10 +428,12 @@ pub async fn reload_option_string_setting(
     .fetch_optional(db)
     .await?;
 
-    let mut value = std::env::var(std_env_var).ok();
+    let mut value = std::env::var(std_env_var)
+        .ok()
+        .and_then(|x| x.parse::<T>().ok());
 
     if let Some(q) = q {
-        if let Ok(v) = serde_json::from_value::<String>(q.value.clone()) {
+        if let Ok(v) = serde_json::from_value::<T>(q.value.clone()) {
             tracing::info!(
                 "Loaded setting {setting_name} from db config: {:#?}",
                 &q.value
@@ -525,15 +606,17 @@ pub async fn reload_worker_config(
     tx: tokio::sync::broadcast::Sender<()>,
     kill_if_change: bool,
 ) {
-    let config = load_worker_config(&db).await;
+    let config = load_worker_config(&db, tx.clone()).await;
     if let Err(e) = config {
         tracing::error!("Error reloading worker config: {:?}", e)
     } else {
         let wc = WORKER_CONFIG.read().await;
         let config = config.unwrap();
-        if *wc != config {
+        if *wc != config || config.dedicated_worker.is_some() {
             if kill_if_change {
-                if (*wc).dedicated_worker != config.dedicated_worker {
+                if config.dedicated_worker.is_some()
+                    || (*wc).dedicated_worker != config.dedicated_worker
+                {
                     tracing::info!("Dedicated worker config changed, sending killpill. Expecting to be restarted by supervisor.");
                     let _ = tx.send(());
                 }
@@ -689,12 +772,13 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
 
         // since the job is unrecoverable, the same worker queue should never be sent anything
         let (same_worker_tx_never_used, _same_worker_rx_never_used) = mpsc::channel::<Uuid>(1);
+        let (send_result_never_used, _send_result_rx_never_used) = mpsc::channel::<SendResult>(1);
 
         let token = create_token_for_owner(
             &db,
             &job.workspace_id,
             &job.permissioned_as,
-            "ephemeral-zombie-jobs",
+            "ephemeral-script",
             *SCRIPT_TOKEN_EXPIRY,
             &job.email,
         )
@@ -714,6 +798,7 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             &client,
             &job,
             0,
+            None,
             error::Error::ExecutionErr(format!(
                 "Job timed out after no ping from job since {} (ZOMBIE_JOB_TIMEOUT: {})",
                 last_ping
@@ -726,6 +811,7 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             "",
             rsmq.clone(),
             worker_name,
+            send_result_never_used,
         )
         .await;
     }

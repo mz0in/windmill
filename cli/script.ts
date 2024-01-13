@@ -14,6 +14,7 @@ import {
   writeAllSync,
   yamlParse,
 } from "./deps.ts";
+import { deepEqual } from "./utils.ts";
 
 export interface ScriptFile {
   parent_hash?: string;
@@ -65,7 +66,8 @@ export async function handleScriptMetadata(
 export async function handleFile(
   path: string,
   workspace: string,
-  alreadySynced: string[]
+  alreadySynced: string[],
+  message?: string
 ): Promise<boolean> {
   if (
     !path.includes(".inline_script.") &&
@@ -121,20 +123,26 @@ export async function handleFile(
           typed == undefined ||
           (typed.description === remote.description &&
             typed.summary === remote.summary &&
-            typed.is_template === remote.is_template &&
+            (typed.is_template ?? false) === (remote.is_template ?? false) &&
             typed.kind == remote.kind &&
             !remote.archived &&
-            remote?.lock == typed.lock?.join("\n") &&
-            JSON.stringify(typed.schema) == JSON.stringify(remote.schema))
+            (remote?.lock ?? "").trim() ==
+              (typed.lock?.join("\n") ?? "").trim() &&
+            deepEqual(typed.schema, remote.schema) &&
+            typed.tag == remote.tag &&
+            (typed.ws_error_handler_muted ?? false) ==
+              remote.ws_error_handler_muted &&
+            typed.dedicated_worker == remote.dedicated_worker &&
+            typed.cache_ttl == remote.cache_ttl &&
+            typed.concurrency_time_window_s ==
+              remote.concurrency_time_window_s &&
+            typed.concurrent_limit == remote.concurrent_limit)
         ) {
-          log.info(
-            colors.yellow(
-              `No change to push for script ${remotePath}, skipping`
-            )
-          );
+          log.info(colors.green(`Script ${remotePath} is up to date`));
           return true;
         }
       }
+
       log.info(
         colors.yellow.bold(`Creating script with a parent ${remotePath}`)
       );
@@ -151,6 +159,13 @@ export async function handleFile(
           lock: typed?.lock,
           parent_hash: remote.hash,
           schema: typed?.schema,
+          tag: typed?.tag,
+          ws_error_handler_muted: typed?.ws_error_handler_muted,
+          dedicated_worker: typed?.dedicated_worker,
+          cache_ttl: typed?.cache_ttl,
+          concurrency_time_window_s: typed?.concurrency_time_window_s,
+          concurrent_limit: typed?.concurrent_limit,
+          deployment_message: message,
         },
       });
     } else {
@@ -171,6 +186,13 @@ export async function handleFile(
           lock: typed?.lock,
           parent_hash: undefined,
           schema: typed?.schema,
+          tag: typed?.tag,
+          ws_error_handler_muted: typed?.ws_error_handler_muted,
+          dedicated_worker: typed?.dedicated_worker,
+          cache_ttl: typed?.cache_ttl,
+          concurrency_time_window_s: typed?.concurrency_time_window_s,
+          concurrent_limit: typed?.concurrent_limit,
+          deployment_message: message,
         },
       });
     }
@@ -248,6 +270,7 @@ export function inferContentTypeFromFilePath(
   | "mysql"
   | "bigquery"
   | "snowflake"
+  | "mssql"
   | "graphql" {
   if (contentPath.endsWith(".py")) {
     return "python3";
@@ -265,6 +288,8 @@ export function inferContentTypeFromFilePath(
     return "bigquery";
   } else if (contentPath.endsWith(".sf.sql")) {
     return "snowflake";
+  } else if (contentPath.endsWith(".ms.sql")) {
+    return "mssql";
   } else if (contentPath.endsWith(".pg.sql")) {
     return "postgresql";
   } else if (contentPath.endsWith(".gql")) {

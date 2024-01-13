@@ -1,23 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation'
-	import Dropdown from '$lib/components/Dropdown.svelte'
+	import Dropdown from '$lib/components/DropdownV2.svelte'
 	import type MoveDrawer from '$lib/components/MoveDrawer.svelte'
 	import ScheduleEditor from '$lib/components/ScheduleEditor.svelte'
 	import SharedBadge from '$lib/components/SharedBadge.svelte'
 	import type ShareModal from '$lib/components/ShareModal.svelte'
 	import { FlowService, type Flow, DraftService } from '$lib/gen'
 	import { userStore, workspaceStore } from '$lib/stores'
-	import {
-		faArchive,
-		faCalendarAlt,
-		faCodeFork,
-		faCopy,
-		faEdit,
-		faFileExport,
-		faList,
-		faShare,
-		faTrashAlt
-	} from '@fortawesome/free-solid-svg-icons'
 	import { createEventDispatcher } from 'svelte'
 	import Badge from '../badge/Badge.svelte'
 	import Button from '../button/Button.svelte'
@@ -26,6 +15,19 @@
 	import { sendUserToast } from '$lib/toast'
 	import { DELETE, copyToClipboard, isOwner } from '$lib/utils'
 	import type DeployWorkspaceDrawer from '$lib/components/DeployWorkspaceDrawer.svelte'
+	import {
+		Pen,
+		GitFork,
+		Trash,
+		List,
+		FileUp,
+		Globe,
+		Calendar,
+		Share,
+		Archive,
+		Clipboard,
+		Eye
+	} from 'lucide-svelte'
 
 	export let flow: Flow & { has_draft?: boolean; draft_only?: boolean; canWrite: boolean }
 	export let marked: string | undefined
@@ -35,8 +37,8 @@
 	export let deleteConfirmedCallback: (() => void) | undefined
 	export let deploymentDrawer: DeployWorkspaceDrawer
 	export let errorHandlerMuted: boolean
-
-	let { summary, path, extra_perms, canWrite, workspace_id, archived, draft_only, has_draft } = flow
+	export let depth: number = 0
+	export let menuOpen: boolean = false
 
 	const dispatch = createEventDispatcher()
 
@@ -66,38 +68,44 @@
 	let scheduleEditor: ScheduleEditor
 </script>
 
-<ScheduleEditor on:update={() => goto('/schedules')} bind:this={scheduleEditor} />
+{#if menuOpen}
+	<ScheduleEditor on:update={() => goto('/schedules')} bind:this={scheduleEditor} />
+{/if}
+
 <Row
-	href="/flows/get/{path}?workspace={$workspaceStore}"
+	href={flow.draft_only
+		? `/flows/edit/${flow.path}?nodraft=true`
+		: `/flows/get/${flow.path}?workspace=${$workspaceStore}`}
 	kind="flow"
-	workspaceId={workspace_id ?? $workspaceStore ?? ''}
+	workspaceId={flow.workspace_id ?? $workspaceStore ?? ''}
 	{marked}
-	{path}
-	{summary}
+	path={flow.path}
+	summary={flow.summary}
 	{starred}
 	{errorHandlerMuted}
 	on:change
-	canFavorite={!draft_only}
+	canFavorite={!flow.draft_only}
+	{depth}
 >
 	<svelte:fragment slot="badges">
-		{#if archived}
+		{#if flow.archived}
 			<Badge color="red" baseClass="border">archived</Badge>
 		{/if}
-		<SharedBadge {canWrite} extraPerms={extra_perms} />
-		<DraftBadge {has_draft} {draft_only} />
+		<SharedBadge canWrite={flow.canWrite} extraPerms={flow.extra_perms} />
+		<DraftBadge has_draft={flow.has_draft} draft_only={flow.draft_only} />
 		<div class="w-8 center-center" />
 	</svelte:fragment>
 	<svelte:fragment slot="actions">
 		<span class="hidden md:inline-flex gap-x-1">
 			{#if !$userStore?.operator}
-				{#if canWrite && !archived}
+				{#if flow.canWrite && !flow.archived}
 					<div>
 						<Button
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faEdit }}
-							href="/flows/edit/{path}?nodraft=true"
+							startIcon={{ icon: Pen }}
+							href="/flows/edit/{flow.path}?nodraft=true"
 						>
 							Edit
 						</Button>
@@ -108,8 +116,8 @@
 							color="light"
 							size="xs"
 							variant="border"
-							startIcon={{ icon: faCodeFork }}
-							href="/flows/add?template={path}"
+							startIcon={{ icon: GitFork }}
+							href="/flows/add?template={flow.path}"
 						>
 							Fork
 						</Button>
@@ -119,15 +127,16 @@
 		</span>
 
 		<Dropdown
-			placement="bottom-end"
-			dropdownItems={() => {
+			items={() => {
+				let { draft_only, path, archived, has_draft } = flow
 				let owner = isOwner(path, $userStore, $workspaceStore)
 				if (draft_only) {
 					return [
 						{
 							displayName: 'Delete',
-							icon: faTrashAlt,
+							icon: Trash,
 							action: (event) => {
+								// @ts-ignore
 								if (event?.shiftKey) {
 									deleteFlow(path)
 								} else {
@@ -144,32 +153,37 @@
 				return [
 					{
 						displayName: 'Duplicate/Fork',
-						icon: faCodeFork,
+						icon: GitFork,
 						href: `/flows/add?template=${path}`
 					},
 					{
 						displayName: 'View runs',
-						icon: faList,
+						icon: List,
 						href: `/runs/${path}`
 					},
 					{
+						displayName: 'Audit logs',
+						icon: Eye,
+						href: `/audit_logs?resource=${path}`
+					},
+					{
 						displayName: 'Move/Rename',
-						icon: faFileExport,
+						icon: FileUp,
 						action: () => {
-							moveDrawer.openDrawer(path, summary, 'flow')
+							moveDrawer.openDrawer(path, flow.summary, 'flow')
 						},
 						disabled: !owner || archived
 					},
 					{
 						displayName: 'Copy path',
-						icon: faCopy,
+						icon: Clipboard,
 						action: () => {
 							copyToClipboard(path)
 						}
 					},
 					{
 						displayName: 'Deploy to staging/prod',
-						icon: faFileExport,
+						icon: Globe,
 						action: () => {
 							deploymentDrawer.openDrawer(path, 'flow')
 						},
@@ -177,22 +191,22 @@
 					},
 					{
 						displayName: 'Schedule',
-						icon: faCalendarAlt,
+						icon: Calendar,
 						action: () => {
-							scheduleEditor.openNew(true, path)
+							scheduleEditor?.openNew(true, path)
 						},
 						disabled: archived
 					},
 					{
 						displayName: owner ? 'Share' : 'See Permissions',
-						icon: faShare,
+						icon: Share,
 						action: () => {
 							shareModal.openDrawer && shareModal.openDrawer(path, 'flow')
 						}
 					},
 					{
 						displayName: archived ? 'Unarchive' : 'Archive',
-						icon: faArchive,
+						icon: Archive,
 						action: () => {
 							path && archiveFlow(path, !archived)
 						},
@@ -203,7 +217,7 @@
 						? [
 								{
 									displayName: 'Delete Draft',
-									icon: faTrashAlt,
+									icon: Trash,
 									action: async () => {
 										await DraftService.deleteDraft({
 											workspace: $workspaceStore ?? '',
@@ -219,8 +233,9 @@
 						: []),
 					{
 						displayName: 'Delete',
-						icon: faTrashAlt,
+						icon: Trash,
 						action: (event) => {
+							// @ts-ignore
 							if (event?.shiftKey) {
 								deleteFlow(path)
 							} else {
@@ -233,6 +248,9 @@
 						disabled: !owner
 					}
 				]
+			}}
+			on:open={() => {
+				menuOpen = true
 			}}
 		/>
 	</svelte:fragment>

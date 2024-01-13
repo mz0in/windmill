@@ -12,7 +12,7 @@
 	const appEditorContext = getContext<AppEditorContext>('AppEditorContext')
 
 	let loading: boolean = false
-	let timeout: NodeJS.Timer | undefined = undefined
+	let timeout: NodeJS.Timeout | undefined = undefined
 	let interval: number | undefined = undefined
 	let shouldRefresh = false
 	let firstLoad = false
@@ -26,6 +26,12 @@
 	onMount(() => {
 		if (appEditorContext) {
 			appEditorContext.refreshComponents.set(refresh)
+		}
+		document.addEventListener('visibilitychange', visChange)
+		// setTimeout(() => refresh(), 1000)
+		return () => {
+			document.removeEventListener('visibilitychange', visChange)
+			if (timeout) clearInterval(timeout)
 		}
 	})
 
@@ -57,6 +63,7 @@
 		}
 		loading = true
 
+		console.log('refresh all')
 		const promises = Object.keys($runnableComponents)
 			.flatMap((id) => {
 				if (
@@ -66,6 +73,7 @@
 					return
 				}
 
+				console.log('refresh start', id)
 				return $runnableComponents?.[id]?.cb?.map((f) =>
 					f().then(() => console.log('refreshed', id))
 				)
@@ -88,15 +96,6 @@
 		}
 	}
 
-	onMount(() => {
-		document.addEventListener('visibilitychange', visChange)
-		// setTimeout(() => refresh(), 1000)
-		return () => {
-			document.removeEventListener('visibilitychange', visChange)
-			if (timeout) clearInterval(timeout)
-		}
-	})
-
 	let items = [
 		{
 			displayName: 'Once',
@@ -109,7 +108,8 @@
 	]
 </script>
 
-<!-- {$initialized.initializedComponents?.join(', ')} -->
+<!-- {$initialized.initializedComponents?.join(', ')}
+{allItems($app.grid, $app.subgrids).length + $app.hiddenInlineScripts.length} -->
 <!-- {allItems($app.grid, $app.subgrids).length + $app.hiddenInlineScripts.length}
 {$initialized.initializedComponents}
 {allItems($app.grid, $app.subgrids)
@@ -126,12 +126,12 @@
 		color={timeout ? 'blue' : 'light'}
 		variant={timeout ? 'contained' : 'border'}
 		size="xs"
-		btnClasses="!rounded-r-none {timeout ? '!border !border-blue-500' : ''}"
+		btnClasses="!rounded-r-none text-tertiary !text-2xs {timeout ? '!border !border-blue-500' : ''}"
 		title="Refresh {componentNumber} component{componentNumber > 1 ? 's' : ''} {interval
 			? `every ${interval / 1000} seconds`
 			: 'once'}"
 	>
-		<RefreshCw class={loading ? 'animate-spin' : ''} size={16} /> &nbsp;({componentNumber})
+		<RefreshCw class={loading ? 'animate-spin' : ''} size={14} /> &nbsp;{componentNumber}
 	</Button>
 
 	<ButtonDropdown hasPadding={true}>

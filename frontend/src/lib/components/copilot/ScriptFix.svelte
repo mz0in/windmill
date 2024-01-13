@@ -5,8 +5,7 @@
 	import type { SupportedLanguage } from '$lib/common'
 	import { sendUserToast } from '$lib/toast'
 	import type Editor from '../Editor.svelte'
-	import { faCheck, faClose, faMagicWandSparkles } from '@fortawesome/free-solid-svg-icons'
-	import { dbSchemas, copilotInfo, type DBSchema } from '$lib/stores'
+	import { dbSchemas, copilotInfo, type DBSchema, workspaceStore } from '$lib/stores'
 	import type DiffEditor from '../DiffEditor.svelte'
 	import { scriptLangToEditorLang } from '$lib/scripts'
 	import Popover from '../Popover.svelte'
@@ -17,6 +16,7 @@
 	import HighlightCode from '../HighlightCode.svelte'
 	import LoadingIcon from '../apps/svelte-select/lib/LoadingIcon.svelte'
 	import { autoPlacement } from '@floating-ui/core'
+	import { Check, Wand2, X } from 'lucide-svelte'
 
 	// props
 	export let lang: SupportedLanguage
@@ -45,7 +45,8 @@
 					code: editor?.getCode() || '',
 					error,
 					dbSchema: dbSchema,
-					type: 'fix'
+					type: 'fix',
+					workspace: $workspaceStore!
 				},
 				generatedCode,
 				abortController,
@@ -124,7 +125,7 @@
 					spacingSize="xs2"
 					on:click={rejectDiff}
 					variant="contained"
-					startIcon={{ icon: faClose }}
+					startIcon={{ icon: X }}
 				>
 					Discard
 				</Button><Button
@@ -133,16 +134,15 @@
 					color="green"
 					spacingSize="xs2"
 					on:click={acceptDiff}
-					startIcon={{ icon: faCheck }}
+					startIcon={{ icon: Check }}
 				>
 					Accept
 				</Button>
 				{#if $generatedExplanation.length > 0}
 					<Popover>
 						<svelte:fragment slot="text">{$generatedExplanation}</svelte:fragment>
-						<Button size="xs" color="light" variant="contained" spacingSize="xs2">Explain</Button
-						></Popover
-					>
+						<Button size="xs" color="light" variant="contained" spacingSize="xs2">Explain</Button>
+					</Popover>
 				{/if}
 			</div>
 		{:else}
@@ -150,14 +150,7 @@
 				floatingConfig={{
 					middleware: [
 						autoPlacement({
-							allowedPlacements: [
-								'bottom-start',
-								'bottom-end',
-								'top-start',
-								'top-end',
-								'top',
-								'bottom'
-							]
+							allowedPlacements: ['bottom-end', 'top-end']
 						})
 					]
 				}}
@@ -169,7 +162,7 @@
 						size="xs"
 						color={genLoading ? 'red' : 'blue'}
 						spacingSize="xs2"
-						startIcon={genLoading ? undefined : { icon: faMagicWandSparkles }}
+						startIcon={genLoading ? undefined : { icon: Wand2 }}
 						nonCaptureEvent={!genLoading}
 						on:click={genLoading ? () => abortController?.abort() : undefined}
 						>{#if genLoading}

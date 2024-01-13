@@ -17,14 +17,17 @@ use sqlx::{Pool, Postgres};
 
 pub mod apps;
 pub mod db;
+pub mod ee;
 pub mod error;
 pub mod external_ip;
 pub mod flow_status;
 pub mod flows;
 pub mod global_settings;
+pub mod job_metrics;
 pub mod jobs;
 pub mod more_serde;
 pub mod oauth2;
+pub mod s3_helpers;
 pub mod schedule;
 pub mod scripts;
 pub mod server;
@@ -33,6 +36,7 @@ pub mod users;
 pub mod utils;
 pub mod variables;
 pub mod worker;
+pub mod workspaces;
 
 #[cfg(feature = "tracing_init")]
 pub mod tracing_init;
@@ -227,9 +231,11 @@ pub async fn get_latest_deployed_hash_for_path(
     ScriptLang,
     Option<bool>,
     Option<i16>,
+    Option<bool>,
+    Option<i32>,
 )> {
     let r_o = sqlx::query!(
-        "select hash, tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority from script where path = $1 AND workspace_id = $2 AND
+        "select hash, tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority, delete_after_use, timeout from script where path = $1 AND workspace_id = $2 AND
     created_at = (SELECT max(created_at) FROM script WHERE path = $1 AND workspace_id = $2 AND
     deleted = false AND lock IS not NULL AND lock_error_logs IS NULL)",
         script_path,
@@ -249,6 +255,8 @@ pub async fn get_latest_deployed_hash_for_path(
         script.language,
         script.dedicated_worker,
         script.priority,
+        script.delete_after_use,
+        script.timeout,
     ))
 }
 
@@ -265,9 +273,10 @@ pub async fn get_latest_hash_for_path<'c>(
     ScriptLang,
     Option<bool>,
     Option<i16>,
+    Option<i32>,
 )> {
     let r_o = sqlx::query!(
-        "select hash, tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority from script where path = $1 AND workspace_id = $2 AND
+        "select hash, tag, concurrent_limit, concurrency_time_window_s, cache_ttl, language as \"language: ScriptLang\", dedicated_worker, priority, timeout FROM script where path = $1 AND workspace_id = $2 AND
     created_at = (SELECT max(created_at) FROM script WHERE path = $1 AND workspace_id = $2 AND
     deleted = false AND archived = false)",
         script_path,
@@ -287,5 +296,6 @@ pub async fn get_latest_hash_for_path<'c>(
         script.language,
         script.dedicated_worker,
         script.priority,
+        script.timeout,
     ))
 }

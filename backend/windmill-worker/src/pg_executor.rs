@@ -1,3 +1,8 @@
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Context;
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -8,6 +13,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::Map;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 use tokio_postgres::types::IsNull;
 use tokio_postgres::{
     types::{to_sql_checked, ToSql},
@@ -19,13 +25,14 @@ use tokio_postgres::{
 };
 use uuid::Uuid;
 use windmill_common::error::{self, Error};
-use windmill_common::worker::to_raw_value;
+use windmill_common::worker::{to_raw_value, CLOUD_HOSTED};
 use windmill_common::{error::to_anyhow, jobs::QueuedJob};
 use windmill_parser_sql::parse_pgsql_sig;
 
 use crate::common::build_args_values;
 use crate::AuthedClientBackgroundTask;
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
+use lazy_static::lazy_static;
 use urlencoding::encode;
 
 #[derive(Deserialize)]
@@ -37,6 +44,13 @@ struct PgDatabase {
     sslmode: Option<String>,
     dbname: String,
     root_certificate_pem: Option<String>,
+}
+
+lazy_static! {
+    pub static ref CONNECTION_CACHE: Arc<Mutex<Option<(String, tokio_postgres::Client)>>> =
+        Arc::new(Mutex::new(None));
+    pub static ref LAST_QUERY: AtomicU64 = AtomicU64::new(0);
+    pub static ref RUNNING: AtomicBool = AtomicBool::new(false);
 }
 
 pub async fn do_postgresql(
@@ -53,7 +67,12 @@ pub async fn do_postgresql(
     } else {
         return Err(Error::BadRequest("Missing database argument".to_string()));
     };
-    let sslmode = database.sslmode.unwrap_or("prefer".to_string());
+    let sslmode = match database.sslmode.as_deref() {
+        Some("allow") => "prefer".to_string(),
+        Some("verify-ca") | Some("verify-full") => "require".to_string(),
+        Some(s) => s.to_string(),
+        None => "prefer".to_string(),
+    };
     let database_string = format!(
         "postgres://{user}:{password}@{host}:{port}/{dbname}?sslmode={sslmode}",
         user = encode(&database.user.unwrap_or("postgres".to_string())),
@@ -63,7 +82,28 @@ pub async fn do_postgresql(
         dbname = database.dbname,
         sslmode = sslmode
     );
-    let (client, handle) = if sslmode == "require" {
+    let database_string_clone = database_string.clone();
+
+    RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
+    LAST_QUERY.store(
+        chrono::Utc::now().timestamp().try_into().unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let mtex;
+    if !*CLOUD_HOSTED {
+        mtex = Some(CONNECTION_CACHE.lock().await);
+    } else {
+        mtex = None;
+    }
+
+    let has_cached_con = mtex
+        .as_ref()
+        .is_some_and(|x| x.as_ref().is_some_and(|y| y.0 == database_string));
+    let new_client = if has_cached_con {
+        tracing::info!("Using cached connection");
+        None
+    } else if sslmode == "require" {
+        tracing::info!("Creating new connection");
         let mut connector = TlsConnector::builder();
         if let Some(root_certificate_pem) = database.root_certificate_pem {
             if !root_certificate_pem.is_empty() {
@@ -90,20 +130,25 @@ pub async fn do_postgresql(
 
         let handle = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                let mut mtex = CONNECTION_CACHE.lock().await;
+                *mtex = None;
+                tracing::error!("connection error: {}", e);
             }
         });
-        (client, handle)
+        Some((client, handle))
     } else {
+        tracing::info!("Creating new connection");
         let (client, connection) = tokio_postgres::connect(&database_string, NoTls)
             .await
             .map_err(to_anyhow)?;
         let handle = tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                let mut mtex = CONNECTION_CACHE.lock().await;
+                *mtex = None;
+                tracing::error!("connection error: {}", e);
             }
         });
-        (client, handle)
+        Some((client, handle))
     };
 
     let mut statement_values: Vec<serde_json::Value> = vec![];
@@ -133,6 +178,13 @@ pub async fn do_postgresql(
             convert_val(value, arg_t)
         })
         .collect::<windmill_common::error::Result<Vec<_>>>()?;
+
+    let (client, handle) = if let Some((client, handle)) = new_client.as_ref() {
+        (client, Some(handle))
+    } else {
+        let (_, client) = mtex.as_ref().unwrap().as_ref().unwrap();
+        (client, None)
+    };
     // Now we can execute a simple statement that just returns its parameter.
     let rows = client
         .query_raw(query, query_params)
@@ -146,8 +198,55 @@ pub async fn do_postgresql(
         .into_iter()
         .map(postgres_row_to_json_value)
         .collect::<Result<Vec<_>, _>>()?);
+    RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    handle.abort();
+    if let Some(handle) = handle {
+        if let Some(mut mtex) = mtex {
+            let abort_handler = handle.abort_handle();
+
+            if let Some(new_client) = new_client {
+                *mtex = Some((database_string, new_client.0));
+            }
+            drop(mtex);
+            LAST_QUERY.store(
+                chrono::Utc::now().timestamp().try_into().unwrap_or(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let last_query = LAST_QUERY.load(std::sync::atomic::Ordering::Relaxed);
+                    let now = chrono::Utc::now().timestamp().try_into().unwrap_or(0);
+
+                    //we cache connection for 5 minutes at most
+                    if last_query + 60 * 5 < now
+                        && !RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tracing::info!("Closing cache connection due to inactivity");
+                        break;
+                    }
+                    let mtex = CONNECTION_CACHE.lock().await;
+                    if mtex.is_none() {
+                        // connection is not in the mutex anymore
+                        break;
+                    } else if let Some(mtex) = mtex.as_ref() {
+                        if mtex.0.as_str() != &database_string_clone {
+                            // connection is not the latest one
+                            break;
+                        }
+                    }
+
+                    tracing::debug!("Keeping cached connection alive due to activity")
+                }
+                let mut mtex = CONNECTION_CACHE.lock().await;
+                *mtex = None;
+                abort_handler.abort();
+            });
+        } else {
+            handle.abort();
+        }
+    }
     // And then check that we got back the same string we sent over.
     return Ok(to_raw_value(&result));
 }
@@ -223,7 +322,13 @@ fn convert_val(value: &Value, arg_t: &String) -> windmill_common::error::Result<
         Value::Number(n) if n.is_i64() && (arg_t == "smallint" || arg_t == "smallserial") => {
             Ok(PgType::I16(n.as_i64().unwrap() as i16))
         }
-        Value::Number(n) if n.is_i64() && (arg_t == "int" || arg_t == "serial") => {
+        Value::Number(n)
+            if n.is_i64()
+                && (arg_t == "int"
+                    || arg_t == "integer"
+                    || arg_t == "int4"
+                    || arg_t == "serial") =>
+        {
             Ok(PgType::I32(n.as_i64().unwrap() as i32))
         }
         Value::Number(n) if n.is_i64() && (arg_t == "numeric" || arg_t == "decimal") => Ok(
@@ -311,6 +416,12 @@ pub fn pg_cell_to_json_value(
         Type::UUID => get_basic(row, column, column_i, |a: uuid::Uuid| {
             Ok(JSONValue::String(a.to_string()))
         })?,
+        Type::INET => get_basic(row, column, column_i, |a: IpAddr| {
+            Ok(JSONValue::String(a.to_string()))
+        })?,
+        Type::INTERVAL => get_basic(row, column, column_i, |a: IntervalStr| {
+            Ok(JSONValue::String(a.0))
+        })?,
         Type::JSON | Type::JSONB => get_basic(row, column, column_i, |a: JSONValue| Ok(a))?,
         Type::FLOAT4 => get_basic(row, column, column_i, |a: f32| {
             Ok(f64_to_json_number(a.into())?)
@@ -324,7 +435,6 @@ pub fn pg_cell_to_json_value(
         Type::TS_VECTOR => get_basic(row, column, column_i, |a: StringCollector| {
             Ok(JSONValue::String(a.0))
         })?,
-
         // array types
         Type::BOOL_ARRAY => get_array(row, column, column_i, |a: bool| Ok(JSONValue::Bool(a)))?,
         Type::INT2_ARRAY => get_array(row, column, column_i, |a: i16| {
@@ -390,6 +500,28 @@ fn get_basic<'a, T: FromSql<'a>>(
     })?;
     raw_val.map_or(Ok(JSONValue::Null), val_to_json_val)
 }
+
+struct IntervalStr(String);
+
+impl<'a> FromSql<'a> for IntervalStr {
+    fn from_sql(
+        _: &Type,
+        mut raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let microseconds = raw.get_i64();
+        let days = raw.get_i32();
+        let months = raw.get_i32();
+        Ok(IntervalStr(format!(
+            "{:?} months {:?} days {:?} ms",
+            months, days, microseconds
+        )))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(ty, &Type::INTERVAL)
+    }
+}
+
 fn get_array<'a, T: FromSql<'a>>(
     row: &'a Row,
     column: &Column,

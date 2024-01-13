@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          repository: mz0in/windmill
 
       - name: Set up Depot CLI
         run: |

@@ -3,6 +3,7 @@
 	import CenteredPage from '$lib/components/CenteredPage.svelte'
 	import { Button, Popup, Skeleton } from '$lib/components/common'
 	import Badge from '$lib/components/common/badge/Badge.svelte'
+	import DefaultTags from '$lib/components/DefaultTags.svelte'
 	import PageHeader from '$lib/components/PageHeader.svelte'
 	import Cell from '$lib/components/table/Cell.svelte'
 	import DataTable from '$lib/components/table/DataTable.svelte'
@@ -19,17 +20,17 @@
 	import { onDestroy, onMount } from 'svelte'
 
 	let workers: WorkerPing[] | undefined = undefined
-	let filteredWorkers: WorkerPing[] = []
 	let workerGroups: Record<string, any> | undefined = undefined
 	let groupedWorkers: [string, [string, WorkerPing[]][]][] = []
 	let intervalId: NodeJS.Timeout | undefined
 
 	const splitter = '_%%%_'
 	let globalCache = false
-	$: filteredWorkers = (workers ?? []).filter((x) => (x.last_ping ?? 0) < 300)
+	let customTags: string[] | undefined = undefined
+
 	$: groupedWorkers = groupBy(
 		groupBy(
-			filteredWorkers,
+			workers ?? [],
 			(wp: WorkerPing) => wp.worker_instance + splitter + wp.worker_group,
 			(wp: WorkerPing) => wp.worker
 		),
@@ -41,7 +42,7 @@
 
 	async function loadWorkers(): Promise<void> {
 		try {
-			workers = await WorkerService.listWorkers({ perPage: 1000 })
+			workers = await WorkerService.listWorkers({ perPage: 1000, pingSince: 300 })
 			timeSinceLastPing = 0
 		} catch (err) {
 			sendUserToast(`Could not load workers: ${err}`, true)
@@ -59,9 +60,15 @@
 	}
 
 	let secondInterval: NodeJS.Timeout | undefined = undefined
+	async function loadCustomTags() {
+		try {
+			customTags = (await WorkerService.getCustomTags()) ?? []
+		} catch (err) {
+			sendUserToast(`Could not load global cache: ${err}`, true)
+		}
+	}
+
 	onMount(() => {
-		loadWorkers()
-		loadWorkerGroups()
 		intervalId = setInterval(() => {
 			loadWorkers()
 			loadWorkerGroups()
@@ -71,6 +78,9 @@
 		}, 1000)
 	})
 
+	loadWorkers()
+	loadWorkerGroups()
+	loadCustomTags()
 	$: if ($superadmin) {
 		loadGlobalCache()
 	}
@@ -93,8 +103,6 @@
 	})
 
 	let newConfigName = ''
-
-	let customTags: string[] | undefined = undefined
 
 	async function addConfig() {
 		await ConfigService.updateConfig({ name: 'worker__' + newConfigName, requestBody: {} })
@@ -126,19 +134,25 @@
 							}
 						}}
 						options={{ right: 'global cache to s3' }}
+						size="sm"
 						disabled={!$enterpriseLicense || $enterpriseLicense.endsWith('_pro')}
 					/>
 					<Tooltip
 						><p
 							>global cache to s3 is an enterprise feature that enable workers to do fast cold start
-							and share a single cache backed by s3 to ensure that even with a high number of
-							workers, dependencies for python/deno/bun/go are only downloaded for the first time
-							only once by the whole fleet.
+							and share a single cache backed by s3 for pip dependencies.
 						</p>require S3_CACHE_BUCKET to be set and has NO effect otherwise (even if this setting
 						is on)</Tooltip
 					>
 				</div>
-				<div><AssignableTags bind:customTags /> </div>
+				<div
+					><AssignableTags
+						on:refresh={() => {
+							loadCustomTags()
+						}}
+					/>
+				</div>
+				<div><DefaultTags /> </div>
 			</div>
 		{/if}
 	</PageHeader>

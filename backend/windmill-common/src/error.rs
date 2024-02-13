@@ -96,9 +96,9 @@ impl IntoResponse for Error {
         };
 
         if matches!(status, axum::http::StatusCode::NOT_FOUND) {
-            tracing::warn!(not_found = e.to_string());
+            tracing::warn!(message = e.to_string());
         } else {
-            tracing::error!(error = e.to_string());
+            tracing::error!(message = e.to_string());
         };
 
         axum::response::Response::builder()
@@ -136,7 +136,7 @@ impl IntoResponse for AppError {
 }
 
 // This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
-// `Result<_, AppError>`. That way you don't need to do that manually.
+// `Result<_, AppError>`. That way you don't need to do that manually
 impl<E> From<E> for AppError
 where
     E: Into<anyhow::Error>,

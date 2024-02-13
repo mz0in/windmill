@@ -11,10 +11,11 @@
 		OpenAPI,
 		Preview,
 		type OpenFlow,
-		type FlowModule
+		type FlowModule,
+		SettingsService
 	} from '$lib/gen'
 	import { inferArgs } from '$lib/infer'
-	import { userStore, workspaceStore } from '$lib/stores'
+	import { enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
 	import { emptySchema, getModifierKey, sendUserToast } from '$lib/utils'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
 	import { onDestroy, onMount, setContext } from 'svelte'
@@ -32,6 +33,7 @@
 	import { dfs } from './flows/dfs'
 	import { loadSchemaFromModule } from './flows/flowInfers'
 	import { Play } from 'lucide-svelte'
+	import Toggle from './Toggle.svelte'
 
 	$: token = $page.url.searchParams.get('wm_token') ?? undefined
 	$: workspace = $page.url.searchParams.get('workspace') ?? undefined
@@ -86,6 +88,7 @@
 		content: string
 		path: string
 		language: Preview.language
+		lock?: string
 	}
 
 	let currentScript: LastEditScript | undefined = undefined
@@ -98,6 +101,8 @@
 	if (searchParams?.has('local')) {
 		connectWs()
 	}
+
+	let useLock = false
 
 	let lockChanges = false
 	let timeout: NodeJS.Timeout | undefined = undefined
@@ -122,7 +127,13 @@
 		}
 	}
 
+	async function setEnterpriseLicense() {
+		if (!$enterpriseLicense) {
+			$enterpriseLicense = await SettingsService.getLicenseId()
+		}
+	}
 	onMount(() => {
+		setEnterpriseLicense()
 		window.addEventListener('message', el, false)
 		document.addEventListener('keydown', (e) => {
 			const obj = {
@@ -190,7 +201,8 @@
 				currentScript.content,
 				currentScript.language,
 				args,
-				undefined
+				undefined,
+				useLock ? currentScript.lock : undefined
 			)
 		} else {
 			flowPreviewButtons?.openPreview()
@@ -366,6 +378,7 @@
 				{currentScript?.path ?? 'Not editing a script'}
 				{currentScript?.language ?? ''}
 			</div>
+
 			<div class="absolute top-2 right-2 !text-tertiary text-xs">
 				{#if $userStore != undefined}
 					As {$userStore?.username} in {$workspaceStore}
@@ -373,9 +386,17 @@
 					<span class="text-red-600">Unable to login</span>
 				{/if}
 			</div>
+
 			{#if !validCode}
 				<div class="text-center w-full text-lg truncate py-1 text-red-500">Invalid code</div>
 			{/if}
+			<div class="flex flex-row-reverse py-1">
+				<Toggle
+					size="xs"
+					bind:checked={useLock}
+					options={{ left: 'Infer lockfile', right: 'Use current lockfile' }}
+				/>
+			</div>
 			<div class="flex justify-center pt-1">
 				{#if testIsLoading}
 					<Button on:click={testJobLoader?.cancelJob} btnClasses="w-full" color="red" size="xs">

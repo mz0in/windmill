@@ -56,6 +56,9 @@
 	let script_path = ''
 	let initialScriptPath = ''
 
+	let runnable: Script | Flow | undefined
+	let args: Record<string, any> = {}
+
 	export function openEdit(ePath: string, isFlow: boolean) {
 		is_flow = isFlow
 		initialPath = ePath
@@ -70,6 +73,8 @@
 	}
 
 	export async function openNew(is_flow: boolean, initial_script_path?: string) {
+		args = {}
+		runnable = undefined
 		let defaultErrorHandlerMaybe = undefined
 		let defaultRecoveryHandlerMaybe = undefined
 		if ($workspaceStore) {
@@ -89,8 +94,9 @@
 		path = initialScriptPath
 		initialPath = initialScriptPath
 		script_path = initialScriptPath
+		await loadScript(script_path)
+
 		if (defaultErrorHandlerMaybe !== undefined && defaultErrorHandlerMaybe !== null) {
-			console.log(defaultErrorHandlerMaybe)
 			wsErrorHandlerMuted = defaultErrorHandlerMaybe['wsErrorHandlerMuted']
 			let splitted = (defaultErrorHandlerMaybe['errorHandlerPath'] as string).split('/')
 			errorHandleritemKind = splitted[0] as 'flow' | 'script'
@@ -135,9 +141,6 @@
 
 	$: (is_flow = itemKind == 'flow') && resetRetries()
 
-	let runnable: Script | Flow | undefined
-	let args: Record<string, any> = {}
-
 	let isValid = true
 
 	let path: string = ''
@@ -150,8 +153,6 @@
 	let validCRON = true
 	$: allowSchedule = isValid && validCRON && script_path != ''
 
-	$: script_path != '' && loadScript(script_path)
-
 	// set isValid to true when a script/flow without any properties is selected
 	$: runnable?.schema &&
 		runnable.schema.properties &&
@@ -162,6 +163,7 @@
 
 	async function loadScript(p: string | undefined): Promise<void> {
 		if (p) {
+			runnable = undefined
 			if (is_flow) {
 				runnable = await FlowService.getFlowByPath({ workspace: $workspaceStore!, path: p })
 			} else {
@@ -240,6 +242,8 @@
 			timezone = s.timezone
 			summary = s.summary ?? ''
 			script_path = s.script_path ?? ''
+			await loadScript(script_path)
+
 			is_flow = s.is_flow
 			no_flow_overlap = s.no_flow_overlap ?? false
 			wsErrorHandlerMuted = s.ws_error_handler_muted ?? false
@@ -497,6 +501,9 @@
 						allowFlow={true}
 						bind:itemKind
 						bind:scriptPath={script_path}
+						on:select={(e) => {
+							loadScript(e.detail.path)
+						}}
 					/>
 				{:else}
 					<Alert type="info" title="Runnable path cannot be edited">
@@ -513,7 +520,19 @@
 					/>
 				{/if}
 				{#if itemKind == 'flow'}
-					<Toggle options={{ right: 'no overlap of flows' }} bind:checked={no_flow_overlap} />
+					<Toggle
+						options={{ right: 'no overlap of flows' }}
+						bind:checked={no_flow_overlap}
+						class="mt-2"
+					/>
+				{/if}
+				{#if itemKind == 'script'}
+					<div class="flex gap-2 items-center mt-2">
+						<Toggle options={{ right: 'no overlap' }} checked={true} disabled /><Tooltip
+							>Currently, overlapping scripts' executions is not supported. The next execution will
+							be scheduled only after the previous iteration has completed.</Tooltip
+						>
+					</div>
 				{/if}
 				<div class="mt-6">
 					{#if runnable}
@@ -537,8 +556,6 @@
 					{/if}
 				</div>
 			</Section>
-
-			{#if !is_flow}{/if}
 
 			<div class="flex flex-col gap-2">
 				<Tabs bind:selected={optionTabSelected}>

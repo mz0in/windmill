@@ -87,7 +87,8 @@
 		code: string,
 		lang: SupportedLanguage,
 		args: Record<string, any>,
-		tag: string | undefined
+		tag: string | undefined,
+		lock?: string
 	): Promise<string> {
 		return abstractRun(() =>
 			JobService.runScriptPreview({
@@ -97,7 +98,8 @@
 					content: code,
 					args,
 					language: lang as Preview.language,
-					tag
+					tag,
+					lock
 				}
 			})
 		)
@@ -179,7 +181,7 @@
 				errorIteration += 1
 				if (errorIteration == 5) {
 					notfound = true
-					await clearCurrentJob()
+					job = undefined
 				}
 				console.warn(err)
 			}

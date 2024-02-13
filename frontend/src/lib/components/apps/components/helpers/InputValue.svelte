@@ -19,6 +19,7 @@
 	import deepEqualWithOrderedArray from './deepEqualWithOrderedArray'
 	import { deepEqual } from 'fast-equals'
 	import { deepMergeWithPriority, isCodeInjection } from '$lib/utils'
+	import sum from 'hash-sum'
 
 	type T = string | number | boolean | Record<string | number, any> | undefined
 
@@ -28,6 +29,7 @@
 	export let error: string = ''
 	export let key: string = ''
 	export let field: string = key
+	export let onDemandOnly: boolean = false
 
 	const { componentControl, runnableComponents } = getContext<AppViewerContext>('AppViewerContext')
 
@@ -47,6 +49,7 @@
 	}
 
 	$: lastInput?.type == 'evalv2' &&
+		!onDemandOnly &&
 		(fullContext.iter != undefined ||
 			fullContext.row != undefined ||
 			fullContext.group != undefined) &&
@@ -142,10 +145,11 @@
 		$state &&
 		debounce(debounceTemplate)
 
-	let lastExpr: any = undefined
+	let lastExprHash: any = undefined
 
-	const debounceEval = async () => {
-		let nvalue = await evalExpr(lastInput as EvalAppInput)
+	const debounceEval = async (s?: string) => {
+		let args = s == 'exprChanged' ? { file: { name: 'example.png' } } : undefined
+		let nvalue = await evalExpr(lastInput as EvalAppInput, args)
 
 		if (field) {
 			editorContext?.evalPreview.update((x) => {
@@ -153,27 +157,18 @@
 				return x
 			})
 		}
-		if (!deepEqual(nvalue, value)) {
-			if (
-				typeof nvalue == 'string' ||
-				typeof nvalue == 'number' ||
-				typeof nvalue == 'boolean' ||
-				typeof nvalue == 'bigint'
-			) {
-				if (nvalue != lastExpr) {
-					lastExpr = nvalue
-					value = nvalue as T
-				}
-			} else {
-				lastExpr = nvalue
+		if (!onDemandOnly) {
+			let nhash = typeof nvalue != 'object' ? nvalue : sum(nvalue)
+			if (lastExprHash != nhash) {
 				value = nvalue
+				lastExprHash = nhash
 			}
 		}
 	}
 
 	$: lastInput && lastInput.type == 'eval' && $stateId && $state && debounce2(debounceEval)
 
-	$: lastInput?.type == 'evalv2' && lastInput.expr && debounceEval()
+	$: lastInput?.type == 'evalv2' && lastInput.expr && debounceEval('exprChanged')
 	$: lastInput?.type == 'templatev2' && lastInput.eval && debounceTemplate()
 
 	async function handleConnection() {
@@ -200,6 +195,12 @@
 		} else if (lastInput?.type == 'eval') {
 			value = await evalExpr(lastInput as EvalAppInput)
 		} else if (lastInput?.type == 'evalv2') {
+			if (onDemandOnly) {
+				value = (args?: any) => {
+					return evalExpr(lastInput as EvalV2AppInput, args)
+				}
+				return
+			}
 			const skey = `${id}-${key}-${rowContext ? $rowContext.index : 0}-${
 				iterContext ? $iterContext.index : 0
 			}`
@@ -257,9 +258,13 @@
 	): Promise<any> {
 		if (iterContext && $iterContext.disabled) return
 		try {
+			const context = computeGlobalContext(
+				$worldStore,
+				deepMergeWithPriority(fullContext, args ?? {})
+			)
 			const r = await eval_like(
 				input.expr,
-				computeGlobalContext($worldStore, deepMergeWithPriority(fullContext, args ?? {})),
+				context,
 				true,
 				$state,
 				$mode == 'dnd',

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Job, JobService } from '$lib/gen'
+	import { Job, JobService, SettingsService } from '$lib/gen'
 	import { page } from '$app/stores'
 	import Button from '$lib/components/common/button/Button.svelte'
 	import CenteredModal from '$lib/components/CenteredModal.svelte'
@@ -10,11 +10,12 @@
 	import Tooltip from '$lib/components/Tooltip.svelte'
 	import FlowGraph from '$lib/components/graph/FlowGraph.svelte'
 	import SchemaForm from '$lib/components/SchemaForm.svelte'
-	import { enterpriseLicense, workspaceStore } from '$lib/stores'
+	import { enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
 	import { LogIn, AlertTriangle } from 'lucide-svelte'
 	import { mergeSchema } from '$lib/common'
 	import { emptyString } from '$lib/utils'
 	import { Alert } from '$lib/components/common'
+	import { getUserExt } from '$lib/user'
 
 	$workspaceStore = $page.params.workspace
 	let rd = $page.url.href.replace($page.url.origin, '')
@@ -36,7 +37,15 @@
 	let default_payload: any = {}
 	let enum_payload: object = {}
 
+	async function setLicense() {
+		const license = await SettingsService.getLicenseId()
+		if (license) {
+			$enterpriseLicense = license
+		}
+	}
+
 	onMount(() => {
+		setLicense()
 		getJob()
 		timeout = setInterval(getJob, 1000)
 		window.onunhandledrejection = (event: PromiseRejectionEvent) => {
@@ -116,6 +125,14 @@
 		})
 		sendUserToast('Flow disapproved!')
 		getJob()
+	}
+
+	async function loadUser() {
+		userStore.set(await getUserExt($page.params.workspace))
+	}
+
+	$: if (job?.raw_flow?.modules?.[approvalStep]?.suspend?.user_auth_required && !$userStore) {
+		loadUser()
 	}
 </script>
 
@@ -219,6 +236,14 @@
 				disabled={completed || alreadyResumed || !valid}>Approve/Resume</Button
 			>
 		</div>
+		{#if !completed && !alreadyResumed && job?.raw_flow?.modules?.[approvalStep]?.suspend?.user_auth_required && job?.raw_flow?.modules?.[approvalStep]?.suspend?.self_approval_disabled && $userStore && $userStore.email === job.email && $userStore.is_admin}
+			<div class="mt-2">
+				<Alert type="warning" title="Warning">
+					As an administrator, by resuming or cancelling this stage of the flow, you bypass the
+					self-approval interdiction.
+				</Alert>
+			</div>
+		{/if}
 
 		<div class="mt-4 flex flex-row flex-wrap justify-between"
 			><a href="https://windmill.dev">Learn more about Windmill</a>

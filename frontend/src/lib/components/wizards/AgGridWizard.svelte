@@ -4,8 +4,8 @@
 	import SimpleEditor from '../SimpleEditor.svelte'
 	import Label from '../Label.svelte'
 	import Tooltip from '../Tooltip.svelte'
-
 	import Button from '../common/button/Button.svelte'
+	import { offset, flip, shift } from 'svelte-floating-ui/dom'
 
 	type Column = {
 		minWidth: number
@@ -24,6 +24,7 @@
 		field: string
 		headerName: string
 		editable: boolean
+		filter: boolean
 	}
 
 	export let value: Column | undefined
@@ -83,7 +84,11 @@
 </script>
 
 <Popup
-	floatingConfig={{ strategy: 'fixed', placement: 'left-end' }}
+	floatingConfig={{
+		strategy: 'fixed',
+		placement: 'left-end',
+		middleware: [offset(8), flip(), shift()]
+	}}
 	containerClasses="border rounded-lg shadow-lg bg-surface p-4"
 >
 	<svelte:fragment slot="button">
@@ -214,6 +219,23 @@
 					<option value="asc">Ascending</option>
 					<option value="desc">Descending</option>
 				</select>
+			</Label>
+
+			<Label label="Filter">
+				<svelte:fragment slot="header">
+					<Tooltip documentationLink="https://www.ag-grid.com/javascript-data-grid/filtering/">
+						Filtering allows you to limit the rows displayed in your grid to those that match
+						criteria you specify.
+					</Tooltip>
+				</svelte:fragment>
+				<Toggle
+					on:pointerdown={(e) => {
+						e?.stopPropagation()
+					}}
+					options={{ right: 'Enable filter' }}
+					bind:checked={value.filter}
+					size="xs"
+				/>
 			</Label>
 
 			<!--

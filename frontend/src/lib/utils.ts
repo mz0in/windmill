@@ -116,10 +116,20 @@ export function validatePassword(password: string): boolean {
 	return re.test(password)
 }
 
+const portalDivs = ['app-editor-select']
+
 export function clickOutside(node: Node, capture?: boolean): { destroy(): void } {
 	const handleClick = (event: MouseEvent) => {
-		if (node && !node.contains(<HTMLElement>event.target) && !event.defaultPrevented) {
-			node.dispatchEvent(new CustomEvent<MouseEvent>('click_outside', { detail: event }))
+		const target = event.target as HTMLElement
+
+		if (node && !node.contains(target) && !event.defaultPrevented) {
+			const portalDivsSelector = portalDivs.map((id) => `#${id}`).join(', ')
+
+			const parent = target.closest(portalDivsSelector)
+
+			if (!parent) {
+				node.dispatchEvent(new CustomEvent<MouseEvent>('click_outside', { detail: event }))
+			}
 		}
 	}
 
@@ -678,6 +688,7 @@ export function roughSizeOfObject(object: object | string) {
 	if (typeof object == 'string') {
 		return object.length * 2
 	}
+
 	var objectList: any[] = []
 	var stack = [object]
 	var bytes = 0

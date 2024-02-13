@@ -8,6 +8,7 @@
 	import {
 		cleanValueProperties,
 		emptySchema,
+		emptyString,
 		encodeState,
 		getModifierKey,
 		orderedJsonStringify
@@ -34,7 +35,6 @@
 		Settings,
 		X
 	} from 'lucide-svelte'
-	import autosize from 'svelte-autosize'
 	import { SCRIPT_SHOW_BASH, SCRIPT_SHOW_GO } from '$lib/consts'
 	import UnsavedConfirmationModal from './common/confirmationModal/UnsavedConfirmationModal.svelte'
 	import { sendUserToast } from '$lib/toast'
@@ -50,6 +50,7 @@
 	import { cloneDeep } from 'lodash'
 	import type Editor from './Editor.svelte'
 	import WorkerTagPicker from './WorkerTagPicker.svelte'
+	import MetadataGen from './copilot/MetadataGen.svelte'
 
 	export let script: NewScript
 	export let initialPath: string = ''
@@ -200,7 +201,8 @@
 					priority: script.priority,
 					restart_unless_cancelled: script.restart_unless_cancelled,
 					delete_after_use: script.delete_after_use,
-					timeout: script.timeout
+					timeout: script.timeout,
+					concurrency_key: emptyString(script.concurrency_key) ? undefined : script.concurrency_key
 				}
 			})
 			savedScript = cloneDeep(script) as NewScriptWithDraft
@@ -281,9 +283,13 @@
 						priority: script.priority,
 						restart_unless_cancelled: script.restart_unless_cancelled,
 						delete_after_use: script.delete_after_use,
-						timeout: script.timeout
+						timeout: script.timeout,
+						concurrency_key: emptyString(script.concurrency_key)
+							? undefined
+							: script.concurrency_key
 					}
 				})
+				initialPath = script.path
 			}
 			await DraftService.createDraft({
 				workspace: $workspaceStore!,
@@ -399,12 +405,14 @@
 									</svelte:fragment>
 									<div class="flex flex-col gap-4">
 										<Label label="Summary">
-											<input
-												type="text"
-												autofocus
-												bind:value={script.summary}
-												placeholder="Short summary to be displayed when listed"
-												on:keyup={() => {
+											<MetadataGen
+												label="Summary"
+												bind:content={script.summary}
+												lang={script.language}
+												code={script.content}
+												promptConfigName="summary"
+												generateOnAppear
+												on:change={() => {
 													if (initialPath == '' && script.summary?.length > 0 && !dirtyPath) {
 														path?.setName(
 															script.summary
@@ -414,6 +422,10 @@
 																.replace(/^-|-$/g, '')
 														)
 													}
+												}}
+												elementProps={{
+													type: 'text',
+													placeholder: 'Short summary to be displayed when listed'
 												}}
 											/>
 										</Label>
@@ -430,11 +442,15 @@
 											/>
 										</Label>
 										<Label label="Description">
-											<textarea
-												use:autosize
-												bind:value={script.description}
-												placeholder="Description displayed in the details page"
-												class="text-sm"
+											<MetadataGen
+												bind:content={script.description}
+												lang={script.language}
+												code={script.content}
+												promptConfigName="description"
+												elementType="textarea"
+												elementProps={{
+													placeholder: 'Description displayed'
+												}}
 											/>
 										</Label>
 									</div>
@@ -559,6 +575,7 @@
 													on:click={() => {
 														script.concurrent_limit = undefined
 														script.concurrency_time_window_s = undefined
+														script.concurrency_key = undefined
 													}}
 													variant="border">Remove Limits</Button
 												>
@@ -568,6 +585,14 @@
 											<SecondsInput
 												disabled={!$enterpriseLicense}
 												bind:seconds={script.concurrency_time_window_s}
+											/>
+										</Label>
+										<Label label="Custom concurrency key">
+											<input
+												type="text"
+												autofocus
+												bind:value={script.concurrency_key}
+												placeholder={`$workspace/script/${script.path}`}
 											/>
 										</Label>
 									</div>
@@ -853,7 +878,7 @@
 							<LanguageIcon lang={script.language} height={20} />
 						</button>
 					</div>
-					<div class="min-w-64 w-full max-w-md">
+					<div class="min-w-32 lg:min-w-64 w-full max-w-md">
 						<input
 							type="text"
 							placeholder="Script summary"
@@ -864,7 +889,7 @@
 				</div>
 
 				<div class="gap-4 flex">
-					<div class="flex justify-start w-full">
+					<div class="flex justify-start w-full border rounded-md overflow-hidden">
 						<div>
 							<button
 								on:click={async () => {
@@ -873,7 +898,7 @@
 							>
 								<Badge
 									color="gray"
-									class="center-center !bg-surface-selected !text-tertiary !h-[28px]  !w-[70px] rounded-r-none"
+									class="center-center !bg-surface-secondary !text-tertiary !h-[28px]  !w-[70px] rounded-none hover:!bg-surface-hover transition-all"
 								>
 									<Pen size={12} class="mr-2" /> Path
 								</Badge>
@@ -884,7 +909,7 @@
 							readonly
 							value={script.path}
 							size={script.path?.length || 50}
-							class="font-mono !text-xs !min-w-[96px] !max-w-[300px] !w-full !h-[28px] !my-0 !py-0 !border-l-0 !rounded-l-none"
+							class="font-mono !text-xs !min-w-[96px] !max-w-[300px] !w-full !h-[28px] !my-0 !py-0 !border-l-0 !rounded-l-none !border-0 !shadow-none"
 							on:focus={({ currentTarget }) => {
 								currentTarget.select()
 							}}
@@ -917,7 +942,7 @@
 					>
 						<div class="flex flex-row gap-2 items-center">
 							<DiffIcon size={14} />
-							Diff
+							<span class="hidden lg:flex"> Diff </span>
 						</div>
 					</Button>
 					<Button
@@ -929,7 +954,7 @@
 						}}
 						startIcon={{ icon: Settings }}
 					>
-						Settings
+						<span class="hidden lg:flex"> Settings </span>
 					</Button>
 					<Button
 						loading={loadingDraft}
@@ -938,8 +963,8 @@
 						on:click={() => saveDraft()}
 						disabled={initialPath != '' && !savedScript}
 					>
-						<span class="hidden sm:flex">
-							Save draft&nbsp;<Kbd small isModifier>{getModifierKey()}</Kbd>
+						<span class="hidden lg:flex">
+							Draft&nbsp;<Kbd small isModifier>{getModifierKey()}</Kbd>
 						</span>
 						<Kbd small>S</Kbd>
 					</Button>

@@ -1,5 +1,6 @@
 pub const WORKER_S3_BUCKET_SYNC: &str = "worker_s3_bucket_sync";
 pub const CUSTOM_TAGS_SETTING: &str = "custom_tags";
+pub const DEFAULT_TAGS_PER_WORKSPACE_SETTING: &str = "default_tags_per_workspace";
 pub const BASE_URL_SETTING: &str = "base_url";
 pub const OAUTH_SETTING: &str = "oauths";
 pub const RETENTION_PERIOD_SECS_SETTING: &str = "retention_period_secs";
@@ -58,7 +59,6 @@ pub const ENV_SETTINGS: [&str; 54] = [
     "INSTANCE_EVENTS_WEBHOOK",
     "CLOUD_HOSTED",
     "GLOBAL_CACHE_INTERVAL",
-    "JOB_RETENTION_SECS",
     "WAIT_RESULT_FAST_POLL_DURATION_SECS",
     "WAIT_RESULT_SLOW_POLL_INTERVAL_MS",
     "WAIT_RESULT_FAST_POLL_INTERVAL_MS",
@@ -70,6 +70,7 @@ pub const ENV_SETTINGS: [&str; 54] = [
     "SMTP_TLS_IMPLICIT",
     "CREATE_WORKSPACE_REQUIRE_SUPERADMIN",
     "GLOBAL_ERROR_HANDLER_PATH_IN_ADMINS_WORKSPACE",
+    "MAX_WAIT_FOR_SIGINT",
     "MAX_WAIT_FOR_SIGTERM",
     "WORKER_GROUP",
 ];

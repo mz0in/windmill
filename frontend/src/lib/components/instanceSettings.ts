@@ -33,8 +33,14 @@ export const settings: Record<string, Setting[]> = {
 			fieldType: 'text',
 			placeholder: 'https://windmill.com',
 			storage: 'setting',
+			error: 'Base url must start with http:// or https:// and not end with / or a space',
 			isValid: (value: string | undefined) =>
-				value ? value?.startsWith('http') && value.includes('://') && !value?.endsWith('/') : true
+				value
+					? value?.startsWith('http') &&
+					  value.includes('://') &&
+					  !value?.endsWith('/') &&
+					  !value?.endsWith(' ')
+					: false
 		},
 		{
 			label: 'Request Size Limit In MB',
@@ -44,15 +50,6 @@ export const settings: Record<string, Setting[]> = {
 			fieldType: 'number',
 			placeholder: '50',
 			storage: 'setting'
-		},
-		{
-			label: 'Retention Period in secs',
-			key: 'retention_period_secs',
-			description: 'How long to keep the jobs data in the database.',
-			fieldType: 'seconds',
-			placeholder: '60',
-			storage: 'setting',
-			cloudonly: false
 		},
 		{
 			label: 'Default timeout',
@@ -78,14 +75,23 @@ export const settings: Record<string, Setting[]> = {
 			placeholder: 'only needed to prepare upgrade to EE',
 			storage: 'setting'
 		},
-
+		{
+			label: 'Retention Period in secs',
+			key: 'retention_period_secs',
+			description: 'How long to keep the jobs data in the database (max 30 days on CE)',
+			fieldType: 'seconds',
+			placeholder: '30',
+			storage: 'setting',
+			ee_only: 'You can only adjust this setting to above 30 days in the EE version',
+			cloudonly: false
+		},
 		{
 			label: 'Expose metrics',
 			description: 'Expose prometheus metrics for workers and servers on port 8001 at /metrics',
 			key: 'expose_metrics',
 			fieldType: 'boolean',
 			storage: 'setting',
-			ee_only: 'No workaround around this'
+			ee_only: ''
 		},
 		{
 			label: 'Azure OpenAI base path',
@@ -94,8 +100,7 @@ export const settings: Record<string, Setting[]> = {
 			key: 'openai_azure_base_path',
 			fieldType: 'text',
 			storage: 'setting',
-			ee_only:
-				'You can still set this setting by using OPENAI_AZURE_BASE_PATH as env variable to the server containers'
+			ee_only: ''
 		}
 	],
 	'SSO/OAuth': [
@@ -121,7 +126,7 @@ export const settings: Record<string, Setting[]> = {
 			description: 'Add private NPM registry',
 			key: 'npm_config_registry',
 			fieldType: 'text',
-			placeholder: 'https://yourregistry',
+			placeholder: 'https://registry.npmjs.org/:_authToken=npm_FOOBAR',
 			storage: 'setting',
 			ee_only: ''
 		},

@@ -68,10 +68,7 @@ use async_recursion::async_recursion;
 use rand::Rng;
 
 #[cfg(feature = "enterprise")]
-use crate::global_cache::{
-    cache_global, copy_all_piptars_from_bucket, copy_cache_to_tmp_cache,
-    copy_denogo_cache_from_bucket_as_tar, copy_tmp_cache_to_cache,
-};
+use crate::global_cache::{copy_all_piptars_from_bucket, untar_all_piptars};
 
 use windmill_queue::{add_completed_job, add_completed_job_error};
 
@@ -113,6 +110,7 @@ pub async fn create_token_for_owner_in_bg(
         let w_id = job.workspace_id.clone();
         let owner = job.permissioned_as.clone();
         let email = job.email.clone();
+        let job_id = job.id.clone();
         tokio::spawn(async move {
             let token = create_token_for_owner(
                 &db.clone(),
@@ -121,6 +119,7 @@ pub async fn create_token_for_owner_in_bg(
                 "ephemeral-script",
                 *SCRIPT_TOKEN_EXPIRY,
                 &email,
+                &job_id,
             )
             .await
             .expect("could not create job token");
@@ -138,6 +137,7 @@ pub async fn create_token_for_owner(
     label: &str,
     expires_in: u64,
     email: &str,
+    job_id: &Uuid,
 ) -> error::Result<String> {
     // TODO: Bad implementation. We should not have access to this DB here.
     if let Some(token) = JOB_TOKEN.as_ref() {
@@ -156,15 +156,16 @@ pub async fn create_token_for_owner(
 
     sqlx::query_scalar!(
         "INSERT INTO token
-            (workspace_id, token, owner, label, expiration, super_admin, email)
-            VALUES ($1, $2, $3, $4, now() + ($5 || ' seconds')::interval, $6, $7)",
+            (workspace_id, token, owner, label, expiration, super_admin, email, job)
+            VALUES ($1, $2, $3, $4, now() + ($5 || ' seconds')::interval, $6, $7, $8)",
         &w_id,
         token,
         owner,
         label,
         expires_in.to_string(),
         is_super_admin,
-        email
+        email,
+        job_id
     )
     .execute(db)
     .await?;
@@ -238,6 +239,8 @@ lazy_static::lazy_static! {
     pub static ref HTTPS_PROXY: Option<String> = std::env::var("https_proxy").ok().or(std::env::var("HTTPS_PROXY").ok());
     pub static ref DENO_PATH: String = std::env::var("DENO_PATH").unwrap_or_else(|_| "/usr/bin/deno".to_string());
     pub static ref BUN_PATH: String = std::env::var("BUN_PATH").unwrap_or_else(|_| "/usr/bin/bun".to_string());
+    pub static ref NPM_PATH: String = std::env::var("NPM_PATH").unwrap_or_else(|_| "/usr/bin/npm".to_string());
+    pub static ref NODE_PATH: String = std::env::var("NODE_PATH").unwrap_or_else(|_| "/usr/bin/node".to_string());
     pub static ref POWERSHELL_PATH: String = std::env::var("POWERSHELL_PATH").unwrap_or_else(|_| "/usr/bin/pwsh".to_string());
     pub static ref NSJAIL_PATH: String = std::env::var("NSJAIL_PATH").unwrap_or_else(|_| "nsjail".to_string());
     pub static ref PATH_ENV: String = std::env::var("PATH").unwrap_or_else(|_| String::new());
@@ -246,6 +249,7 @@ lazy_static::lazy_static! {
     pub static ref GOPRIVATE: Option<String> = std::env::var("GOPRIVATE").ok();
     pub static ref GOPROXY: Option<String> = std::env::var("GOPROXY").ok();
     pub static ref NETRC: Option<String> = std::env::var("NETRC").ok();
+
 
     pub static ref NPM_CONFIG_REGISTRY: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     pub static ref BUNFIG_INSTALL_SCOPES: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
@@ -274,6 +278,11 @@ lazy_static::lazy_static! {
         .and_then(|x| x.parse::<u64>().ok())
         .unwrap_or_else(|| if *CLOUD_HOSTED { DEFAULT_CLOUD_TIMEOUT } else { DEFAULT_SELFHOSTED_TIMEOUT });
 
+    pub static ref MAX_WAIT_FOR_SIGINT: u64 = std::env::var("MAX_WAIT_FOR_SIGINT")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .unwrap_or_else(|| 0);
+
     pub static ref MAX_WAIT_FOR_SIGTERM: u64 = std::env::var("MAX_WAIT_FOR_SIGTERM")
         .ok()
         .and_then(|x| x.parse::<u64>().ok())
@@ -301,7 +310,6 @@ lazy_static::lazy_static! {
         .ok()
         .and_then(|x| x.parse::<u64>().ok());
 
-    pub static ref CAN_PULL: Arc<RwLock<()>> = Arc::new(RwLock::new(()));
 
     pub static ref WORKER_EXECUTION_COUNT: Arc<RwLock<HashMap<String, IntCounter>>> = Arc::new(RwLock::new(HashMap::new()));
     pub static ref WORKER_EXECUTION_DURATION_COUNTER: Arc<RwLock<HashMap<String, prometheus::Counter>>> = Arc::new(RwLock::new(HashMap::new()));
@@ -850,18 +858,6 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
         ws.inc();
     }
 
-    let (_copy_to_bucket_tx, mut copy_to_bucket_rx) = mpsc::channel::<()>(2);
-
-    #[cfg(feature = "enterprise")]
-    let mut copy_cache_from_bucket_handle: Option<tokio::task::JoinHandle<()>> = None;
-
-    #[cfg(feature = "enterprise")]
-    let mut last_sync = Instant::now()
-        + Duration::from_secs(rand::thread_rng().gen_range(0..*GLOBAL_CACHE_INTERVAL));
-
-    #[cfg(feature = "enterprise")]
-    let mut handles = Vec::with_capacity(2);
-
     #[cfg(feature = "enterprise")]
     if i_worker == 1 {
         if let Some(ref s) = S3_CACHE_BUCKET.clone() {
@@ -869,15 +865,11 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
                 tracing::warn!("S3 cache not available in the pro plan");
             } else if crate::global_cache::worker_s3_bucket_sync_enabled(&db).await {
                 let bucket = s.to_string();
-                let worker_name2 = worker_name.clone();
 
-                //piptars can be fetched in background
-                handles.push(tokio::task::spawn(async move {
-                    tracing::info!(worker = %worker_name2, "Started initial piptar sync in background");
-                    copy_all_piptars_from_bucket(&bucket).await;
-                }));
-                //denogocache.tar need to be fetched in foreground, block workers until they fetched it
-                copy_denogo_cache_from_bucket_as_tar(s).await;
+                copy_all_piptars_from_bucket(&bucket).await;
+                if let Err(e) = untar_all_piptars().await {
+                    tracing::error!("Failed to untar pip tarballs: {:?}", e);
+                }
             }
         }
     }
@@ -1293,13 +1285,10 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
             );
         }
 
-        #[cfg(feature = "enterprise")]
-        let copy_tx = _copy_to_bucket_tx.clone();
-
         if last_ping.elapsed().as_secs() > NUM_SECS_PING {
             let tags = WORKER_CONFIG.read().await.worker_tags.clone();
 
-            sqlx::query!(
+            if let Err(e) = sqlx::query!(
                 "UPDATE worker_ping SET ping_at = now(), jobs_executed = $1, custom_tags = $2 WHERE worker = $3",
                 jobs_executed,
                 tags.as_slice(),
@@ -1307,7 +1296,10 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
             )
             .execute(db)
             .await
-            .expect("update worker ping");
+            {
+                tracing::error!("failed to update worker ping, exiting: {}", e);
+                killpill_tx.send(()).unwrap_or_default();
+            }
 
             last_ping = Instant::now();
         }
@@ -1320,60 +1312,6 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
             tracing::info!(worker = %worker_name, "vacuumed queue and completed_job");
         }
 
-        #[cfg(feature = "enterprise")]
-        if i_worker == 1 && S3_CACHE_BUCKET.is_some() {
-            if matches!(get_license_plan().await, LicensePlan::Pro) {
-                tracing::warn!("S3 cache not available in the pro plan");
-            } else if last_sync.elapsed().as_secs() > *GLOBAL_CACHE_INTERVAL
-                && (copy_cache_from_bucket_handle.is_none()
-                    || copy_cache_from_bucket_handle
-                        .as_ref()
-                        .unwrap()
-                        .is_finished())
-            {
-                last_sync = Instant::now();
-
-                if crate::global_cache::worker_s3_bucket_sync_enabled(&db).await {
-                    tracing::debug!("CAN PULL LOCK START");
-                    let _lock = CAN_PULL.write().await;
-
-                    tracing::info!("Started syncing cache");
-                    // if num_workers > 1 {
-                    //     create_barrier_for_all_workers(num_workers, sync_barrier.clone()).await;
-                    // }
-                    if let Err(e) = copy_cache_to_tmp_cache().await {
-                        tracing::error!("failed to copy cache to tmp cache: {}", e);
-                    } else {
-                        copy_cache_from_bucket_handle = Some(tokio::task::spawn(async move {
-                            if let Some(ref s) = S3_CACHE_BUCKET.clone() {
-                                if let Err(e) = cache_global(s, copy_tx).await {
-                                    tracing::error!("failed to sync cache: {}", e);
-                                }
-                            }
-                        }));
-                    }
-                    tracing::info!("Ended syncing cache sync part");
-                }
-            }
-        }
-
-        // // The barrier is to avoid the sync to bucket syncing partial folders
-        // #[cfg(feature = "enterprise")]
-        // if num_workers > 1 && S3_CACHE_BUCKET.is_some()  {
-        //     let read_barrier = sync_barrier.read().await;
-        //     if let Some(b) = read_barrier.as_ref() {
-        //         tracing::debug!("worker #{i_worker} waiting for barrier");
-        //         b.wait().await;
-        //         tracing::debug!("worker #{i_worker} done waiting for barrier");
-        //         drop(read_barrier);
-        //         // wait for barrier to be reset
-        //         let _ = CAN_PULL.read().await;
-        //         tracing::debug!("worker #{i_worker} done waiting for lock");
-        //     } else {
-        //         tracing::debug!("worker #{i_worker} no barrier");
-        //     };
-        // }
-
         let next_job = {
             // println!("2: {:?}",  instant.elapsed());
             #[cfg(feature = "benchmark")]
@@ -1384,35 +1322,9 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
             tokio::select! {
                 biased;
                 _ = killpill_rx.recv() => {
-                    #[cfg(feature = "enterprise")]
-                    if let Some(copy_cache_from_bucket_handle) = copy_cache_from_bucket_handle.as_ref() {
-                        if !copy_cache_from_bucket_handle.is_finished() {
-                            copy_cache_from_bucket_handle.abort();
-                        }
-                    }
-                    #[cfg(feature = "enterprise")]
-                    for handle in &handles {
-                        if !handle.is_finished() {
-                            handle.abort();
-                        }
-                    }
                     println!("received killpill for worker {}", i_worker);
                     job_completed_tx.0.send(SendResult::Kill).await.unwrap();
                     break
-                },
-                _ = copy_to_bucket_rx.recv() => {
-                    tracing::debug!("can_pull lock start");
-                    let _lock = CAN_PULL.write().await;
-                    // if num_workers > 1 {
-                    //     create_barrier_for_all_workers(num_workers, sync_barrier.clone()).await;
-                    // }
-                    //Arc::new(tokio::sync::Barrier::new(num_workers as usize + 1));
-                    #[cfg(feature = "enterprise")]
-                    if let Err(e) = copy_tmp_cache_to_cache().await {
-                        tracing::error!(worker = %worker_name, "failed to sync tmp cache to cache: {}", e);
-                    }
-                    tracing::debug!("can_pull lock end");
-                    Ok(None)
                 },
                 Some(job_id) = same_worker_rx.recv() => {
                     sqlx::query_as::<_, QueuedJob>("SELECT * FROM queue WHERE id = $1")
@@ -1430,6 +1342,7 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
                     pull(&db, rsmq.clone(), suspend_first).map(|x| (x, pull_time)).await
                 } => {
                     add_time!(timing, loop_start, "post pull");
+                    tracing::debug!("pulled job: {:?}", job.as_ref().ok().and_then(|x| x.as_ref().map(|y| y.id)));
                     let duration_pull_s = timer.elapsed().as_secs_f64();
                     let err_pull = job.is_ok();
                     let empty = job.as_ref().is_ok_and(|x| x.is_none());
@@ -1609,17 +1522,19 @@ pub async fn run_worker<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
                     let target = &format!("{job_dir}/shared");
 
                     if same_worker && job.parent_job.is_some() {
-                        let parent_flow = job.parent_job.unwrap();
-                        let parent_shared_dir = format!("{worker_dir}/{parent_flow}/shared");
-                        DirBuilder::new()
-                            .recursive(true)
-                            .create(&parent_shared_dir)
-                            .await
-                            .expect("could not create parent shared dir");
+                        if tokio::fs::metadata(target).await.is_err() {
+                            let parent_flow = job.parent_job.unwrap();
+                            let parent_shared_dir = format!("{worker_dir}/{parent_flow}/shared");
+                            DirBuilder::new()
+                                .recursive(true)
+                                .create(&parent_shared_dir)
+                                .await
+                                .expect("could not create parent shared dir");
 
-                        symlink(&parent_shared_dir, target)
-                            .await
-                            .expect("could not symlink target");
+                            symlink(&parent_shared_dir, target)
+                                .await
+                                .expect("could not symlink target");
+                        }
                     } else {
                         DirBuilder::new()
                             .recursive(true)
@@ -2114,7 +2029,7 @@ async fn queue_init_bash_maybe<'c, R: rsmq_async::RsmqConnection + Send + 'c>(
             true,
             None,
             true,
-            None,
+            Some("init_script".to_string()),
             None,
             None,
             None,
@@ -2352,23 +2267,21 @@ pub async fn handle_job_error<R: rsmq_async::RsmqConnection + Send + Sync + Clon
 
         if let Err(err) = updated_flow {
             if let Some(parent_job_id) = job.parent_job {
-                if let Ok(mut tx) = db.begin().await {
-                    if let Ok(Some(parent_job)) =
-                        get_queued_job(parent_job_id, &job.workspace_id, &mut tx).await
-                    {
-                        let e = json!({"message": err.to_string(), "name": "InternalErr"});
-                        let _ = add_completed_job_error(
-                            db,
-                            &parent_job,
-                            format!("Unexpected error during flow job error handling:\n{err}"),
-                            mem_peak,
-                            canceled_by.clone(),
-                            e,
-                            rsmq,
-                            worker_name,
-                        )
-                        .await;
-                    }
+                if let Ok(Some(parent_job)) =
+                    get_queued_job(parent_job_id, &job.workspace_id, &db).await
+                {
+                    let e = json!({"message": err.to_string(), "name": "InternalErr"});
+                    let _ = add_completed_job_error(
+                        db,
+                        &parent_job,
+                        format!("Unexpected error during flow job error handling:\n{err}"),
+                        mem_peak,
+                        canceled_by.clone(),
+                        e,
+                        rsmq,
+                        worker_name,
+                    )
+                    .await;
                 }
             }
         }
@@ -3172,15 +3085,27 @@ async fn handle_dependency_job<R: rsmq_async::RsmqConnection + Send + Sync + Clo
     token: &str,
     rsmq: Option<R>,
 ) -> error::Result<Box<RawValue>> {
-    let raw_code = sqlx::query_scalar!(
-        "SELECT content FROM script WHERE hash = $1 AND workspace_id = $2",
-        &job.script_hash.unwrap_or(ScriptHash(0)).0,
-        &job.workspace_id
-    )
-    .fetch_optional(db)
-    .await?
-    .unwrap_or_else(|| "No script found at this hash".to_string());
+    let raw_code = match job.raw_code {
+        Some(ref code) => code.to_owned(),
+        None => sqlx::query_scalar!(
+            "SELECT content FROM script WHERE hash = $1 AND workspace_id = $2",
+            &job.script_hash.unwrap_or(ScriptHash(0)).0,
+            &job.workspace_id
+        )
+        .fetch_optional(db)
+        .await?
+        .unwrap_or_else(|| "No script found at this hash".to_string()),
+    };
+
     let script_path = job.script_path();
+    let raw_deps = job
+        .args
+        .as_ref()
+        .map(|x| {
+            x.get("raw_deps")
+                .is_some_and(|y| y.to_string().as_str() == "true")
+        })
+        .unwrap_or(false);
     let content = capture_dependency_job(
         &job.id,
         job.language.as_ref().map(|v| Ok(v)).unwrap_or_else(|| {
@@ -3200,10 +3125,18 @@ async fn handle_dependency_job<R: rsmq_async::RsmqConnection + Send + Sync + Clo
         base_internal_url,
         token,
         script_path,
+        raw_deps,
     )
     .await;
     match content {
         Ok(content) => {
+            if job.script_hash.is_none() {
+                // it a one-off raw script dependency job, no need to update the db
+                return Ok(to_raw_value_owned(
+                    json!({ "success": "Successful lock file generation", "lock": content }),
+                ));
+            }
+
             let hash = job.script_hash.unwrap_or(ScriptHash(0));
             let w_id = &job.workspace_id;
             sqlx::query!(
@@ -3510,7 +3443,7 @@ async fn lock_modules(
     let mut new_flow_modules = Vec::new();
     for mut e in modules.into_iter() {
         let FlowModuleValue::RawScript {
-            lock: _,
+            lock,
             path,
             content,
             language,
@@ -3518,7 +3451,7 @@ async fn lock_modules(
             tag,
             concurrent_limit,
             concurrency_time_window_s,
-        } = e.value
+        } = e.value.clone()
         else {
             match e.value {
                 FlowModuleValue::ForloopFlow {
@@ -3614,7 +3547,10 @@ async fn lock_modules(
             new_flow_modules.push(e);
             continue;
         };
-
+        if lock.as_ref().is_some_and(|x| !x.trim().is_empty()) {
+            new_flow_modules.push(e);
+            continue;
+        }
         let new_lock = capture_dependency_job(
             &job.id,
             &language,
@@ -3630,6 +3566,7 @@ async fn lock_modules(
             base_internal_url,
             token,
             &path.clone().unwrap_or_else(|| job_path.to_string()),
+            false,
         )
         .await;
         match new_lock {
@@ -3720,6 +3657,7 @@ async fn lock_modules_app(
                                 base_internal_url,
                                 token,
                                 job.script_path(),
+                                false,
                             )
                             .await;
                             match new_lock {
@@ -3914,17 +3852,22 @@ async fn capture_dependency_job(
     base_internal_url: &str,
     token: &str,
     script_path: &str,
+    raw_deps: bool,
 ) -> error::Result<String> {
     match job_language {
         ScriptLang::Python3 => {
-            let reqs = windmill_parser_py_imports::parse_python_imports(
-                job_raw_code,
-                &w_id,
-                script_path,
-                &db,
-            )
-            .await?
-            .join("\n");
+            let reqs = if raw_deps {
+                job_raw_code.to_string()
+            } else {
+                windmill_parser_py_imports::parse_python_imports(
+                    job_raw_code,
+                    &w_id,
+                    script_path,
+                    &db,
+                )
+                .await?
+                .join("\n")
+            };
             create_dependencies_dir(job_dir).await;
             let req: std::result::Result<String, Error> = pip_compile(
                 job_id,
@@ -3965,6 +3908,11 @@ async fn capture_dependency_job(
             req
         }
         ScriptLang::Go => {
+            if raw_deps {
+                return Err(Error::ExecutionErr(
+                    "Raw dependencies not supported for go".to_string(),
+                ));
+            }
             install_go_dependencies(
                 job_id,
                 job_raw_code,
@@ -3982,6 +3930,11 @@ async fn capture_dependency_job(
             .await
         }
         ScriptLang::Deno => {
+            if raw_deps {
+                return Err(Error::ExecutionErr(
+                    "Raw dependencies not supported for deno".to_string(),
+                ));
+            }
             generate_deno_lock(
                 job_id,
                 job_raw_code,
@@ -3997,9 +3950,13 @@ async fn capture_dependency_job(
             .await
         }
         ScriptLang::Bun => {
-            let _ = write_file(job_dir, "main.ts", job_raw_code).await?;
-            //TODO: remove once bun provides sane default fot it
-            let trusted_deps = get_trusted_deps(job_raw_code);
+            let trusted_deps = if !raw_deps {
+                let _ = write_file(job_dir, "main.ts", job_raw_code).await?;
+                //TODO: remove once bun provides sane default fot it
+                get_trusted_deps(job_raw_code)
+            } else {
+                vec![]
+            };
             let req = gen_lockfile(
                 logs,
                 mem_peak,
@@ -4014,6 +3971,12 @@ async fn capture_dependency_job(
                 worker_name,
                 true,
                 trusted_deps,
+                if raw_deps {
+                    Some(job_raw_code.to_string())
+                } else {
+                    None
+                },
+                false,
             )
             .await?;
             Ok(req.unwrap_or_else(String::new))

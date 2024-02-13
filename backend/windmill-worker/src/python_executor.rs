@@ -37,6 +37,8 @@ lazy_static::lazy_static! {
 
     static ref RELATIVE_IMPORT_REGEX: Regex = Regex::new(r#"(import|from)\s(((u|f)\.)|\.)"#).unwrap();
 
+    static ref EPHEMERAL_TOKEN_CMD: Option<String> = std::env::var("EPHEMERAL_TOKEN_CMD").ok();
+
 }
 
 const NSJAIL_CONFIG_DOWNLOAD_PY_CONTENT: &str = include_str!("../nsjail/download.py.config.proto");
@@ -54,7 +56,7 @@ use crate::{
         create_args_and_out_file, get_reserved_variables, handle_child, read_result, set_logs,
         start_child_process, write_file,
     },
-    AuthedClientBackgroundTask, DISABLE_NSJAIL, DISABLE_NUSER, HTTPS_PROXY, HTTP_PROXY,
+    AuthedClientBackgroundTask, DISABLE_NSJAIL, DISABLE_NUSER, HOME_ENV, HTTPS_PROXY, HTTP_PROXY,
     LOCK_CACHE_DIR, NO_PROXY, NSJAIL_PATH, PATH_ENV, PIP_CACHE_DIR, PIP_EXTRA_INDEX_URL, TZ_ENV,
 };
 
@@ -64,6 +66,27 @@ pub async fn create_dependencies_dir(job_dir: &str) {
         .create(&format!("{job_dir}/dependencies"))
         .await
         .expect("could not create dependencies dir");
+}
+
+#[inline(always)]
+pub fn handle_ephemeral_token(x: String) -> String {
+    #[cfg(feature = "enterprise")]
+    {
+        if let Some(full_cmd) = EPHEMERAL_TOKEN_CMD.as_ref() {
+            let mut splitted = full_cmd.split(" ");
+            let cmd = splitted.next().unwrap();
+            let args = splitted.collect::<Vec<&str>>();
+            let output = std::process::Command::new(cmd)
+                .args(args)
+                .output()
+                .map(|x| String::from_utf8(x.stdout).unwrap())
+                .unwrap_or_else(|e| panic!("failed to execute  replace_ephemeral command: {}", e));
+            let r = x.replace("EPHEMERAL_TOKEN", &output.trim());
+            tracing::debug!("replaced ephemeral token: '{}'", r);
+            return r;
+        }
+    }
+    x
 }
 
 pub async fn pip_compile(
@@ -128,12 +151,20 @@ pub async fn pip_compile(
     write_file(job_dir, file, &requirements).await?;
 
     let mut args = vec!["-q", "--no-header", file, "--resolver=backtracking"];
-    let pip_extra_index_url = PIP_EXTRA_INDEX_URL.read().await.clone();
+    let mut pip_args = vec![];
+    let pip_extra_index_url = PIP_EXTRA_INDEX_URL
+        .read()
+        .await
+        .clone()
+        .map(handle_ephemeral_token);
     if let Some(url) = pip_extra_index_url.as_ref() {
-        args.extend(["--extra-index-url", url]);
+        args.extend(["--extra-index-url", url, "--no-emit-index-url"]);
+        pip_args.push(format!("--extra-index-url {}", url));
     }
-    if let Some(url) = PIP_INDEX_URL.as_ref() {
-        args.extend(["--index-url", url]);
+    let pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+    if let Some(url) = pip_index_url.as_ref() {
+        args.extend(["--index-url", url, "--no-emit-index-url"]);
+        pip_args.push(format!("--index-url {}", url));
     }
     if let Some(host) = PIP_TRUSTED_HOST.as_ref() {
         args.extend(["--trusted-host", host]);
@@ -141,6 +172,11 @@ pub async fn pip_compile(
     if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
         args.extend(["--cert", cert_path]);
     }
+    let pip_args_str = pip_args.join(" ");
+    if pip_args.len() > 0 {
+        args.extend(["--pip-args", &pip_args_str]);
+    }
+    tracing::debug!("pip-compile args: {:?}", args);
 
     let mut child_cmd = Command::new("pip-compile");
     child_cmd
@@ -258,7 +294,7 @@ def to_b_64(v: bytes):
     b64 = base64.b64encode(v)
     return b64.decode('ascii')
 
-replace_nan = re.compile(r'\bNaN\b')
+replace_nan = re.compile(r'(?:\bNaN\b|\\u0000)')
 try:
     res = inner_script.main(**args)
     typ = type(res)
@@ -371,6 +407,7 @@ mount {{
             .env("PATH", PATH_ENV.as_str())
             .env("TZ", TZ_ENV.as_str())
             .env("BASE_INTERNAL_URL", base_internal_url)
+            .env("HOME", HOME_ENV.as_str())
             .args(vec!["-u", "-m", "wrapper"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -657,13 +694,21 @@ pub async fn handle_python_reqs(
     let mut req_paths: Vec<String> = vec![];
     let mut vars = vec![("PATH", PATH_ENV.as_str())];
     let pip_extra_index_url;
+    let pip_index_url;
 
     if !*DISABLE_NSJAIL {
-        pip_extra_index_url = PIP_EXTRA_INDEX_URL.read().await.clone();
+        pip_extra_index_url = PIP_EXTRA_INDEX_URL
+            .read()
+            .await
+            .clone()
+            .map(handle_ephemeral_token);
+
         if let Some(url) = pip_extra_index_url.as_ref() {
             vars.push(("EXTRA_INDEX_URL", url));
         }
-        if let Some(url) = PIP_INDEX_URL.as_ref() {
+
+        pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+        if let Some(url) = pip_index_url.as_ref() {
             vars.push(("INDEX_URL", url));
         }
         if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
@@ -767,11 +812,18 @@ pub async fn handle_python_reqs(
                 "-t",
                 venv_p.as_str(),
             ];
-            let pip_extra_index_url = PIP_EXTRA_INDEX_URL.read().await.clone();
+            let pip_extra_index_url = PIP_EXTRA_INDEX_URL
+                .read()
+                .await
+                .clone()
+                .map(handle_ephemeral_token);
+
             if let Some(url) = pip_extra_index_url.as_ref() {
                 command_args.extend(["--extra-index-url", url]);
             }
-            if let Some(url) = PIP_INDEX_URL.as_ref() {
+            let pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+
+            if let Some(url) = pip_index_url.as_ref() {
                 command_args.extend(["--index-url", url]);
             }
             if let Some(cert_path) = PIP_INDEX_CERT.as_ref() {
@@ -780,6 +832,7 @@ pub async fn handle_python_reqs(
             if let Some(host) = PIP_TRUSTED_HOST.as_ref() {
                 command_args.extend(["--trusted-host", &host]);
             }
+
             let mut envs = vec![("PATH", PATH_ENV.as_str())];
             if let Some(http_proxy) = HTTP_PROXY.as_ref() {
                 envs.push(("HTTP_PROXY", http_proxy));
@@ -790,6 +843,8 @@ pub async fn handle_python_reqs(
             if let Some(no_proxy) = NO_PROXY.as_ref() {
                 envs.push(("NO_PROXY", no_proxy));
             }
+
+            tracing::debug!("pip install command: {:?}", command_args);
 
             let mut flock_cmd = Command::new(FLOCK_PATH.as_str());
             flock_cmd
@@ -888,6 +943,8 @@ pub async fn start_worker(
         None,
         None,
         None,
+        None,
+        None,
     )
     .await
     .to_vec();
@@ -952,7 +1009,7 @@ def to_b_64(v: bytes):
     b64 = base64.b64encode(v)
     return b64.decode('ascii')
 
-replace_nan = re.compile(r'\bNaN\b')
+replace_nan = re.compile(r'(?:\bNaN\b|\\u0000)')
 sys.stdout.write('start\n')
 
 for line in sys.stdin:
@@ -1001,6 +1058,8 @@ for line in sys.stdin:
         Uuid::nil().to_string().as_str(),
         "dedicted_worker",
         Some(script_path.to_string()),
+        None,
+        None,
         None,
         None,
         None,

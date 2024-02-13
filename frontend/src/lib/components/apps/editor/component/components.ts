@@ -45,7 +45,8 @@ import {
 	Menu,
 	Network,
 	Database,
-	UploadCloud
+	UploadCloud,
+	AlertTriangle
 } from 'lucide-svelte'
 import type {
 	Aligned,
@@ -61,8 +62,10 @@ import type { Size } from '../../svelte-grid/types'
 import type {
 	AppInputSpec,
 	EvalV2AppInput,
+	InputConnectionEval,
 	ResultAppInput,
-	StaticAppInput
+	StaticAppInput,
+	TemplateV2AppInput
 } from '../../inputType'
 
 export type BaseComponent<T extends string> = {
@@ -89,6 +92,7 @@ export type DateInputComponent = BaseComponent<'dateinputcomponent'>
 export type NumberInputComponent = BaseComponent<'numberinputcomponent'>
 export type CurrencyComponent = BaseComponent<'currencycomponent'>
 export type SliderComponent = BaseComponent<'slidercomponent'>
+export type DateSliderComponent = BaseComponent<'dateslidercomponent'>
 export type RangeComponent = BaseComponent<'rangecomponent'>
 export type HtmlComponent = BaseComponent<'htmlcomponent'>
 export type CustomComponent = BaseComponent<'customcomponent'> & {
@@ -208,6 +212,8 @@ export type DecisionTreeComponent = BaseComponent<'decisiontreecomponent'> & {
 	nodes: DecisionTreeNode[]
 }
 
+export type AlertComponent = BaseComponent<'alertcomponent'>
+
 export type TypedComponent =
 	| DBExplorerComponent
 	| DisplayComponent
@@ -275,6 +281,8 @@ export type TypedComponent =
 	| S3FileInputComponent
 	| AgChartsComponent
 	| AgChartsComponentEe
+	| AlertComponent
+	| DateSliderComponent
 
 export type AppComponent = BaseAppComponent & TypedComponent
 
@@ -320,7 +328,7 @@ export type PresetComponentConfig = {
 }
 
 export interface InitialAppComponent extends Partial<Aligned> {
-	componentInput?: StaticAppInput | ResultAppInput | EvalV2AppInput | undefined
+	componentInput?: StaticAppInput | ResultAppInput | EvalV2AppInput | TemplateV2AppInput | undefined
 	configuration: StaticRichConfigurations
 	// Number of subgrids
 	numberOfSubgrids?: number
@@ -404,7 +412,8 @@ const onSuccessClick = {
 				fieldType: 'text',
 				type: 'static',
 				value: '',
-				placeholder: '/apps/get/foo'
+				placeholder: '/apps/get/foo',
+				onDemandOnly: true
 			},
 			newTab: {
 				tooltip: 'Open the url in a new tab',
@@ -419,7 +428,8 @@ const onSuccessClick = {
 				value: [] as Array<{ id: string; index: number }>,
 				fieldType: 'array',
 				subFieldType: 'tab-select',
-				tooltip: 'Set the tabs id and index to go to on success'
+				tooltip: 'Set the tabs id and index to go to on success',
+				onDemandOnly: true
 			}
 		},
 		sendToast: {
@@ -428,7 +438,8 @@ const onSuccessClick = {
 				fieldType: 'text',
 				type: 'static',
 				value: '',
-				placeholder: 'Hello there'
+				placeholder: 'Hello there',
+				onDemandOnly: true
 			}
 		},
 		openModal: {
@@ -489,7 +500,8 @@ const onErrorClick = {
 				fieldType: 'text',
 				type: 'static',
 				value: '',
-				placeholder: '/apps/get/foo'
+				placeholder: '/apps/get/foo',
+				onDemandOnly: true
 			},
 			newTab: {
 				tooltip: 'Open the url in a new tab',
@@ -504,7 +516,8 @@ const onErrorClick = {
 				value: [] as Array<{ id: string; index: number }>,
 				fieldType: 'array',
 				subFieldType: 'tab-select',
-				tooltip: 'Set the tabs id and index to go to on error'
+				tooltip: 'Set the tabs id and index to go to on error',
+				onDemandOnly: true
 			}
 		},
 		sendErrorToast: {
@@ -513,7 +526,8 @@ const onErrorClick = {
 				fieldType: 'text',
 				type: 'static',
 				value: '',
-				placeholder: 'Hello there'
+				placeholder: 'Hello there',
+				onDemandOnly: true
 			},
 			appendError: {
 				tooltip: 'Append the error message to the toast',
@@ -639,6 +653,13 @@ const aggridcomponentconst = {
 				fieldType: 'object',
 				value: {},
 				tooltip: 'any configuration that can be passed to ag-grid top level'
+			},
+			compactness: {
+				type: 'static',
+				fieldType: 'select',
+				value: 'normal',
+				selectOptions: ['normal', 'compact', 'comfortable'],
+				tooltip: 'Change the row height'
 			}
 		},
 		componentInput: {
@@ -893,9 +914,15 @@ export const components = {
 			verticalAlignment: 'top',
 
 			componentInput: {
-				type: 'static',
+				type: 'templatev2',
 				fieldType: 'template',
-				value: 'Hello ${ctx.username}'
+				eval: 'Hello ${ctx.username}',
+				connections: [
+					{
+						id: 'username',
+						componentId: 'ctx'
+					}
+				] as InputConnectionEval[]
 			},
 			configuration: {
 				style: {
@@ -986,8 +1013,42 @@ export const components = {
 					value: false,
 					fieldType: 'boolean'
 				},
+
 				onSuccess: onSuccessClick,
-				onError: onErrorClick
+				onError: onErrorClick,
+				confirmationModal: {
+					type: 'oneOf',
+					selected: 'none',
+					tooltip: 'If defined, the user will be asked to confirm the action in a modal.',
+					labels: {
+						none: 'Do nothing',
+						confirmationModal: 'Show confirmation modal'
+					},
+					configuration: {
+						none: {},
+						confirmationModal: {
+							title: {
+								fieldType: 'text',
+								type: 'static',
+								value: 'Title',
+								placeholder: 'Confirmation modal title'
+							},
+							description: {
+								fieldType: 'text',
+								type: 'static',
+								value: 'Are you sure?',
+								placeholder: 'Are you sure?'
+							},
+							confirmationText: {
+								fieldType: 'text',
+								type: 'static',
+								value: 'Confirm',
+								placeholder: 'Confirm',
+								tooltip: 'The text of the button that confirms the action.'
+							}
+						}
+					}
+				}
 			}
 		}
 	},
@@ -1010,7 +1071,7 @@ export const components = {
 						accept: '*',
 						convertTo: 'base64'
 					},
-					placeholder: 'Enter URL or upload file'
+					placeholder: 'Enter URL or upload file (base64)'
 				},
 				filename: {
 					type: 'static',
@@ -1290,14 +1351,20 @@ export const components = {
 		},
 		initialData: {
 			componentInput: {
-				type: 'static',
+				type: 'templatev2',
 				fieldType: 'template',
-				value: `<img
+				eval: `<img
 src="https://images.unsplash.com/photo-1554629947-334ff61d85dc?ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&amp;ixlib=rb-1.2.1&amp;auto=format&amp;fit=crop&amp;w=1024&amp;h=1280&amp;q=80"
 >
 <h1 class="absolute top-4 left-2 text-white">
 Hello \${ctx.username}
-</h1>`
+</h1>`,
+				connections: [
+					{
+						id: 'username',
+						componentId: 'ctx'
+					}
+				] as InputConnectionEval[]
 			},
 			configuration: {}
 		}
@@ -1323,20 +1390,21 @@ Hello \${ctx.username}
 		name: 'Markdown',
 		icon: Heading1,
 		documentationLink: `${documentationBaseUrl}/html`,
-		dims: '1:2-1:2' as AppComponentDimensions,
+		dims: '1:2-4-4' as AppComponentDimensions,
 		customCss: {
 			container: { class: '', style: '' }
 		},
 		initialData: {
 			componentInput: {
-				type: 'static',
+				type: 'templatev2',
 				fieldType: 'template',
-				value: `# This is a header
+				eval: `# This is a header
 ## This is a subheader				
 This is a paragraph.
 				
 * This is a list
-* With two items`
+* With two items`,
+				connections: [] as InputConnectionEval[]
 			},
 			configuration: {
 				size: {
@@ -2028,6 +2096,67 @@ This is a paragraph.
 					type: 'static',
 					fieldType: 'boolean',
 					value: false
+				},
+				disabled: {
+					type: 'static',
+					value: false,
+					fieldType: 'boolean'
+				}
+			}
+		}
+	},
+	dateslidercomponent: {
+		name: 'Date Slider',
+		icon: SlidersHorizontal,
+		documentationLink: `${documentationBaseUrl}/date_slider`,
+		dims: '3:1-4:1' as AppComponentDimensions,
+		customCss: {
+			bar: { style: '', class: '' },
+			handle: { style: '', class: '' },
+			limits: { class: '', style: '' },
+			value: { class: '', style: '' }
+		},
+		initialData: {
+			verticalAlignment: 'center',
+			componentInput: undefined,
+			configuration: {
+				min: {
+					type: 'static',
+					value: '',
+					fieldType: 'date'
+				},
+				max: {
+					type: 'static',
+					value: '',
+					fieldType: 'date'
+				},
+				defaultValue: {
+					type: 'static',
+					value: '',
+					fieldType: 'date'
+				},
+				step: {
+					type: 'static',
+					value: 1,
+					fieldType: 'number',
+					tooltip: 'Number of days between each date suggestion'
+				},
+				vertical: {
+					type: 'static',
+					fieldType: 'boolean',
+					value: false
+				},
+				disabled: {
+					type: 'static',
+					value: false,
+					fieldType: 'boolean'
+				},
+				outputFormat: {
+					type: 'static',
+					value: undefined,
+					fieldType: 'text',
+					tooltip: 'See date-fns format for more information',
+					documentationLink: 'https://date-fns.org/v1.29.0/docs/format'
 				}
 			}
 		}
@@ -2632,7 +2761,7 @@ This is a paragraph.
 						accept: 'application/pdf',
 						convertTo: 'base64'
 					},
-					placeholder: 'Enter URL or upload file'
+					placeholder: 'Enter URL or upload file (base64)'
 				},
 				zoom: {
 					fieldType: 'number',
@@ -2731,6 +2860,21 @@ This is a paragraph.
 				}
 			},
 			configuration: {
+				defaultValues: {
+					type: 'static',
+					fieldType: 'object',
+					value: {},
+					tooltip:
+						'This enables setting default form values dynamically using an object: keys are field names, and values are the defaults.'
+				},
+				dynamicEnums: {
+					type: 'static',
+					fieldType: 'object',
+					value: {},
+					tooltip:
+						'This enables setting form enum values dynamically using an object: keys are field names, and values are arrays of strings.'
+				},
+
 				displayType: {
 					fieldType: 'boolean',
 					type: 'static',
@@ -3051,10 +3195,12 @@ This is a paragraph.
 							},
 							*/
 							pathTemplate: {
-								type: 'eval',
+								type: 'evalv2',
 								expr: `\`\${file.name}\``,
 								fieldType: 'template',
-							}
+								connections: [],
+								onDemandOnly: true
+							} as EvalV2AppInput
 						}
 					}
 				} as const
@@ -3064,7 +3210,7 @@ This is a paragraph.
 	dbexplorercomponent: {
 		name: 'Database Studio',
 		icon: Database,
-		documentationLink: `${documentationBaseUrl}/dbexplorer`,
+		documentationLink: `${documentationBaseUrl}/database_studio`,
 		dims: '2:8-6:8' as AppComponentDimensions,
 		customCss: {
 			container: { class: '', style: '' }
@@ -3155,6 +3301,75 @@ This is a paragraph.
 				}
 			},
 			componentInput: undefined
+		}
+	},
+	alertcomponent: {
+		name: 'Alert',
+		icon: AlertTriangle,
+		documentationLink: `${documentationBaseUrl}/alert`,
+		dims: '2:1-4:5' as AppComponentDimensions,
+		customCss: {
+			container: { class: '', style: '' },
+			background: { class: '', style: '' },
+			icon: { class: '', style: '' },
+			title: { class: '', style: '' },
+			description: { class: '', style: '' }
+		},
+		initialData: {
+			verticalAlignment: 'center',
+			componentInput: undefined,
+			configuration: {
+				type: {
+					fieldType: 'select',
+					type: 'static',
+					selectOptions: [
+						{ value: 'info', label: 'Info' },
+						{ value: 'success', label: 'Success' },
+						{ value: 'warning', label: 'Warning' },
+						{ value: 'error', label: 'Error' }
+					],
+					value: 'info'
+				},
+				title: {
+					type: 'static',
+					value: 'Title',
+					fieldType: 'text'
+				},
+				description: {
+					type: 'static',
+					value: 'Description',
+					fieldType: 'text'
+				},
+				notRounded: {
+					type: 'static',
+					value: false,
+					fieldType: 'boolean'
+				},
+				tooltip: {
+					type: 'static',
+					value: '',
+					fieldType: 'text'
+				},
+				size: {
+					type: 'static',
+					value: 'sm',
+					fieldType: 'select',
+					selectOptions: [
+						{ value: 'xs', label: 'Extra Small' },
+						{ value: 'sm', label: 'Small' }
+					]
+				},
+				collapsible: {
+					type: 'static',
+					value: false,
+					fieldType: 'boolean'
+				},
+				initiallyCollapsed: {
+					type: 'static',
+					value: false,
+					fieldType: 'boolean'
+				}
+			}
 		}
 	}
 } as const

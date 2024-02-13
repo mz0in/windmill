@@ -34,6 +34,7 @@ use chrono::Utc;
 #[cfg(feature = "stripe")]
 use chrono::{Datelike, TimeZone, Timelike};
 use magic_crypt::MagicCryptTrait;
+use regex::Regex;
 #[cfg(feature = "stripe")]
 use stripe::CustomerId;
 use uuid::Uuid;
@@ -44,7 +45,7 @@ use windmill_common::schedule::Schedule;
 use windmill_common::users::username_to_permissioned_as;
 use windmill_common::variables::build_crypt;
 use windmill_common::worker::CLOUD_HOSTED;
-use windmill_common::workspaces::WorkspaceGitRepo;
+use windmill_common::workspaces::WorkspaceGitSyncSettings;
 use windmill_common::{
     error::{to_anyhow, Error, JsonResult, Result},
     flows::Flow,
@@ -91,6 +92,8 @@ pub fn workspaced_service() -> Router {
             post(edit_large_file_storage_config),
         )
         .route("/edit_git_sync_config", post(edit_git_sync_config))
+        .route("/edit_default_app", post(edit_default_app))
+        .route("/default_app", get(get_default_app))
         .route("/leave", post(leave_workspace));
 
     #[cfg(feature = "stripe")]
@@ -151,6 +154,7 @@ pub struct WorkspaceSettings {
     pub slack_email: String,
     pub auto_invite_domain: Option<String>,
     pub auto_invite_operator: Option<bool>,
+    pub auto_add: Option<bool>,
     pub customer_id: Option<String>,
     pub plan: Option<String>,
     pub webhook: Option<String>,
@@ -161,7 +165,8 @@ pub struct WorkspaceSettings {
     pub error_handler_extra_args: Option<serde_json::Value>,
     pub error_handler_muted_on_cancel: Option<bool>,
     pub large_file_storage: Option<serde_json::Value>, // effectively: DatasetsStorage
-    pub git_sync: Option<serde_json::Value>,           // effectively: WorkspaceGitRepo
+    pub git_sync: Option<serde_json::Value>,           // effectively: WorkspaceGitSyncSettings
+    pub default_app: Option<String>,
 }
 
 #[derive(FromRow, Serialize, Debug)]
@@ -206,6 +211,7 @@ struct EditDeployTo {
 struct EditAutoInvite {
     operator: Option<bool>,
     invite_all: Option<bool>,
+    auto_add: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -783,6 +789,83 @@ async fn is_allowed_auto_domain(ApiAuthed { email, .. }: ApiAuthed) -> JsonResul
     return Ok(Json(!BANNED_DOMAINS.contains(domain)));
 }
 
+async fn auto_add_user(
+    email: &str,
+    w_id: &str,
+    operator: &bool,
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    let mut username = email
+        .split('@')
+        .next()
+        .unwrap()
+        .to_string()
+        .replace(".", "");
+
+    username = INVALID_USERNAME_CHARS
+        .replace_all(&mut username, "")
+        .to_string();
+
+    if username.is_empty() {
+        username = "user".to_string()
+    }
+
+    let base_username = username.clone();
+    let mut username_conflict = true;
+    let mut i = 1;
+    while username_conflict {
+        if i > 1000 {
+            return Err(Error::InternalErr(format!(
+                "too many username conflicts for {}",
+                email
+            )));
+        }
+        if i > 1 {
+            username = format!("{}{}", base_username, i)
+        }
+        username_conflict = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM usr WHERE username = $1 AND workspace_id = $2)",
+            &username,
+            &w_id
+        )
+        .fetch_one(&mut **tx)
+        .await?
+        .unwrap_or(false);
+        i += 1;
+    }
+
+    sqlx::query!(
+        "INSERT INTO usr (workspace_id, username, email, is_admin, operator) VALUES ($1, $2, $3, false, $4)",
+        &w_id,
+        &username,
+        &email,
+        &operator
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query_as!(
+        Group,
+        "INSERT INTO usr_to_group (workspace_id, usr, group_) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        &w_id,
+        username,
+        "all",
+    )
+    .execute(&mut **tx)
+    .await?;
+    audit_log(
+        &mut **tx,
+        &username,
+        "users.auto_invite_add",
+        ActionKind::Create,
+        &w_id,
+        Some(email),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn edit_auto_invite(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -813,7 +896,7 @@ async fn edit_auto_invite(
 
     let mut tx = db.begin().await?;
 
-    if let Some(operator) = ea.operator {
+    if let (Some(operator), Some(auto_add)) = (ea.operator, ea.auto_add) {
         if BANNED_DOMAINS.contains(domain) {
             return Err(Error::BadRequest(format!(
                 "Domain {} is not allowed",
@@ -822,30 +905,46 @@ async fn edit_auto_invite(
         }
 
         sqlx::query!(
-            "UPDATE workspace_settings SET auto_invite_domain = $1, auto_invite_operator = $2 WHERE workspace_id = $3",
+            "UPDATE workspace_settings SET auto_invite_domain = $1, auto_invite_operator = $2, auto_add = $4 WHERE workspace_id = $3",
             domain,
             operator,
-            &w_id
+            &w_id,
+            auto_add,
         )
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query!(
-            "INSERT INTO workspace_invite
-        (workspace_id, email, is_admin, operator)
-        SELECT $1::text, email, false, $3 FROM password WHERE ($2::text = '*' OR email LIKE CONCAT('%', $2::text)) AND NOT EXISTS (
-            SELECT 1 FROM usr WHERE workspace_id = $1::text AND email = password.email
-        )
-        ON CONFLICT DO NOTHING",
-            &w_id,
-            &domain,
-            operator
-        )
-        .execute(&mut *tx)
-        .await?;
+        if auto_add {
+            let users = sqlx::query!(
+                "SELECT email FROM password WHERE ($2::text = '*' OR email LIKE CONCAT('%', $2::text)) AND NOT EXISTS (
+                    SELECT 1 FROM usr WHERE workspace_id = $1::text AND email = password.email
+                )",
+                &w_id,
+                domain
+            )
+            .fetch_all(&mut *tx).await?;
+
+            for user in users {
+                auto_add_user(&user.email, &w_id, &operator, &mut tx).await?;
+            }
+        } else {
+            sqlx::query!(
+                "INSERT INTO workspace_invite
+            (workspace_id, email, is_admin, operator)
+            SELECT $1::text, email, false, $3 FROM password WHERE ($2::text = '*' OR email LIKE CONCAT('%', $2::text)) AND NOT EXISTS (
+                SELECT 1 FROM usr WHERE workspace_id = $1::text AND email = password.email
+            )
+            ON CONFLICT DO NOTHING",
+                &w_id,
+                domain,
+                operator
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
     } else {
         sqlx::query!(
-            "UPDATE workspace_settings SET auto_invite_domain = NULL, auto_invite_operator = NULL WHERE workspace_id = $1",
+            "UPDATE workspace_settings SET auto_invite_domain = NULL, auto_invite_operator = NULL, auto_add = NULL WHERE workspace_id = $1",
             &w_id,
         )
         .execute(&mut *tx)
@@ -1044,7 +1143,7 @@ async fn edit_large_file_storage_config(
 
 #[derive(Deserialize)]
 struct EditGitSyncConfig {
-    git_sync_settings: Option<Vec<WorkspaceGitRepo>>,
+    git_sync_settings: Option<WorkspaceGitSyncSettings>,
 }
 
 async fn edit_git_sync_config(
@@ -1078,7 +1177,7 @@ async fn edit_git_sync_config(
     .await?;
 
     if let Some(git_sync_settings) = new_config.git_sync_settings {
-        let serialized_config = serde_json::to_value::<Vec<WorkspaceGitRepo>>(git_sync_settings)
+        let serialized_config = serde_json::to_value::<WorkspaceGitSyncSettings>(git_sync_settings)
             .map_err(|err| Error::InternalErr(err.to_string()))?;
 
         sqlx::query!(
@@ -1101,6 +1200,84 @@ async fn edit_git_sync_config(
     Ok(format!("Edit git sync config for workspace {}", &w_id))
 }
 
+#[derive(Deserialize)]
+struct EditDefaultApp {
+    default_app_path: Option<String>,
+}
+
+async fn edit_default_app(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+    ApiAuthed { is_admin, username, .. }: ApiAuthed,
+    Json(new_config): Json<EditDefaultApp>,
+) -> Result<String> {
+    #[cfg(not(feature = "enterprise"))]
+    {
+        return Err(Error::BadRequest(
+            "Setting a workspace default app is only available on Windmill Enterprise Edition"
+                .to_string(),
+        ));
+    }
+
+    require_admin(is_admin, &username)?;
+
+    let mut tx = db.begin().await?;
+
+    let args_for_audit = format!("{:?}", new_config.default_app_path);
+    audit_log(
+        &mut *tx,
+        &authed.username,
+        "workspaces.edit_default_app",
+        ActionKind::Update,
+        &w_id,
+        Some(&authed.email),
+        Some([("args_for_audit", args_for_audit.as_str())].into()),
+    )
+    .await?;
+
+    if let Some(default_app_path) = new_config.default_app_path {
+        sqlx::query!(
+            "UPDATE workspace_settings SET default_app = $1 WHERE workspace_id = $2",
+            default_app_path,
+            &w_id
+        )
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query!(
+            "UPDATE workspace_settings SET default_app = NULL WHERE workspace_id = $1",
+            &w_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(format!("Edit default app for workspace {}", &w_id))
+}
+
+#[derive(Serialize)]
+struct WorkspaceDefaultApp {
+    pub default_app_path: Option<String>,
+}
+async fn get_default_app(
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+) -> JsonResult<WorkspaceDefaultApp> {
+    let mut tx = db.begin().await?;
+    let default_app_path = sqlx::query_scalar!(
+        "SELECT default_app FROM workspace_settings WHERE workspace_id = $1",
+        &w_id
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|err| Error::InternalErr(format!("getting default_app: {err}")))?;
+    tx.commit().await?;
+
+    Ok(Json(WorkspaceDefaultApp { default_app_path }))
+}
+
 async fn edit_error_handler(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1117,7 +1294,7 @@ async fn edit_error_handler(
         "INSERT INTO group_ (workspace_id, name, summary, extra_perms) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
         w_id,
         "error_handler",
-        "The group the error handler acts on belhalf of",
+        "The group the error handler acts on behalf of",
         serde_json::json!({username_to_permissioned_as(&authed.username): true})
     )
     .execute(&mut *tx)
@@ -1219,6 +1396,8 @@ lazy_static::lazy_static! {
             Err(_) => true,
         }
     };
+
+    pub static ref INVALID_USERNAME_CHARS: Regex = Regex::new(r"[^A-Za-z0-9_]").unwrap();
 
 }
 
@@ -1622,23 +1801,28 @@ pub async fn invite_user_to_all_auto_invite_worspaces(db: &DB, email: &str) -> R
     let mut tx = db.begin().await?;
     let domain = email.split('@').last().unwrap();
     let workspaces = sqlx::query!(
-        "SELECT workspace_id, auto_invite_operator FROM workspace_settings WHERE auto_invite_domain = $1 OR auto_invite_domain = '*'",
+        "SELECT workspace_id, auto_invite_operator, auto_add FROM workspace_settings WHERE auto_invite_domain = $1 OR auto_invite_domain = '*'",
         domain
     )
     .fetch_all(&mut *tx)
     .await?;
     for r in workspaces {
-        sqlx::query!(
-            "INSERT INTO workspace_invite
-                (workspace_id, email, is_admin, operator)
-                VALUES ($1, $2, false, $3)
-                ON CONFLICT DO NOTHING",
-            r.workspace_id,
-            email,
-            r.auto_invite_operator
-        )
-        .execute(&mut *tx)
-        .await?;
+        if r.auto_add.is_some() && r.auto_add.unwrap() {
+            let operator = r.auto_invite_operator.unwrap_or(false);
+            auto_add_user(email, &r.workspace_id, &operator, &mut tx).await?;
+        } else {
+            sqlx::query!(
+                "INSERT INTO workspace_invite
+                    (workspace_id, email, is_admin, operator)
+                    VALUES ($1, $2, false, $3)
+                    ON CONFLICT DO NOTHING",
+                r.workspace_id,
+                email,
+                r.auto_invite_operator
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     tx.commit().await?;
     Ok(())
@@ -1812,8 +1996,7 @@ struct ScriptMetadata {
     summary: String,
     description: String,
     schema: Option<Schema>,
-    is_template: bool,
-    lock: Vec<String>,
+    lock: Option<String>,
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     envs: Option<Vec<String>>,
@@ -1901,6 +2084,7 @@ struct ArchiveQueryParams {
     skip_variables: Option<bool>,
     skip_resources: Option<bool>,
     include_schedules: Option<bool>,
+    default_ts: Option<String>,
 }
 
 #[inline]
@@ -1908,11 +2092,10 @@ pub fn to_string_without_metadata<T>(value: &T, preserve_extra_perms: bool) -> R
 where
     T: ?Sized + Serialize,
 {
-    let value = serde_json::to_value(value).map_err(to_anyhow)?;
+    let mut value = serde_json::to_value(value).map_err(to_anyhow)?;
     value
-        .as_object()
+        .as_object_mut()
         .map(|obj| {
-            let mut obj = obj.clone();
             for key in [
                 "workspace_id",
                 "path",
@@ -1935,6 +2118,10 @@ where
                 }
             }
 
+            if let Some(o2) = obj.get_mut("policy").and_then(|x| x.as_object_mut()) {
+                o2.remove("on_behalf_of");
+                o2.remove("on_behalf_of_email");
+            }
             if !preserve_extra_perms && obj.contains_key("extra_perms") {
                 obj.remove("extra_perms");
             }
@@ -1947,6 +2134,7 @@ where
 
 async fn tarball_workspace(
     authed: ApiAuthed,
+    Extension(user_db): Extension<UserDB>,
     Extension(db): Extension<DB>,
     Path(w_id): Path<String>,
     Query(ArchiveQueryParams {
@@ -1957,9 +2145,12 @@ async fn tarball_workspace(
         skip_secrets,
         skip_variables,
         include_schedules,
+        default_ts,
     }): Query<ArchiveQueryParams>,
 ) -> Result<([(headers::HeaderName, String); 2], impl IntoResponse)> {
-    require_admin(authed.is_admin, &authed.username)?;
+    // require_admin(authed.is_admin, &authed.username)?;
+
+    let mut tx = user_db.begin(&authed).await?;
 
     let tmp_dir = TempDir::new_in("/tmp/windmill/")?;
 
@@ -1978,7 +2169,7 @@ async fn tarball_workspace(
     {
         let folders = sqlx::query_as::<_, Folder>("SELECT * FROM folder WHERE workspace_id = $1")
             .bind(&w_id)
-            .fetch_all(&db)
+            .fetch_all(&mut *tx)
             .await?;
 
         for folder in folders {
@@ -1998,13 +2189,19 @@ async fn tarball_workspace(
              workspace_id = $1)",
         )
         .bind(&w_id)
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for script in scripts {
             let ext = match script.language {
                 ScriptLang::Python3 => "py",
-                ScriptLang::Deno => "ts",
+                ScriptLang::Deno => {
+                    if default_ts.as_ref().is_some_and(|x| x == "bun") {
+                        "deno.ts"
+                    } else {
+                        "ts"
+                    }
+                }
                 ScriptLang::Go => "go",
                 ScriptLang::Bash => "sh",
                 ScriptLang::Powershell => "ps1",
@@ -2015,25 +2212,24 @@ async fn tarball_workspace(
                 ScriptLang::Mssql => "ms.sql",
                 ScriptLang::Graphql => "gql",
                 ScriptLang::Nativets => "fetch.ts",
-                ScriptLang::Bun => "bun.ts",
+                ScriptLang::Bun => {
+                    if default_ts.as_ref().is_some_and(|x| x == "bun") {
+                        "ts"
+                    } else {
+                        "bun.ts"
+                    }
+                }
             };
             archive
                 .write_to_archive(&script.content, &format!("{}.{}", script.path, ext))
                 .await?;
 
-            let lock = script
-                .lock
-                .unwrap_or_else(|| "".to_string())
-                .lines()
-                .map(|x| x.to_string())
-                .collect();
             let metadata = ScriptMetadata {
                 summary: script.summary,
                 description: script.description,
                 schema: script.schema,
-                is_template: script.is_template,
                 kind: script.kind.to_string(),
-                lock,
+                lock: script.lock,
                 envs: script.envs,
                 concurrent_limit: script.concurrent_limit,
                 concurrency_time_window_s: script.concurrency_time_window_s,
@@ -2059,7 +2255,7 @@ async fn tarball_workspace(
             "SELECT * FROM resource WHERE workspace_id = $1 AND resource_type != 'state' AND resource_type != 'cache'",
             &w_id
         )
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for resource in resources {
@@ -2076,7 +2272,7 @@ async fn tarball_workspace(
             "SELECT * FROM resource_type WHERE workspace_id = $1",
             &w_id
         )
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for resource_type in resource_types {
@@ -2095,7 +2291,7 @@ async fn tarball_workspace(
             "SELECT * FROM flow WHERE workspace_id = $1 AND archived = false",
         )
         .bind(&w_id)
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for flow in flows {
@@ -2114,7 +2310,7 @@ async fn tarball_workspace(
                 "SELECT * FROM variable WHERE workspace_id = $1 AND is_secret = false"
             })
             .bind(&w_id)
-            .fetch_all(&db)
+            .fetch_all(&mut *tx)
             .await?;
 
         let mc = build_crypt(&mut db.begin().await?, &w_id).await?;
@@ -2145,7 +2341,7 @@ async fn tarball_workspace(
             WHERE app.workspace_id = $1 AND app_version.id = app.versions[array_upper(app.versions, 1)]",
             &w_id
         )
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for app in apps {
@@ -2163,7 +2359,7 @@ async fn tarball_workspace(
             WHERE workspace_id = $1",
             &w_id
         )
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await?;
 
         for schedule in schedules {

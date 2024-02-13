@@ -82,7 +82,7 @@ pub struct ListableApp {
     pub extra_perms: serde_json::Value,
     pub execution_mode: String,
     pub starred: bool,
-    pub edited_at: chrono::DateTime<chrono::Utc>,
+    pub edited_at: Option<chrono::DateTime<chrono::Utc>>,
     pub has_draft: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_only: Option<bool>,
@@ -191,13 +191,12 @@ async fn list_search_apps(
     Path(w_id): Path<String>,
     Extension(user_db): Extension<UserDB>,
 ) -> JsonResult<Vec<SearchApp>> {
-    let mut tx = user_db.begin(&authed).await?;
-
     #[cfg(feature = "enterprise")]
     let n = 1000;
 
     #[cfg(not(feature = "enterprise"))]
     let n = 3;
+    let mut tx = user_db.begin(&authed).await?;
 
     let rows = sqlx::query_as!(
         SearchApp,
@@ -772,7 +771,7 @@ async fn update_app(
                 require_owner_of_path(&authed, path)?;
 
                 let exists = sqlx::query_scalar!(
-                    "SELECT EXISTS(SELECT 1 FROM raw_app WHERE path = $1 AND workspace_id = $2)",
+                    "SELECT EXISTS(SELECT 1 FROM app WHERE path = $1 AND workspace_id = $2)",
                     npath,
                     w_id
                 )
@@ -811,10 +810,11 @@ async fn update_app(
         sqlb.returning("path");
 
         let sql = sqlb.sql().map_err(|e| Error::InternalErr(e.to_string()))?;
+        tracing::error!("update_app sql: {}", sql);
         let npath_o: Option<String> = sqlx::query_scalar(&sql).fetch_optional(&mut tx).await?;
         not_found_if_none(npath_o, "App", path)?
     } else {
-        "".to_string()
+        path.to_owned()
     };
     let v_id = if let Some(nvalue) = &ns.value {
         let app_id = sqlx::query_scalar!(
@@ -845,9 +845,23 @@ async fn update_app(
         )
         .execute(&mut tx)
         .await?;
-        Some(v_id)
+        v_id
     } else {
-        None
+        let v_id = sqlx::query_scalar!(
+            "SELECT  app.versions[array_upper(app.versions, 1)] FROM app WHERE path = $1 AND workspace_id = $2",
+            npath,
+            w_id
+        )
+        .fetch_one(&mut tx)
+        .await?;
+        if let Some(v_id) = v_id {
+            v_id
+        } else {
+            return Err(Error::BadRequest(format!(
+                "App with path {} not found",
+                npath
+            )));
+        }
     };
 
     sqlx::query!(
@@ -871,40 +885,38 @@ async fn update_app(
 
     let tx: PushIsolationLevel<'_, rsmq_async::MultiplexedRsmq> =
         PushIsolationLevel::Transaction(tx);
-    if let Some(v_id) = v_id {
-        let mut args: HashMap<String, serde_json::Value> = HashMap::new();
-        if let Some(dm) = ns.deployment_message {
-            args.insert("deployment_message".to_string(), json!(dm));
-        }
-        args.insert("parent_path".to_string(), json!(path));
-
-        let (dependency_job_uuid, new_tx) = push(
-            &db,
-            tx,
-            &w_id,
-            JobPayload::AppDependencies { path: npath.clone(), version: v_id },
-            args,
-            &authed.username,
-            &authed.email,
-            windmill_common::users::username_to_permissioned_as(&authed.username),
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            None,
-            true,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-        tracing::info!("Pushed app dependency job {}", dependency_job_uuid);
-        new_tx.commit().await?;
+    let mut args: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(dm) = ns.deployment_message {
+        args.insert("deployment_message".to_string(), json!(dm));
     }
+    args.insert("parent_path".to_string(), json!(path));
+
+    let (dependency_job_uuid, new_tx) = push(
+        &db,
+        tx,
+        &w_id,
+        JobPayload::AppDependencies { path: npath.clone(), version: v_id },
+        args,
+        &authed.username,
+        &authed.email,
+        windmill_common::users::username_to_permissioned_as(&authed.username),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        None,
+        true,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    tracing::info!("Pushed app dependency job {}", dependency_job_uuid);
+    new_tx.commit().await?;
 
     webhook.send_message(
         w_id.clone(),

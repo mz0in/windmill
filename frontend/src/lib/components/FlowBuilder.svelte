@@ -10,7 +10,8 @@
 		Script,
 		type HubScriptKind,
 		type OpenFlow,
-		type RawScript
+		type RawScript,
+		type InputTransform
 	} from '$lib/gen'
 	import { initHistory, push, redo, undo } from '$lib/history'
 	import {
@@ -474,7 +475,14 @@
 		genFlow: undefined,
 		shouldUpdatePropertyType: writable<{
 			[key: string]: 'static' | 'javascript' | undefined
-		}>({})
+		}>({}),
+		exprsToSet: writable<{
+			[key: string]: InputTransform | any | undefined
+		}>({}),
+		generatedExprs: writable<{
+			[key: string]: string | undefined
+		}>({}),
+		stepInputsLoading: writable<boolean>(false)
 	}
 
 	setContext('FlowCopilotContext', flowCopilotContext)
@@ -990,7 +998,7 @@
 		<div class="flex flex-col flex-1 h-screen">
 			<!-- Nav between steps-->
 			<div
-				class="justify-between flex flex-row items-center pl-2.5 pr-6 space-x-4 scrollbar-hidden max-h-12 h-full relative"
+				class="justify-between flex flex-row items-center pl-2.5 pr-6 space-x-4 scrollbar-hidden overflow-x-auto max-h-12 h-full relative"
 			>
 				{#if $copilotCurrentStepStore !== undefined}
 					<div transition:fade class="absolute inset-0 bg-gray-500 bg-opacity-75 z-[900] !m-0" />
@@ -1110,7 +1118,7 @@
 						on:click={() => saveDraft()}
 						disabled={!newFlow && !savedFlow}
 					>
-						Save draft&nbsp;<Kbd small>Ctrl</Kbd><Kbd small>S</Kbd>
+						Draft&nbsp;<Kbd small>Ctrl</Kbd><Kbd small>S</Kbd>
 					</Button>
 					<Button
 						loading={loadingSave}

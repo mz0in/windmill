@@ -215,10 +215,14 @@
 			(o) => nativeLanguagesCategory?.includes(o[0]) ?? false
 		)
 
-		filteredConnectsManual = [
-			...(filteredNativeLanguages ?? []),
-			...(filteredConnectsManual ?? []).filter(([key, _]) => !nativeLanguagesCategory.includes(key))
-		]
+		try {
+			filteredConnectsManual = [
+				...(filteredNativeLanguages ?? []),
+				...(filteredConnectsManual ?? []).filter(
+					([key, _]) => !nativeLanguagesCategory.includes(key)
+				)
+			]
+		} catch (e) {}
 	}
 
 	async function next() {
@@ -274,9 +278,11 @@
 
 			const resourceValue = args
 
+			let saveVariable = false
 			if (!manual || linkedSecret != undefined) {
 				let v = manual ? args[linkedSecret ?? ''] : value
-				if (!v.startsWith('$var:')) {
+				if (typeof v == 'string' && v != '' && !v.startsWith('$var:')) {
+					saveVariable = true
 					await VariableService.createVariable({
 						workspace: $workspaceStore!,
 						requestBody: {
@@ -304,7 +310,7 @@
 				}
 			})
 			dispatch('refresh', path)
-			sendUserToast(`App token set at resource and variable path: ${path}`)
+			sendUserToast(`Saved resource${saveVariable ? ' and variable' : ''} path: ${path}`)
 			drawer.closeDrawer?.()
 		}
 	}
@@ -513,8 +519,8 @@
 					</div>
 				{/if}
 			{:else if !emptyString(resourceTypeInfo?.description)}
-				<h2 class="mt-4 mb-2">Resource type description</h2>
-				<div>
+				<h3 class="mt-6 mb-2">{resourceTypeInfo?.name} description</h3>
+				<div class="text-sm">
 					<Markdown md={urlize(resourceTypeInfo?.description ?? '', 'md')} />
 				</div>
 			{/if}

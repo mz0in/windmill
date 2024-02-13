@@ -300,7 +300,7 @@ mod suspend_resume {
                 let second = completed.next().await.unwrap();
                 // print_job(second, &db).await;
 
-                let token = windmill_worker::create_token_for_owner(&db, "test-workspace", "u/test-user", "", 100, "").await.unwrap();
+                let token = windmill_worker::create_token_for_owner(&db, "test-workspace", "u/test-user", "", 100, "", &Uuid::nil()).await.unwrap();
                 let secret = reqwest::get(format!(
                     "http://localhost:{port}/api/w/test-workspace/jobs/job_signature/{second}/0?token={token}&approver=ruben"
                 ))
@@ -401,7 +401,7 @@ mod suspend_resume {
                 /* ... and send a request resume it. */
                 let second = completed.next().await.unwrap();
 
-                let token = windmill_worker::create_token_for_owner(&db, "test-workspace", "u/test-user", "", 100, "").await.unwrap();
+                let token = windmill_worker::create_token_for_owner(&db, "test-workspace", "u/test-user", "", 100, "", &Uuid::nil()).await.unwrap();
                 let secret = reqwest::get(format!(
                     "http://localhost:{port}/api/w/test-workspace/jobs/job_signature/{second}/0?token={token}"
                 ))
@@ -1895,7 +1895,7 @@ async fn test_invalid_first_step(db: Pool<Postgres>) {
 
     assert_eq!(
         job.json_result().unwrap(),
-        serde_json::json!( {"error":  {"name": "InternalErr", "message": "Expected an array value, found: invalid type: map, expected a sequence at line 1 column 0"}})
+        serde_json::json!( {"error":  {"name": "InternalErr", "message": "Expected an array value in the iterator expression, found: invalid type: map, expected a sequence at line 1 column 0"}})
     );
 }
 
@@ -3148,7 +3148,7 @@ async fn run_deployed_relative_imports(db: &Pool<Postgres>, script_content: Stri
             is_template: None,
             kind: None,
             parent_hash: None,
-            lock: vec![],
+            lock: None,
             summary: "".to_string(),
             tag: None,
             schema: std::collections::HashMap::new(),
@@ -3158,6 +3158,7 @@ async fn run_deployed_relative_imports(db: &Pool<Postgres>, script_content: Stri
             timeout: None,
             restart_unless_cancelled: None,
             deployment_message: None,
+            concurrency_key: None,
         },
     ).await.unwrap();
 

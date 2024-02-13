@@ -25,7 +25,8 @@ import type {
 	StaticAppInput,
 	EvalAppInput,
 	EvalV2AppInput,
-	InputConnectionEval
+	InputConnectionEval,
+	StaticAppInputOnDemand
 } from '../inputType'
 import { get, type Writable } from 'svelte/store'
 import { deepMergeWithPriority } from '$lib/utils'
@@ -375,7 +376,6 @@ export function insertNewGridItem(
 
 	const newItem = createNewGridItem(grid, id, data, columns)
 	grid.push(newItem)
-
 	return id
 }
 
@@ -640,7 +640,9 @@ export type InitConfig<
 				configuration: {
 					[Choice in keyof T[Property]['configuration']]: {
 						[IT in keyof T[Property]['configuration'][Choice]]: T[Property]['configuration'][Choice][IT] extends StaticAppInput
-							? T[Property]['configuration'][Choice][IT]['value'] | undefined
+							? T[Property]['configuration'][Choice][IT] extends StaticAppInputOnDemand
+								? () => Promise<T[Property]['configuration'][Choice][IT]['value'] | undefined>
+								: T[Property]['configuration'][Choice][IT]['value'] | undefined
 							: undefined
 					}
 				}

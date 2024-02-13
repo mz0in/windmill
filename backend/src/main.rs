@@ -23,11 +23,11 @@ use windmill_api::HTTP_CLIENT;
 use windmill_common::{
     global_settings::{
         BASE_URL_SETTING, BUNFIG_INSTALL_SCOPES_SETTING, CUSTOM_TAGS_SETTING,
-        DISABLE_STATS_SETTING, ENV_SETTINGS, EXPOSE_DEBUG_METRICS_SETTING, EXPOSE_METRICS_SETTING,
-        EXTRA_PIP_INDEX_URL_SETTING, JOB_DEFAULT_TIMEOUT_SECS_SETTING, KEEP_JOB_DIR_SETTING,
-        LICENSE_KEY_SETTING, NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING,
-        REQUEST_SIZE_LIMIT_SETTING, REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING,
-        RETENTION_PERIOD_SECS_SETTING,
+        DEFAULT_TAGS_PER_WORKSPACE_SETTING, DISABLE_STATS_SETTING, ENV_SETTINGS,
+        EXPOSE_DEBUG_METRICS_SETTING, EXPOSE_METRICS_SETTING, EXTRA_PIP_INDEX_URL_SETTING,
+        JOB_DEFAULT_TIMEOUT_SECS_SETTING, KEEP_JOB_DIR_SETTING, LICENSE_KEY_SETTING,
+        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, REQUEST_SIZE_LIMIT_SETTING,
+        REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING, RETENTION_PERIOD_SECS_SETTING,
     },
     stats::schedule_stats,
     utils::{rd_string, Mode},
@@ -42,8 +42,8 @@ use windmill_worker::{
 };
 
 use crate::monitor::{
-    initial_load, load_keep_job_dir, load_require_preexisting_user, monitor_db, monitor_pool,
-    reload_base_url_setting, reload_bunfig_install_scopes_setting,
+    initial_load, load_keep_job_dir, load_require_preexisting_user, load_tag_per_workspace_enabled,
+    monitor_db, monitor_pool, reload_base_url_setting, reload_bunfig_install_scopes_setting,
     reload_extra_pip_index_url_setting, reload_job_default_timeout_setting, reload_license_key,
     reload_npm_config_registry_setting, reload_retention_period_setting, reload_server_config,
     reload_worker_config,
@@ -211,37 +211,8 @@ async fn main() -> anyhow::Result<()> {
     let is_agent = mode == Mode::Agent;
 
     if !is_agent {
-        let last_mig_version = sqlx::query_scalar!(
-            "select version from _sqlx_migrations order by version desc limit 1;"
-        )
-        .fetch_optional(&db)
-        .await
-        .ok()
-        .flatten();
-
-        tracing::info!(
-        "Last migration version: {last_mig_version:?}. Starting potential migration of the db if first connection on a new windmill version (can take a while depending on the migration) ...",
-    );
-
         // migration code to avoid break
         windmill_api::migrate_db(&db).await?;
-
-        let new_last_mig_version = sqlx::query_scalar!(
-            "select version from _sqlx_migrations order by version desc limit 1;"
-        )
-        .fetch_optional(&db)
-        .await
-        .ok()
-        .flatten();
-
-        if last_mig_version != new_last_mig_version {
-            tracing::info!(
-                "Completed migration of the db. New  migration version: {}",
-                new_last_mig_version.unwrap_or(-1)
-            );
-        } else {
-            tracing::info!("No migration, db was up-to-date");
-        }
     }
     let (killpill_tx, killpill_rx) = tokio::sync::broadcast::channel::<()>(2);
     let (killpill_phase2_tx, killpill_phase2_rx) = tokio::sync::broadcast::channel::<()>(2);
@@ -416,6 +387,11 @@ Windmill Community Edition {GIT_VERSION}
                                                         tracing::error!(error = %e, "Could not reload license key setting");
                                                     }
                                                 },
+                                                DEFAULT_TAGS_PER_WORKSPACE_SETTING => {
+                                                    if let Err(e) = load_tag_per_workspace_enabled(&db).await {
+                                                        tracing::error!("Error loading default tag per workpsace: {e}");
+                                                    }
+                                                },
                                                 RETENTION_PERIOD_SECS_SETTING => {
                                                     reload_retention_period_setting(&db).await
                                                 },
@@ -522,6 +498,8 @@ Windmill Community Edition {GIT_VERSION}
     } else {
         tracing::info!("Nothing to do, exiting.");
     }
+    tracing::info!("Exiting connection pool");
+    db.close().await;
     Ok(())
 }
 

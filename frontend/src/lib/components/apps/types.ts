@@ -20,6 +20,7 @@ import type {
 	RowAppInput,
 	Runnable,
 	StaticAppInput,
+	TemplateV2AppInput,
 	UploadAppInput,
 	UserAppInput
 } from './inputType'
@@ -59,6 +60,7 @@ export type Configuration =
 	| EvalV2AppInput
 	| UploadAppInput
 	| ResultAppInput
+	| TemplateV2AppInput
 
 export type StaticConfiguration = GeneralAppInput & StaticAppInput
 export type RichConfigurationT<T> =
@@ -173,7 +175,10 @@ export type ListContext = Writable<{
 	disabled: boolean
 }>
 
-export type ListInputs = { set: (id: string, value: any) => void; remove: (id: string) => void }
+export type ListInputs = {
+	set: (id: string, value: any) => void
+	remove: (id: string) => void
+}
 
 export type GroupContext = Writable<Record<string, any>>
 
@@ -257,6 +262,7 @@ export type AppViewerContext = {
 	darkMode: Writable<boolean>
 	cssEditorOpen: Writable<boolean>
 	previewTheme: Writable<string | undefined>
+	debuggingComponents: Writable<Record<string, number>>
 }
 
 export type AppEditorContext = {

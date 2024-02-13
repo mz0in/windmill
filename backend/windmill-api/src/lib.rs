@@ -9,7 +9,6 @@
 use crate::db::ApiAuthed;
 use crate::embeddings::load_embeddings_db;
 use crate::oauth2::AllClients;
-use crate::saml::{SamlSsoLogin, ServiceProviderExt};
 use crate::scim::has_scim_token;
 use crate::tracing_init::MyOnFailure;
 use crate::{
@@ -36,8 +35,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 use windmill_common::db::UserDB;
-#[cfg(feature = "enterprise_saml")]
-use windmill_common::ee::{get_license_plan, LicensePlan};
 use windmill_common::utils::rd_string;
 use windmill_common::worker::ALL_TAGS;
 use windmill_common::BASE_URL;
@@ -63,10 +60,13 @@ pub mod job_helpers;
 pub mod job_metrics;
 pub mod jobs;
 pub mod oauth2;
+
+mod concurrency_groups;
+mod oidc;
 mod openai;
 mod raw_apps;
 mod resources;
-mod saml;
+mod saml_ee;
 mod schedule;
 mod scim;
 mod scripts;
@@ -160,14 +160,7 @@ pub async fn run_server(
         .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
         .allow_origin(Any);
 
-    #[cfg(feature = "enterprise_saml")]
-    let sp_extension: (ServiceProviderExt, SamlSsoLogin) = match get_license_plan().await {
-        LicensePlan::Enterprise => saml::build_sp_extension().await?,
-        LicensePlan::Pro => (ServiceProviderExt(None), SamlSsoLogin(None)),
-    };
-
-    #[cfg(not(feature = "enterprise_saml"))]
-    let sp_extension = (ServiceProviderExt(), SamlSsoLogin(None));
+    let sp_extension = Arc::new(saml_ee::build_sp_extension().await?);
 
     let embeddings_db = if server_mode {
         Some(load_embeddings_db(&db))
@@ -212,7 +205,8 @@ pub async fn run_server(
                             users::workspaced_service().layer(Extension(argon2.clone())),
                         )
                         .nest("/variables", variables::workspaced_service())
-                        .nest("/workspaces", workspaces::workspaced_service()),
+                        .nest("/workspaces", workspaces::workspaced_service())
+                        .nest("/oidc", oidc::workspaced_service()),
                 )
                 .nest("/workspaces", workspaces::global_service())
                 .nest(
@@ -235,14 +229,16 @@ pub async fn run_server(
                 .route_layer(from_extractor::<ApiAuthed>())
                 .route_layer(from_extractor::<users::Tokened>())
                 .nest("/jobs", jobs::global_root_service())
+                .nest("/oidc", oidc::global_service())
                 .nest(
                     "/saml",
-                    saml::global_service().layer(Extension(Arc::new(sp_extension.0))),
+                    saml_ee::global_service().layer(Extension(Arc::clone(&sp_extension))),
                 )
                 .nest(
                     "/scim",
                     scim::global_service().route_layer(axum::middleware::from_fn(has_scim_token)),
                 )
+                .nest("/concurrency_groups", concurrency_groups::global_service())
                 .nest("/scripts_u", scripts::global_unauthed_service())
                 .nest(
                     "/w/:workspace_id/apps_u",
@@ -268,7 +264,7 @@ pub async fn run_server(
                 )
                 .nest(
                     "/oauth",
-                    oauth2::global_service().layer(Extension(Arc::new(sp_extension.1))),
+                    oauth2::global_service().layer(Extension(Arc::clone(&sp_extension))),
                 )
                 .route("/version", get(git_v))
                 .route("/uptodate", get(is_up_to_date))

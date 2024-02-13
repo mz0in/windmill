@@ -120,9 +120,10 @@ impl QueuedJob {
         matches!(self.job_kind, JobKind::Flow | JobKind::FlowPreview)
     }
 
-    pub fn full_path(&self) -> String {
+    pub fn full_path_with_workspace(&self) -> String {
         format!(
-            "{}/{}",
+            "{}/{}/{}",
+            self.workspace_id,
             if self.is_flow() { "flow" } else { "script" },
             self.script_path()
         )
@@ -293,6 +294,11 @@ pub enum JobPayload {
     AppDependencies {
         path: String,
         version: i64,
+    },
+    RawScriptDependencies {
+        script_path: String,
+        content: String,
+        language: ScriptLang,
     },
     Flow {
         path: String,

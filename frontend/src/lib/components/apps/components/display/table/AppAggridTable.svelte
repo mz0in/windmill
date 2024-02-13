@@ -30,6 +30,12 @@
 	const { app, worldStore, selectedComponent, componentControl, darkMode } =
 		getContext<AppViewerContext>('AppViewerContext')
 
+	const rowHeights = {
+		normal: 40,
+		compact: 30,
+		comfortable: 50
+	}
+
 	let css = initCss($app.css?.aggridcomponent, customCss)
 
 	let result: any[] | undefined = undefined
@@ -71,7 +77,9 @@
 		loading: false,
 		page: 0,
 		newChange: { row: 0, column: '', value: undefined },
-		ready: undefined as boolean | undefined
+		ready: undefined as boolean | undefined,
+		filters: {},
+		displayedRowCount: 0
 	})
 
 	let selectedRowIndex = -1
@@ -154,6 +162,9 @@
 							editable: resolvedConfig?.allEditable,
 							onCellValueChanged
 						},
+						rowHeight: resolvedConfig.compactness
+							? rowHeights[resolvedConfig.compactness]
+							: rowHeights['normal'],
 						rowSelection: resolvedConfig?.multipleSelectable ? 'multiple' : 'single',
 						rowMultiSelectWithClick: resolvedConfig?.multipleSelectable
 							? resolvedConfig.rowMultiselectWithClick
@@ -168,6 +179,7 @@
 							state = e?.api?.getState()
 							resolvedConfig?.extraConfig?.['onStateUpdated']?.(e)
 						},
+
 						onGridReady: (e) => {
 							outputs?.ready.set(true)
 							value = value
@@ -186,6 +198,11 @@
 						onSelectionChanged: (e) => {
 							onSelectionChanged(e.api)
 							resolvedConfig?.extraConfig?.['onSelectionChanged']?.(e)
+						},
+						onFilterChanged: (e) => {
+							outputs?.filters?.set(e.api.getFilterModel())
+							outputs?.displayedRowCount?.set(e.api.getDisplayedRowCount())
+							resolvedConfig?.extraConfig?.['onFilterChanged']?.(e)
 						},
 						getRowId: (data) => data.data['__index']
 					},
@@ -225,10 +242,17 @@
 
 	function updateValue() {
 		api?.updateGridOptions({ rowData: value })
+
+		const displayedRowCount = api?.getDisplayedRowCount()
+		if (displayedRowCount) {
+			outputs?.displayedRowCount?.set(displayedRowCount)
+		}
+
 		if (api) {
 			onSelectionChanged(api)
 		}
 	}
+
 	function updateOptions() {
 		try {
 			api?.updateGridOptions({
@@ -248,6 +272,9 @@
 				rowMultiSelectWithClick: resolvedConfig?.multipleSelectable
 					? resolvedConfig.rowMultiselectWithClick
 					: undefined,
+				rowHeight: resolvedConfig.compactness
+					? rowHeights[resolvedConfig.compactness]
+					: rowHeights['normal'],
 				...(resolvedConfig?.extraConfig ?? {})
 			})
 		} catch (e) {

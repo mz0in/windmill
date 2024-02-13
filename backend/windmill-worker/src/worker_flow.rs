@@ -43,13 +43,13 @@ use windmill_common::{
     flows::{FlowModule, FlowModuleValue, FlowValue, InputTransform, Retry, Suspend},
 };
 use windmill_queue::{
-    add_completed_job, add_completed_job_error, handle_maybe_scheduled_job, CanceledBy,
-    PushIsolationLevel, WrappedError,
+    add_completed_job, add_completed_job_error, get_queued_job, handle_maybe_scheduled_job,
+    CanceledBy, PushIsolationLevel, WrappedError,
 };
 
 type DB = sqlx::Pool<sqlx::Postgres>;
 
-use windmill_queue::{canceled_job_to_result, get_queued_job, push, QueueTransaction};
+use windmill_queue::{canceled_job_to_result, get_queued_job_tx, push, QueueTransaction};
 
 // #[instrument(level = "trace", skip_all)]
 pub async fn update_flow_status_after_job_completion<
@@ -231,11 +231,9 @@ pub async fn update_flow_status_after_job_completion_internal<
 
         let (mut stop_early, skip_if_stop_early) = if let Some(se) = stop_early_override {
             //do not stop early if module is a flow step
-            let mut tx = db.begin().await?;
-            let flow_job = get_queued_job(flow, w_id, &mut tx)
+            let flow_job = get_queued_job(flow, w_id, db)
                 .await?
                 .ok_or_else(|| Error::InternalErr(format!("requiring flow to be in the queue")))?;
-            tx.commit().await?;
             let module = get_module(&flow_job, module_index);
             if module.is_some_and(|x| matches!(x.value, FlowModuleValue::Flow { .. })) {
                 (false, false)
@@ -524,7 +522,7 @@ pub async fn update_flow_status_after_job_completion_internal<
             .context("remove flow status retry")?;
         }
 
-        let flow_job = get_queued_job(flow, w_id, tx.transaction_mut())
+        let flow_job = get_queued_job_tx(flow, w_id, tx.transaction_mut())
             .await?
             .ok_or_else(|| Error::InternalErr(format!("requiring flow to be in the queue")))?;
 
@@ -563,21 +561,6 @@ pub async fn update_flow_status_after_job_completion_internal<
             }
             false => false,
         };
-
-        if old_status.step == 0
-            && !flow_job.is_flow_step
-            && flow_job.schedule_path.is_some()
-            && flow_job.script_path.is_some()
-        {
-            tx = handle_maybe_scheduled_job(
-                tx,
-                db,
-                flow_job.schedule_path.as_ref().unwrap(),
-                flow_job.script_path.as_ref().unwrap(),
-                &w_id,
-            )
-            .await?;
-        }
 
         tx.commit().await?;
         tracing::debug!(id = %flow_job.id, root_id = %job_root, "flow status updated");
@@ -1054,6 +1037,31 @@ pub async fn handle_flow<R: rsmq_async::RsmqConnection + Send + Sync + Clone>(
         .parse_flow_status()
         .with_context(|| "Unable to parse flow status")?;
 
+    if !flow_job.is_flow_step
+        && flow_job.schedule_path.is_some()
+        && flow_job.script_path.is_some()
+        && status.step == 0
+    {
+        let tx: QueueTransaction<'_, R> = (rsmq.clone(), db.begin().await?).into();
+
+        match handle_maybe_scheduled_job(
+            tx,
+            db,
+            flow_job.schedule_path.as_ref().unwrap(),
+            flow_job.script_path.as_ref().unwrap(),
+            &flow_job.workspace_id,
+        )
+        .await
+        {
+            Ok(tx) => {
+                tx.commit().await?;
+            }
+            Err(e) => {
+                tracing::error!("Error during handle_maybe_scheduled_job: {e}");
+            }
+        }
+    }
+
     push_next_flow_job(
         flow_job,
         status,
@@ -1189,19 +1197,24 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             .fetch_one(db)
             .await?;
             if no_flow_overlap {
-                let count = sqlx::query_scalar!(
-                    "SELECT count(*) FROM queue WHERE schedule_path = $1 AND workspace_id = $2 AND id != $3",
+                let overlapping = sqlx::query_scalar!(
+                    "SELECT id FROM queue WHERE schedule_path = $1 AND workspace_id = $2 AND id != $3 AND running = true",
                     flow_job.schedule_path.as_ref().unwrap(),
                     flow_job.workspace_id.as_str(),
                     flow_job.id
-                ).fetch_one(db).await?.unwrap_or(0);
-                if count > 0 {
+                ).fetch_all(db).await?;
+                if overlapping.len() > 0 {
+                    let overlapping_str = overlapping
+                        .iter()
+                        .map(|x| x.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ");
                     job_completed_tx
                         .send(SendResult::UpdateFlow {
                             flow: flow_job.id,
                             success: true,
                             result: serde_json::from_str(
-                                "\"not allowed to overlap, scheduling next iteration\"",
+                                &format!("\"not allowed to overlap with {overlapping_str}, scheduling next iteration\""),
                             )
                             .unwrap(),
                             stop_early_override: Some(true),
@@ -1362,6 +1375,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             let required_events = suspend.required_events.unwrap() as u16;
             let user_auth_required = suspend.user_auth_required.unwrap_or(false);
             if user_auth_required {
+                let self_approval_disabled = suspend.self_approval_disabled.unwrap_or(false);
                 let mut user_groups_required: Vec<String> = Vec::new();
                 if suspend.user_groups_required.is_some() {
                     match suspend.user_groups_required.unwrap() {
@@ -1405,6 +1419,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                 let approval_conditions = ApprovalConditions {
                     user_auth_required: user_auth_required,
                     user_groups_required: user_groups_required,
+                    self_approval_disabled: self_approval_disabled,
                 };
                 sqlx::query(
                     "UPDATE queue
@@ -2040,7 +2055,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
         NextStatus::AllFlowJobs { iterator, branchall, .. } => FlowStatusModule::InProgress {
             job: flow_job.id,
             iterator,
-            flow_jobs: Some(uuids),
+            flow_jobs: Some(uuids.clone()),
             branch_chosen: None,
             branchall,
             id: status_module.id(),
@@ -2108,7 +2123,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
     };
 
     tx.commit().await?;
-    tracing::info!(id = %flow_job.id, root_id = %job_root, "all next flow jobs pushed");
+    tracing::info!(id = %flow_job.id, root_id = %job_root, "all next flow jobs pushed: {uuids:?}");
 
     if continue_on_same_worker {
         if !is_one_uuid {
@@ -2392,7 +2407,7 @@ async fn compute_next_flow_transform(
                     };
                     let itered = serde_json::from_str::<Vec<serde_json::Value>>(itered_raw.get())
                         .map_err(|not_array| {
-                        Error::ExecutionErr(format!("Expected an array value, found: {not_array}"))
+                        Error::ExecutionErr(format!("Expected an array value in the iterator expression, found: {not_array}"))
                     })?;
 
                     if itered.is_empty() {

@@ -63,7 +63,7 @@
 			values['base_url'] = window.location.origin
 		}
 		if (values['retention_period_secs'] == undefined) {
-			values['retention_period_secs'] = 60 * 60 * 24 * 60
+			values['retention_period_secs'] = 60 * 60 * 24 * 30
 		}
 		if (values['base_url'] == undefined) {
 			values['base_url'] = 'http://localhost'
@@ -173,7 +173,7 @@
 				<TabContent value={category}>
 					{#if category == 'SMTP'}
 						<div class="text-secondary pb-4 text-xs"
-							>Setting SMTP unlock sending emails upon adding new users to the workspace or the
+							>Setting SMTP unlocks sending emails upon adding new users to the workspace or the
 							instance.</div
 						>
 					{:else if category == 'Telemetry'}
@@ -279,7 +279,7 @@
 										clientName = ''
 									}}
 								>
-									Add custom SSO client {!$enterpriseLicense ? '(require ee)' : ''}
+									Add custom SSO client {!$enterpriseLicense ? '(requires ee)' : ''}
 								</Button>
 							</div>
 							<h4 class="py-4">OAuth</h4>
@@ -329,7 +329,7 @@
 							<div class="flex gap-2">
 								<select name="oauth_name" id="oauth_name" bind:value={oauth_name}>
 									<option value={undefined}>Select an OAuth client</option>
-									<option value="custom">Fully Custom (require ee)</option>
+									<option value="custom">Fully Custom (requires ee)</option>
 									{#each windmillBuiltins as name}
 										<option value={name}>{capitalize(name)}</option>
 									{/each}
@@ -355,7 +355,7 @@
 									}}
 								>
 									Add OAuth client {oauth_name == 'custom' && !$enterpriseLicense
-										? '(require ee)'
+										? '(requires ee)'
 										: ''}
 								</Button>
 							</div>
@@ -368,7 +368,7 @@
 									{#if setting.ee_only != undefined && !$enterpriseLicense}
 										<div class="flex text-xs items-center gap-1 text-yellow-500 whitespace-nowrap">
 											<AlertTriangle size={16} />
-											EE only <Tooltip>{setting.ee_only}</Tooltip>
+											EE only {#if setting.ee_only != ''}<Tooltip>{setting.ee_only}</Tooltip>{/if}
 										</div>
 									{/if}
 									<label class="block pb-2">
@@ -455,7 +455,12 @@
 												</div>
 											{:else if setting.fieldType == 'seconds'}
 												<div>
-													<SecondsInput bind:seconds={values[setting.key]} />
+													<SecondsInput
+														max={setting.ee_only != undefined && !$enterpriseLicense
+															? 60 * 60 * 24 * 30
+															: undefined}
+														bind:seconds={values[setting.key]}
+													/>
 												</div>
 											{/if}
 

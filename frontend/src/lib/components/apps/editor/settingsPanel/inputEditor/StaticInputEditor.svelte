@@ -27,6 +27,7 @@
 	export let selectOptions: StaticOptions['selectOptions'] | undefined = undefined
 	export let placeholder: string | undefined = undefined
 	export let format: string | undefined = undefined
+	export let id: string | undefined
 
 	const { onchange } = getContext<AppViewerContext>('AppViewerContext')
 
@@ -42,7 +43,7 @@
 		{:else if fieldType === 'date'}
 			<input on:keydown|stopPropagation type="date" bind:value={componentInput.value} />
 		{:else if fieldType === 'boolean'}
-			<Toggle bind:checked={componentInput.value} size="xs" />
+			<Toggle bind:checked={componentInput.value} size="xs" class="mt-2" />
 		{:else if fieldType === 'select' && selectOptions}
 			<select on:keydown|stopPropagation bind:value={componentInput.value}>
 				{#each selectOptions ?? [] as option}
@@ -150,7 +151,7 @@
 				</div>
 			{/if}
 		{:else if fieldType === 'array'}
-			<ArrayStaticInputEditor {subFieldType} bind:componentInput on:deleteArrayItem />
+			<ArrayStaticInputEditor {id} {subFieldType} bind:componentInput on:deleteArrayItem />
 		{:else if fieldType === 'schema'}
 			<div class="w-full">
 				<SchemaEditor bind:schema={componentInput.value} lightMode />

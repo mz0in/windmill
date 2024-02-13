@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import datetime as dt
 import functools
+from io import BufferedReader, BytesIO
 import logging
 import os
 import random
@@ -13,7 +14,8 @@ from typing import Dict, Any, Union, Literal
 
 import httpx
 
-from .s3_types import Boto3ConnectionSettings, DuckDbConnectionSettings, PolarsConnectionSettings
+from .s3_reader import S3BufferedReader, bytes_generator
+from .s3_types import Boto3ConnectionSettings, DuckDbConnectionSettings, PolarsConnectionSettings, S3Object
 
 _client: "Windmill | None" = None
 
@@ -219,6 +221,14 @@ class Windmill:
     def get_job(self, job_id: str) -> dict:
         return self.get(f"/w/{self.workspace}/jobs_u/get/{job_id}").json()
 
+    def get_root_job_id(self, job_id: str | None = None) -> dict:
+        job_id = job_id or os.environ.get("WM_JOB_ID")
+        return self.get(f"/w/{self.workspace}/jobs_u/get_root_job_id/{job_id}").json()
+
+
+    def get_id_token(self, audience: str) -> dict:
+        return self.post(f"/w/{self.workspace}/oidc/token/{audience}").text
+
     def get_job_status(self, job_id: str) -> JobStatus:
         job = self.get_job(job_id)
         job_type = job.get("type", "")
@@ -365,20 +375,103 @@ class Windmill:
                 f"/w/{self.workspace}/job_helpers/v2/s3_resource_info",
                 json={} if s3_resource_path == "" else {"s3_resource_path": s3_resource_path},
             ).json()
-            endpoint_url_prefix = "https://" if s3_resource["useSSL"] else "http://"
-            boto3_settings = Boto3ConnectionSettings(
-                {
-                    "endpoint_url": "{}{}".format(endpoint_url_prefix, s3_resource["endPoint"]),
-                    "region_name": s3_resource["region"],
-                    "use_ssl": s3_resource["useSSL"],
-                    "aws_access_key_id": s3_resource["accessKey"],
-                    "aws_secret_access_key": s3_resource["secretKey"],
-                    # no need for path_style here as boto3 is clever enough to determine which one to use
-                }
-            )
-            return boto3_settings
+            return self.__boto3_connection_settings(s3_resource)
         except JSONDecodeError as e:
-            raise Exception("Could not generate Polars S3 connection settings from the provided resource") from e
+            raise Exception("Could not generate Boto3 S3 connection settings from the provided resource") from e
+
+    def load_s3_file(self, s3object: S3Object, s3_resource_path: str | None) -> bytes:
+        """
+        Load a file from the workspace s3 bucket and returns its content as bytes.
+
+        '''python
+        from wmill import S3Object
+
+        s3_obj = S3Object(s3="/path/to/my_file.txt")
+        my_obj_content = client.load_s3_file(s3_obj)
+        file_content = my_obj_content.decode("utf-8")
+        '''
+        """
+        with self.load_s3_file_reader(s3object, s3_resource_path) as file_reader:
+            return file_reader.read()
+
+    def load_s3_file_reader(self, s3object: S3Object, s3_resource_path: str | None) -> BufferedReader:
+        """
+        Load a file from the workspace s3 bucket and returns the bytes stream.
+
+        '''python
+        from wmill import S3Object
+
+        s3_obj = S3Object(s3="/path/to/my_file.txt")
+        with wmill.load_s3_file(s3object, s3_resource_path) as file_reader:
+            print(file_reader.read())
+        '''
+        """
+        reader = S3BufferedReader(f"{self.workspace}", self.client, s3object["s3"], s3_resource_path)
+        return reader
+
+    def write_s3_file(
+        self,
+        s3object: S3Object | None,
+        file_content: BufferedReader | bytes,
+        s3_resource_path: str | None,
+    ) -> S3Object:
+        """
+        Write a file to the workspace S3 bucket
+
+        '''python
+        from wmill import S3Object
+
+        s3_obj = S3Object(s3="/path/to/my_file.txt")
+
+        # for an in memory bytes array:
+        file_content = b'Hello Windmill!'
+        client.write_s3_file(s3_obj, file_content)
+
+        # for a file:
+        with open("my_file.txt", "rb") as my_file:
+            client.write_s3_file(s3_obj, my_file)
+        '''
+        """
+        # httpx accepts either bytes or "a bytes generator" as content. If it's a BufferedReader, we need to convert it to a generator
+        if isinstance(file_content, BufferedReader):
+            content_payload = bytes_generator(file_content)
+        elif isinstance(file_content, bytes):
+            content_payload = file_content
+        else:
+            raise Exception("Type of file_content not supported")
+
+        query_params = {}
+        if s3object is not None and s3object["s3"] != "":
+            query_params["file_key"] = s3object["s3"]
+        if s3_resource_path is not None and s3_resource_path != "":
+            query_params["s3_resource_path"] = s3_resource_path
+
+        try:
+            # need a vanilla client b/c content-type is not application/json here
+            response = httpx.post(
+                f"{self.base_url}/w/{self.workspace}/job_helpers/upload_s3_file",
+                headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/octet-stream"},
+                params=query_params,
+                content=content_payload,
+                verify=self.verify,
+                timeout=None,
+            ).json()
+        except Exception as e:
+            raise Exception("Could not write file to S3") from e
+        return S3Object(s3=response["file_key"])
+
+    def __boto3_connection_settings(self, s3_resource) -> Boto3ConnectionSettings:
+        endpoint_url_prefix = "https://" if s3_resource["useSSL"] else "http://"
+        return Boto3ConnectionSettings(
+            {
+                "endpoint_url": "{}{}".format(endpoint_url_prefix, s3_resource["endPoint"]),
+                "region_name": s3_resource["region"],
+                "use_ssl": s3_resource["useSSL"],
+                "aws_access_key_id": s3_resource["accessKey"],
+                "aws_secret_access_key": s3_resource["secretKey"],
+                # no need for path_style here as boto3 is clever enough to determine which one to use
+            }
+        )
 
     def whoami(self) -> dict:
         return self.get("/users/whoami").json()
@@ -484,6 +577,10 @@ def deprecate(in_favor_of: str):
 def get_workspace() -> str:
     return _client.workspace
 
+@init_global_client
+def get_root_job_id(job_id: str | None = None) -> str:
+    return _client.get_root_job_id(job_id)
+
 
 @init_global_client
 @deprecate("Windmill().version")
@@ -573,6 +670,14 @@ def run_script_by_path_sync(
 
 
 @init_global_client
+def get_id_token(audience: str) -> str:
+    """
+    Get a JWT token for the given audience for OIDC purposes to login into third parties like AWS, Vault, GCP, etc.
+    """
+    return _client.get_id_token(audience)
+
+
+@init_global_client
 def get_job_status(job_id: str) -> JobStatus:
     return _client.get_job_status(job_id)
 
@@ -607,6 +712,34 @@ def boto3_connection_settings(s3_resource_path: str = "") -> Boto3ConnectionSett
     initiate an S3 connection using boto3
     """
     return _client.get_boto3_connection_settings(s3_resource_path)
+
+
+@init_global_client
+def load_s3_file(s3object: S3Object, s3_resource_path: str = "") -> bytes:
+    """
+    Load the entire content of a file stored in S3 as bytes
+    """
+    return _client.load_s3_file(s3object, s3_resource_path if s3_resource_path != "" else None)
+
+
+@init_global_client
+def load_s3_file_reader(s3object: S3Object, s3_resource_path: str = "") -> BufferedReader:
+    """
+    Load the content of a file stored in S3
+    """
+    return _client.load_s3_file_reader(s3object, s3_resource_path if s3_resource_path != "" else None)
+
+
+@init_global_client
+def write_s3_file(
+    s3object: S3Object | None,
+    file_content: BufferedReader | bytes,
+    s3_resource_path: str = "",
+) -> S3Object:
+    """
+    Upload a file to S3
+    """
+    return _client.write_s3_file(s3object, file_content, s3_resource_path if s3_resource_path != "" else None)
 
 
 @init_global_client

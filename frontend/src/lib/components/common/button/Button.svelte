@@ -9,7 +9,7 @@
 
 	export let size: ButtonType.Size = 'md'
 	export let spacingSize: ButtonType.Size = size
-	export let color: ButtonType.Color | string = 'blue';
+	export let color: ButtonType.Color | string = 'blue'
 	export let variant: ButtonType.Variant = 'contained'
 	export let btnClasses: string = ''
 	export let wrapperClasses: string = ''
@@ -116,25 +116,25 @@
 	}
 
 	function getColorClass(color, variant) {
-        if (color in colorVariants) {
-            return colorVariants[color][variant];
-        } else {
-            return color;
-        }
-    }
+		if (color in colorVariants) {
+			return colorVariants[color][variant]
+		} else {
+			return color
+		}
+	}
 
-    $: buttonClass = twMerge(
-        'w-full',
-        getColorClass(color, variant),
-        variant === 'border' ? 'border' : '',
-        ButtonType.FontSizeClasses[size],
-        ButtonType.SpacingClasses[spacingSize][variant],
-        'focus:ring-2 font-semibold',
-        dropdownItems ? 'rounded-l-md h-full' : 'rounded-md',
-        'justify-center items-center text-center whitespace-nowrap inline-flex gap-2',
-        btnClasses,
-        'transition-all'
-    );
+	$: buttonClass = twMerge(
+		'w-full',
+		getColorClass(color, variant),
+		variant === 'border' ? 'border' : '',
+		ButtonType.FontSizeClasses[size],
+		ButtonType.SpacingClasses[spacingSize][variant],
+		'focus:ring-2 font-semibold',
+		dropdownItems ? 'rounded-l-md h-full' : 'rounded-md',
+		'justify-center items-center text-center whitespace-nowrap inline-flex gap-2',
+		btnClasses,
+		'transition-all'
+	)
 
 	const iconMap = {
 		xs: 14,
@@ -159,6 +159,8 @@
 			on:pointerdown
 			on:focus
 			on:blur
+			on:mouseenter
+			on:mouseleave
 			on:click={() => {
 				loading = true
 				dispatch('click', event)
@@ -196,6 +198,8 @@
 			on:click={onClick}
 			on:focus
 			on:blur
+			on:mouseenter
+			on:mouseleave
 			class={twMerge(
 				buttonClass,
 				disabled ? '!bg-surface-disabled !text-tertiary border !cursor-not-allowed' : ''
@@ -208,7 +212,7 @@
 			{style}
 		>
 			{#if loading}
-				<Loader2 class="animate-spin mr-1" size={14} />
+				<Loader2 class={twMerge('animate-spin', !iconOnly ? 'mr-1' : '')} size={14} />
 			{:else if startIcon?.icon}
 				<svelte:component this={startIcon.icon} class={startIcon.classes} size={lucideIconSize} />
 			{/if}

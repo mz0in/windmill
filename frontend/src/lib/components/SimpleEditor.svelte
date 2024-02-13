@@ -13,7 +13,8 @@
 		KeyMod,
 		Uri as mUri,
 		languages,
-		type IRange
+		type IRange,
+		type IKeyboardEvent
 	} from 'monaco-editor'
 	import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution'
 	import 'monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution'
@@ -116,6 +117,12 @@
 		}
 	}
 
+	export function onKeyUp(f: (e: IKeyboardEvent) => void) {
+		if (editor) {
+			return editor.onKeyUp(f)
+		}
+	}
+
 	export function show(): void {
 		divEl?.classList.remove('hidden')
 	}
@@ -165,6 +172,9 @@
 		// let widgets: HTMLElement | undefined =
 		// 	document.getElementById('monaco-widgets-root') ?? undefined
 
+		if (!divEl) {
+			return
+		}
 		editor = meditor.create(divEl as HTMLDivElement, {
 			...editorConfig(code, lang, automaticLayout, fixedOverflowWidgets),
 			model,

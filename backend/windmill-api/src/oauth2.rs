@@ -41,7 +41,7 @@ use windmill_common::utils::{not_found_if_none, now_from_db};
 use windmill_common::variables::build_crypt;
 
 use crate::db::ApiAuthed;
-use crate::saml::SamlSsoLogin;
+use crate::saml_ee::{generate_redirect_url, ServiceProviderExt};
 use crate::users::{login_externally, LoginUserInfo};
 use crate::webhook_util::{InstanceEvent, WebhookShared};
 use crate::{db::DB, variables::encrypt, workspaces::WorkspaceSettings};
@@ -446,7 +446,12 @@ struct Logins {
     oauth: Vec<String>,
     saml: Option<String>,
 }
-async fn list_logins(Extension(sso): Extension<Arc<SamlSsoLogin>>) -> error::JsonResult<Logins> {
+async fn list_logins(
+    Extension(sso): Extension<Arc<ServiceProviderExt>>,
+) -> error::JsonResult<Logins> {
+    let saml_redirect_opt = generate_redirect_url(sso)
+        .await
+        .map_err(|e| Error::InternalErr(e.to_string()))?;
     Ok(Json(Logins {
         oauth: OAUTH_CLIENTS
             .read()
@@ -455,7 +460,7 @@ async fn list_logins(Extension(sso): Extension<Arc<SamlSsoLogin>>) -> error::Jso
             .keys()
             .map(|x| x.to_owned())
             .collect::<Vec<String>>(),
-        saml: sso.0.clone(),
+        saml: saml_redirect_opt,
     }))
 }
 
@@ -732,7 +737,7 @@ async fn connect_slack_callback(
         "INSERT INTO group_ (workspace_id, name, summary, extra_perms) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
         w_id,
         "slack",
-        "The group slack commands act on belhalf of",
+        "The group slack commands act on behalf of",
         serde_json::json!({username_to_permissioned_as(&authed.username): true})
     )
     .execute(&mut *tx)

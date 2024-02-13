@@ -111,6 +111,7 @@
 	export let listenEmptyChanges = false
 	export let small = false
 	export let scriptLang: Preview.language
+	export let disabled: boolean = false
 
 	const rHash = randomHash()
 	$: filePath = computePath(path)
@@ -463,7 +464,7 @@
 				async provideInlineCompletionItems(model, position, context, token) {
 					abortController?.abort()
 					const textUntilPosition = model.getText(
-						new vscode.Range(1, 1, position.line, position.character)
+						new vscode.Range(0, 0, position.line, position.character)
 					)
 					let items: vscode.InlineCompletionItem[] = []
 
@@ -1215,7 +1216,7 @@
 </script>
 
 <EditorTheme />
-<div bind:this={divEl} class="{$$props.class} editor" />
+<div bind:this={divEl} class="{$$props.class} editor {disabled ? 'disabled' : ''}" />
 
 <style global lang="postcss">
 	.editor {

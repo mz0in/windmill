@@ -27,6 +27,7 @@
 	import DateTimeInput from './DateTimeInput.svelte'
 	import S3FilePicker from './S3FilePicker.svelte'
 	import CurrencyInput from './apps/components/inputs/currency/CurrencyInput.svelte'
+	import FileUpload from './common/fileUpload/FileUpload.svelte'
 
 	export let label: string = ''
 	export let value: any
@@ -78,6 +79,7 @@
 	let error: string = ''
 
 	let s3FilePicker: S3FilePicker
+	let s3FileUploadRawMode: false
 
 	let el: HTMLTextAreaElement | undefined = undefined
 
@@ -324,11 +326,11 @@
 				{:else if extra?.currency}
 					<CurrencyInput
 						inputClasses={{
-							formatted: twMerge('px-2 w-full py-1.5 text-black'),
+							formatted: 'px-2 w-full py-1.5 text-black dark:text-white',
 							wrapper: 'w-full windmillapp',
-							formattedZero: twMerge('text-black')
+							formattedZero: 'text-black dark:text-white'
 						}}
-						style="color:black;"
+						noColor
 						bind:value
 						currency={extra?.currency}
 						locale={extra?.currencyLocale ?? 'en-US'}
@@ -414,6 +416,9 @@
 														on:focus={() => {
 															dispatch('focus')
 														}}
+														on:blur={(e) => {
+															dispatch('blur')
+														}}
 														{defaultValue}
 														{valid}
 														{disabled}
@@ -475,26 +480,53 @@
 					.replace('_', '')
 					.toLowerCase() == 's3object'}
 				<div class="flex flex-col w-full gap-1">
-					<JsonEditor
-						bind:editor
-						on:focus={(e) => {
-							dispatch('focus')
-						}}
-						code={JSON.stringify({ s3: '' }, null, 2)}
-						bind:value
-					/>
-					<Button
-						variant="border"
-						color="light"
+					<Toggle
+						class="flex justify-end"
+						bind:checked={s3FileUploadRawMode}
 						size="xs"
-						btnClasses="mt-1"
-						on:click={() => {
-							s3FilePicker?.open?.(value)
-						}}
-						startIcon={{ icon: Pipette }}
-					>
-						Choose an object from the catalog
-					</Button>
+						options={{ left: 'Raw S3 object input' }}
+					/>
+					{#if s3FileUploadRawMode}
+						<JsonEditor
+							bind:editor
+							on:focus={(e) => {
+								dispatch('focus')
+							}}
+							on:blur={(e) => {
+								dispatch('blur')
+							}}
+							code={JSON.stringify(value ?? defaultValue ?? { s3: '' }, null, 2)}
+							bind:value
+						/>
+						<Button
+							variant="border"
+							color="light"
+							size="xs"
+							btnClasses="mt-1"
+							on:click={() => {
+								s3FilePicker?.open?.(value)
+							}}
+							startIcon={{ icon: Pipette }}
+						>
+							Choose an object from the catalog
+						</Button>
+					{:else}
+						<FileUpload
+							allowMultiple={false}
+							randomFileKey={true}
+							on:addition={(evt) => {
+								value = {
+									s3: evt.detail?.path ?? ''
+								}
+							}}
+							on:deletion={(evt) => {
+								value = {
+									s3: ''
+								}
+							}}
+							defaultValue={defaultValue?.s3}
+						/>
+					{/if}
 				</div>
 			{:else if inputCat == 'object' || inputCat == 'resource-object'}
 				{#if properties && Object.keys(properties).length > 0}
@@ -513,6 +545,9 @@
 						bind:editor
 						on:focus={(e) => {
 							dispatch('focus')
+						}}
+						on:blur={(e) => {
+							dispatch('blur')
 						}}
 						code={rawValue}
 						bind:value
@@ -538,6 +573,9 @@
 					<SimpleEditor
 						on:focus={(e) => {
 							dispatch('focus')
+						}}
+						on:blur={(e) => {
+							dispatch('blur')
 						}}
 						bind:this={editor}
 						lang={inputCat}
@@ -581,7 +619,7 @@
 			{:else if inputCat == 'string'}
 				<div class="flex flex-col w-full">
 					<div class="flex flex-row w-full items-center justify-between relative">
-						{#if password}
+						{#if password || extra?.['password'] == true}
 							<Password {disabled} bind:password={value} />
 						{:else}
 							{#key extra?.['minRows']}
@@ -591,6 +629,9 @@
 									bind:this={el}
 									on:focus={(e) => {
 										dispatch('focus')
+									}}
+									on:blur={(e) => {
+										dispatch('blur')
 									}}
 									use:autosize
 									on:keydown={onKeyDown}

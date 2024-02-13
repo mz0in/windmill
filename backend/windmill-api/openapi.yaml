@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 
 info:
-  version: 1.244.2
+  version: 1.268.0
   title: Windmill API
 
   contact:
@@ -620,7 +620,7 @@ paths:
         "200":
           description: status
           content:
-            text/plain::
+            text/plain:
               schema:
                 type: string
 
@@ -646,7 +646,7 @@ paths:
         "200":
           description: status
           content:
-            text/plain::
+            text/plain:
               schema:
                 type: string
 
@@ -660,7 +660,7 @@ paths:
         "200":
           description: status
           content:
-            text/plain::
+            text/plain:
               schema:
                 type: string
 
@@ -1172,6 +1172,8 @@ paths:
                     type: string
                   auto_invite_operator:
                     type: boolean
+                  auto_add:
+                    type: boolean
                   plan:
                     type: string
                   customer_id:
@@ -1193,9 +1195,9 @@ paths:
                   large_file_storage:
                     $ref: "#/components/schemas/LargeFileStorage"
                   git_sync:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/WorkspaceGitSync"
+                    $ref: "#/components/schemas/WorkspaceGitSyncSettings"
+                  default_app:
+                    type: string
                 required:
                   - code_completion_enabled
 
@@ -1369,6 +1371,8 @@ paths:
                   type: boolean
                 invite_all:
                   type: boolean
+                auto_add:
+                  type: boolean
 
       responses:
         "200":
@@ -1534,9 +1538,7 @@ paths:
               type: object
               properties:
                 git_sync_settings:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/WorkspaceGitSync"
+                  $ref: "#/components/schemas/WorkspaceGitSyncSettings"
 
       responses:
         "200":
@@ -1544,6 +1546,52 @@ paths:
           content:
             application/json:
               schema: {}
+
+  /w/{workspace}/workspaces/edit_default_app:
+    post:
+      summary: edit default app for workspace
+      operationId: editWorkspaceDefaultApp
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        description: Workspace default app
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                default_app_path:
+                  type: string
+
+      responses:
+        "200":
+          description: status
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /w/{workspace}/workspaces/default_app:
+    get:
+      summary: get default app for workspace
+      operationId: getWorkspaceDefaultApp
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  default_app_path:
+                    type: string
 
   /w/{workspace}/workspaces/get_large_file_storage_config:
     get:
@@ -1680,6 +1728,28 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TruncatedToken"
+
+  /w/{workspace}/oidc/token/{audience}:
+    post:
+      summary: get OIDC token (ee only)
+      operationId: getOidcToken
+      tags:
+        - oidc
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - name: audience
+          in: path
+          required: true
+          schema:
+            type: string
+
+      responses:
+        "200":
+          description: new oidc token
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /w/{workspace}/variables/create:
     post:
@@ -3129,6 +3199,36 @@ paths:
                 type: array
                 items:
                   type: string
+
+  /workers/get_default_tags:
+    get:
+      summary: get all instance default tags
+      operationId: geDefaultTags
+      tags:
+        - worker
+      responses:
+        "200":
+          description: list of default tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /workers/is_default_tags_per_workspace:
+    get:
+      summary: is default tags per workspace
+      operationId: isDefaultTagsPerWorkspace
+      tags:
+        - worker
+      responses:
+        "200":
+          description: is the default tags per workspace
+          content:
+            application/json:
+              schema:
+                type: boolean
 
   /w/{workspace}/scripts/archive/p/{path}:
     post:
@@ -4617,6 +4717,45 @@ paths:
                 type: string
                 format: uuid
 
+  /w/{workspace}/jobs/run/dependencies:
+    post:
+      summary: run a one-off dependencies job
+      operationId: runRawScriptDependencies
+      tags:
+        - job
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+
+      requestBody:
+        description: raw script content
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw_scripts:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/RawScriptForDependencies"
+                entrypoint:
+                  type: string
+              required:
+                - entrypoint
+                - raw_scripts
+      responses:
+        "201":
+          description: dependency job result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lock:
+                    type: string
+                required:
+                  - lock
+
   /w/{workspace}/jobs/run/preview_flow:
     post:
       summary: run flow preview
@@ -4675,6 +4814,11 @@ paths:
         - $ref: "#/components/parameters/ArgsFilter"
         - $ref: "#/components/parameters/ResultFilter"
         - $ref: "#/components/parameters/Tag"
+        - name: all_workspaces
+          description: get jobs from all workspaces (only valid if request come from the `admins` workspace)
+          in: query
+          schema:
+            type: boolean
       responses:
         "200":
           description: All queued jobs
@@ -4693,6 +4837,11 @@ paths:
         - job
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
+        - name: all_workspaces
+          description: get jobs from all workspaces (only valid if request come from the `admins` workspace)
+          in: query
+          schema:
+            type: boolean
       responses:
         "200":
           description: queue count
@@ -4826,6 +4975,11 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: all_workspaces
+          description: get jobs from all workspaces (only valid if request come from the `admins` workspace)
+          in: query
+          schema:
+            type: boolean
       responses:
         "200":
           description: All jobs
@@ -4866,6 +5020,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Job"
+
+  /w/{workspace}/jobs_u/get_root_job_id/{id}:
+    get:
+      summary: get root job id
+      operationId: getRootJobId
+      tags:
+        - job
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: get root job id
+          content:
+            application/json:
+              schema:
+                type: string
 
   /w/{workspace}/jobs_u/get_logs/{id}:
     get:
@@ -4918,6 +5089,23 @@ paths:
                     type: string
                   mem_peak:
                     type: integer
+
+  /w/{workspace}/jobs_u/get_flow_debug_info/{id}:
+    get:
+      summary: get flow debug info
+      operationId: getFlowDebugInfo
+      tags:
+        - job
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: flow debug info details
+          content:
+            application/json:
+              schema: {}
+
 
   /w/{workspace}/jobs_u/completed/get/{id}:
     get:
@@ -4973,6 +5161,8 @@ paths:
                   completed:
                     type: boolean
                   result: {}
+                  success:
+                    type: boolean
                   started:
                     type: boolean
                 required:
@@ -6189,6 +6379,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PerPage"
+        - name: ping_since
+          in: query
+          required: false
+          description: number of seconds the worker must have had a last ping more recent of (default to 300)
+          schema:
+            type: integer
       responses:
         "200":
           description: a list of workers
@@ -6862,6 +7058,10 @@ paths:
           in: query
           schema:
             type: string
+        - name: prefix
+          in: query
+          schema:
+            type: string
       responses:
         "200":
           description: List of file keys
@@ -6876,6 +7076,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/WindmillLargeFile"
+                  restricted_access:
+                    type: boolean
                 required:
                   - windmill_large_files
 
@@ -6945,6 +7147,47 @@ paths:
               schema:
                 $ref: "#/components/schemas/WindmillFilePreview"
 
+  /w/{workspace}/job_helpers/load_parquet_preview/{path}:
+    get:
+      summary: Load a preview of a parquet file
+      operationId: loadParquetPreview
+      tags:
+        - helpers
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/Path"
+        - name: offset
+          in: query
+          schema:
+            type: number
+        - name: limit
+          in: query
+          schema:
+            type: number
+        - name: sort_col
+          in: query
+          schema:
+            type: string
+        - name: sort_desc
+          in: query
+          schema:
+            type: boolean
+        - name: search_col
+          in: query
+          schema:
+            type: string
+        - name: search_term
+          in: query
+          schema:
+            type: string
+
+      responses:
+        "200":
+          description: Parquet Preview
+          content:
+            application/json:
+              schema: {}
+
   /w/{workspace}/job_helpers/delete_s3_file:
     delete:
       summary: Permanently delete file from S3
@@ -6990,66 +7233,86 @@ paths:
             application/json:
               schema: {}
 
-  /w/{workspace}/job_helpers/multipart_upload_s3_file:
+  /w/{workspace}/job_helpers/upload_s3_file:
     post:
-      summary: Upload file to S3 bucket using multipart upload
-      operationId: multipartFileUpload
+      summary: Upload file to S3 bucket
+      operationId: fileUpload
       tags:
         - helpers
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
+        - name: file_key
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: file_extension
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: s3_resource_path
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          required: false
+          schema:
+            type: string
       requestBody:
-        description: Query args for a multipart file upload to S3
+        description: File content
         required: true
         content:
-          application/json:
+          application/octet-stream:
             schema:
-              type: object
-              properties:
-                file_key:
-                  type: string
-                part_content:
-                  type: array
-                  items:
-                    type: integer
-                upload_id:
-                  type: string
-                parts:
-                  type: array
-                  items:
-                    $ref: "#/components/schemas/UploadFilePart"
-                is_final:
-                  type: boolean
-                cancel_upload:
-                  type: boolean
-                s3_resource_path:
-                  type: string
-              required:
-                - file_key
-                - part_content_base64
-                - parts
-                - is_final
-                - cancel_upload
+              type: string
+              format: binary
       responses:
         "200":
-          description: Chunk upload status
+          description: File upload status
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  upload_id:
+                  file_key:
                     type: string
-                  parts:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/UploadFilePart"
-                  is_done:
-                    type: boolean
                 required:
-                  - upload_id
-                  - parts
-                  - is_done
+                  - file_key
+
+  /w/{workspace}/job_helpers/download_s3_file:
+    get:
+      summary: Download file to S3 bucket
+      operationId: fileDownload
+      tags:
+        - helpers
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - name: file_key
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: s3_resource_path
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Chunk of the downloaded file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
 
   /w/{workspace}/job_metrics/get/{id}:
     post:
@@ -7097,6 +7360,38 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/TimeseriesMetric"
+
+  /concurrency_groups/list:
+    get:
+      summary: List all concurrency groups
+      operationId: listConcurrencyGroups
+      tags:
+        - concurrencyGroups
+      responses:
+        "200":
+          description: all concurrency groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConcurrencyGroup"
+  /concurrency_groups/{concurrency_id}:
+    delete:
+      summary: Delete concurrency group
+      operationId: deleteConcurrencyGroup
+      tags:
+        - concurrencyGroups
+      parameters:
+        - $ref: "#/components/parameters/ConcurrencyId"
+      responses:
+        "200":
+          description: concurrency group removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
 
 components:
   securitySchemes:
@@ -7432,6 +7727,12 @@ components:
       in: query
       schema:
         type: boolean
+    ConcurrencyId:
+      name: concurrency_id
+      in: path
+      required: true
+      schema:
+        type: string
 
   schemas:
     $ref: "../../openflow.openapi.yaml#/components/schemas"
@@ -7563,9 +7864,7 @@ components:
         is_template:
           type: boolean
         lock:
-          type: array
-          items:
-            type: string
+          type: string
         language:
           type: string
           enum:
@@ -7614,6 +7913,8 @@ components:
         delete_after_use:
           type: boolean
         deployment_message:
+          type: string
+        concurrency_key:
           type: string
       required:
         - path
@@ -8426,6 +8727,8 @@ components:
           enum: [code, identity, http]
         dedicated_worker:
           type: boolean
+        lock:
+          type: string
       required:
         - args
 
@@ -9177,9 +9480,13 @@ components:
       properties:
         type:
           type: string
-          enum: ["S3Storage"]
+          enum: ["S3Storage", "AzureBlobStorage"]
         s3_resource_path:
           type: string
+        azure_blob_resource_path:
+          type: string
+        public_resource:
+          type: boolean
 
     WindmillLargeFile:
       type: object
@@ -9215,8 +9522,6 @@ components:
         content_type:
           type: string
           enum: ["RawText", "Csv", "Parquet", "Unknown"]
-        download_url:
-          type: string
       required:
         - content_type
 
@@ -9244,7 +9549,33 @@ components:
         - useSSL
         - pathStyle
 
-    WorkspaceGitSync:
+    WorkspaceGitSyncSettings:
+      type: object
+      properties:
+        include_path:
+          type: array
+          items:
+            type: string
+        include_type:
+          type: array
+          items:
+            type: string
+            enum:
+              - script
+              - flow
+              - app
+              - folder
+              - resource
+              - variable
+              - secret
+              - resourcetype
+              - schedule
+        repositories:
+          type: array
+          items:
+            $ref: "#/components/schemas/GitRepositorySettings"
+
+    GitRepositorySettings:
       type: object
       properties:
         script_path:
@@ -9313,3 +9644,46 @@ components:
       required:
         - timestamp
         - value
+
+    RawScriptForDependencies:
+      type: object
+      properties:
+        raw_code:
+          type: string
+        path:
+          type: string
+        language:
+          type: string
+          enum:
+            [
+              python3,
+              deno,
+              go,
+              bash,
+              powershell,
+              postgresql,
+              mysql,
+              bigquery,
+              snowflake,
+              mssql,
+              graphql,
+              nativets,
+              bun,
+            ]
+      required:
+        - raw_code
+        - path
+        - language
+
+    ConcurrencyGroup:
+      type: object
+      properties:
+        concurrency_id:
+          type: string
+        job_uuids:
+          type: array
+          items:
+            type: string
+      required:
+        - concurrency_id
+        - job_uuids

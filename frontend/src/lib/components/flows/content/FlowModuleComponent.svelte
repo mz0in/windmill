@@ -318,7 +318,9 @@
 							<Tab value="test">Test this step</Tab>
 							<Tab value="advanced">Advanced</Tab>
 						</Tabs>
-						<div class="h-[calc(100%-32px)]">
+						<div
+							class={advancedSelected === 'runtime' ? 'h-[calc(100%-64px)]' : 'h-[calc(100%-32px)]'}
+						>
 							{#if selected === 'inputs' && (flowModule.value.type == 'rawscript' || flowModule.value.type == 'script' || flowModule.value.type == 'flow')}
 								<div class="h-full overflow-auto" id="flow-editor-step-input">
 									<PropPickerWrapper
@@ -327,10 +329,12 @@
 									>
 										<InputTransformSchemaForm
 											bind:this={inputTransformSchemaForm}
+											pickableProperties={stepPropPicker.pickableProperties}
 											schema={$flowStateStore[$selectedId]?.schema ?? {}}
 											previousModuleId={previousModule?.id}
 											bind:args={flowModule.value.input_transforms}
 											extraLib={stepPropPicker.extraLib}
+											enableAi
 										/>
 									</PropPickerWrapper>
 								</div>
@@ -346,14 +350,16 @@
 								/>
 							{:else if selected === 'advanced'}
 								<Tabs bind:selected={advancedSelected}>
-									<Tab value="retries">Retries</Tab>
+									<Tab value="retries" active={flowModule.retry !== undefined}>Retries</Tab>
 									{#if !$selectedId.includes('failure')}
 										<Tab value="runtime">Runtime</Tab>
-										<Tab value="cache">Cache</Tab>
-										<Tab value="early-stop">Early Stop</Tab>
-										<Tab value="suspend">Suspend</Tab>
-										<Tab value="sleep">Sleep</Tab>
-										<Tab value="mock">Mock</Tab>
+										<Tab value="cache" active={Boolean(flowModule.cache_ttl)}>Cache</Tab>
+										<Tab value="early-stop" active={Boolean(flowModule.stop_after_if)}>
+											Early Stop
+										</Tab>
+										<Tab value="suspend" active={Boolean(flowModule.suspend)}>Suspend</Tab>
+										<Tab value="sleep" active={Boolean(flowModule.sleep)}>Sleep</Tab>
+										<Tab value="mock" active={Boolean(flowModule.mock?.enabled)}>Mock</Tab>
 										<Tab value="same_worker">Shared Directory</Tab>
 										{#if flowModule.value['language'] === 'python3' || flowModule.value['language'] === 'deno'}
 											<Tab value="s3">S3</Tab>
@@ -437,31 +443,38 @@
 													}
 												}}
 												options={{
-													right: 'High priority flow step',
+													right: 'Enabled high priority flow step',
 													rightTooltip: `Jobs scheduled from this step when the flow is executed are labeled as high priority and take precedence over the other jobs in the jobs queue. ${
 														!$enterpriseLicense
 															? 'This is a feature only available on enterprise edition.'
 															: ''
 													}`
 												}}
-											>
-												<svelte:fragment slot="right">
-													<input
-														type="number"
-														class="!w-14 ml-4"
-														disabled={flowModule.priority === undefined}
-														bind:value={flowModule.priority}
-														on:focus
-														on:change={() => {
-															if (flowModule.priority && flowModule.priority > 100) {
-																flowModule.priority = 100
-															} else if (flowModule.priority && flowModule.priority < 0) {
-																flowModule.priority = 0
-															}
-														}}
-													/>
+											/>
+											<Label label="Priority number">
+												<svelte:fragment slot="header">
+													<Tooltip>The higher the number, the higher the priority.</Tooltip>
 												</svelte:fragment>
-											</Toggle>
+												<input
+													type="number"
+													class="!w-24"
+													disabled={flowModule.priority === undefined}
+													bind:value={flowModule.priority}
+													on:focus
+													on:change={() => {
+														if (flowModule.priority && flowModule.priority > 100) {
+															flowModule.priority = 100
+														} else if (flowModule.priority && flowModule.priority < 0) {
+															flowModule.priority = 0
+														}
+													}}
+												/>
+											</Label>
+
+											<Alert type="warning" title="Limitation" size="xs">
+												Setting priority is only available for enterprise edition and not available
+												on the cloud.
+											</Alert>
 										</Section>
 									{:else if advancedSelected === 'runtime' && advancedRuntimeSelected === 'lifetime'}
 										<div>

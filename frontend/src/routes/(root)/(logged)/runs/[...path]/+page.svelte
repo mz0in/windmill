@@ -1,13 +1,12 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte'
 	import {
 		JobService,
 		Job,
 		CompletedJob,
-		ScriptService,
-		FlowService,
 		UserService,
-		FolderService
+		FolderService,
+		ScriptService,
+		FlowService
 	} from '$lib/gen'
 
 	import { page } from '$app/stores'
@@ -18,7 +17,6 @@
 
 	import JobPreview from '$lib/components/runs/JobPreview.svelte'
 	import Tooltip from '$lib/components/Tooltip.svelte'
-	import { RefreshCw } from 'lucide-svelte'
 	import CalendarPicker from '$lib/components/common/calendarPicker/CalendarPicker.svelte'
 
 	import RunsTable from '$lib/components/runs/RunsTable.svelte'
@@ -27,15 +25,15 @@
 	import RunsFilter from '$lib/components/runs/RunsFilter.svelte'
 	import Toggle from '$lib/components/Toggle.svelte'
 	import ConfirmationModal from '$lib/components/common/confirmationModal/ConfirmationModal.svelte'
-	import { tweened, type Tweened } from 'svelte/motion'
-	import { goto } from '$app/navigation'
+	import type { Tweened } from 'svelte/motion'
 	import RunsQueue from '$lib/components/runs/RunsQueue.svelte'
-	import { forLater } from '$lib/forLater'
 	import { twMerge } from 'tailwind-merge'
+	import ManuelDatePicker from '$lib/components/runs/ManuelDatePicker.svelte'
+	import JobLoader from '$lib/components/runs/JobLoader.svelte'
 
 	let jobs: Job[] | undefined
-	let intervalId: NodeJS.Timeout | undefined
 	let selectedId: string | undefined = undefined
+	let selectedWorkspace: string | undefined = undefined
 
 	// All Filters
 	// Filter by
@@ -63,246 +61,149 @@
 		? JSON.parse(decodeURIComponent($page.url.searchParams.get('result') ?? '{}'))
 		: undefined
 
-	let schedulePath = $page.url.searchParams.get('schedule_path') ?? undefined
-	let jobKindsCat = $page.url.searchParams.get('job_kinds') ?? 'runs'
-
 	// Handled on the main page
 	let minTs = $page.url.searchParams.get('min_ts') ?? undefined
 	let maxTs = $page.url.searchParams.get('max_ts') ?? undefined
+	let schedulePath = $page.url.searchParams.get('schedule_path') ?? undefined
+	let jobKindsCat = $page.url.searchParams.get('job_kinds') ?? 'runs'
+	let allWorkspaces = $page.url.searchParams.get('all_workspaces') == 'true' ?? false
 
-	// This reactive statement is used to sync the url with the current state of the filters
-	$: {
+	let queue_count: Tweened<number> | undefined = undefined
+	let jobKinds: string | undefined = undefined
+	let loading: boolean = false
+	let paths: string[] = []
+	let usernames: string[] = []
+	let folders: string[] = []
+	let completedJobs: CompletedJob[] | undefined = undefined
+	let argError = ''
+	let resultError = ''
+	let filterTimeout: NodeJS.Timeout | undefined = undefined
+	let selectedManualDate = 0
+	let autoRefresh: boolean = true
+	let runDrawer: Drawer
+	let cancelAllJobs = false
+	let innerWidth = window.innerWidth
+	let jobLoader: JobLoader | undefined = undefined
+
+	let manualDatePicker: ManuelDatePicker
+
+	$: (user ||
+		folder ||
+		path ||
+		success !== undefined ||
+		isSkipped ||
+		hideSchedules ||
+		argFilter ||
+		resultFilter ||
+		schedulePath ||
+		jobKindsCat ||
+		minTs ||
+		maxTs ||
+		allWorkspaces ||
+		$workspaceStore) &&
+		setQuery()
+
+	function setQuery() {
 		let searchParams = new URLSearchParams()
 
-		user && searchParams.set('user', user)
-		folder && searchParams.set('folder', folder)
+		if (user) {
+			searchParams.set('user', user)
+		} else {
+			searchParams.delete('user')
+		}
+
+		if (folder) {
+			searchParams.set('folder', folder)
+		} else {
+			searchParams.delete('folder')
+		}
 
 		if (success !== undefined) {
 			searchParams.set('success', success.toString())
+		} else {
+			searchParams.delete('success')
 		}
 
 		if (isSkipped) {
 			searchParams.set('is_skipped', isSkipped.toString())
+		} else {
+			searchParams.delete('is_skipped')
 		}
 
 		if (hideSchedules) {
 			searchParams.set('hide_scheduled', hideSchedules.toString())
+		} else {
+			searchParams.delete('hide_scheduled')
+		}
+
+		if (allWorkspaces && $workspaceStore == 'admins') {
+			searchParams.set('all_workspaces', allWorkspaces.toString())
+			searchParams.set('workspace', 'admins')
+		} else {
+			searchParams.delete('all_workspaces')
 		}
 
 		// ArgFilter is an object. Encode it to a string
-		argFilter && searchParams.set('arg', encodeURIComponent(JSON.stringify(argFilter)))
-		resultFilter && searchParams.set('result', encodeURIComponent(JSON.stringify(resultFilter)))
-		schedulePath && searchParams.set('schedule_path', schedulePath)
+		if (argFilter) {
+			searchParams.set('arg', encodeURIComponent(JSON.stringify(argFilter)))
+		} else {
+			searchParams.delete('arg')
+		}
 
-		jobKindsCat != 'runs' && searchParams.set('job_kinds', jobKindsCat)
+		if (resultFilter) {
+			searchParams.set('result', encodeURIComponent(JSON.stringify(resultFilter)))
+		} else {
+			searchParams.delete('result')
+		}
+		if (schedulePath) {
+			searchParams.set('schedule_path', schedulePath)
+		} else {
+			searchParams.delete('schedule_path')
+		}
+		if (jobKindsCat != 'runs') {
+			searchParams.set('job_kinds', jobKindsCat)
+		} else {
+			searchParams.delete('job_kinds')
+		}
 
-		minTs && searchParams.set('min_ts', minTs)
-		maxTs && searchParams.set('max_ts', maxTs)
+		if (minTs) {
+			searchParams.set('min_ts', minTs)
+		} else {
+			searchParams.delete('min_ts')
+		}
+
+		if (maxTs) {
+			searchParams.set('max_ts', maxTs)
+		} else {
+			searchParams.delete('max_ts')
+		}
 
 		let newPath = path ? `/${path}` : '/'
 		let newUrl = `/runs${newPath}?${searchParams.toString()}`
-
-		goto(newUrl)
+		history.replaceState(history.state, '', newUrl.toString())
 	}
 
-	let queue_count: Tweened<number> | undefined = undefined
-
-	$: jobKinds = computeJobKinds(jobKindsCat)
-
-	function computeJobKinds(jobKindsCat: string | undefined): string {
-		if (jobKindsCat == 'all') {
-			return `${CompletedJob.job_kind.SCRIPT},${CompletedJob.job_kind.FLOW},${CompletedJob.job_kind.DEPENDENCIES},${CompletedJob.job_kind.FLOWDEPENDENCIES},${CompletedJob.job_kind.APPDEPENDENCIES},${CompletedJob.job_kind.PREVIEW},${CompletedJob.job_kind.FLOWPREVIEW},${CompletedJob.job_kind.SCRIPT_HUB},${CompletedJob.job_kind.DEPLOYMENTCALLBACK},${CompletedJob.job_kind.SINGLESCRIPTFLOW}`
-		} else if (jobKindsCat == 'dependencies') {
-			return `${CompletedJob.job_kind.DEPENDENCIES},${CompletedJob.job_kind.FLOWDEPENDENCIES},${CompletedJob.job_kind.APPDEPENDENCIES}`
-		} else if (jobKindsCat == 'previews') {
-			return `${CompletedJob.job_kind.PREVIEW},${CompletedJob.job_kind.FLOWPREVIEW}`
-		} else if (jobKindsCat == 'deploymentcallbacks') {
-			return `${CompletedJob.job_kind.DEPLOYMENTCALLBACK}`
-		} else {
-			return `${CompletedJob.job_kind.SCRIPT},${CompletedJob.job_kind.FLOW},${CompletedJob.job_kind.SINGLESCRIPTFLOW}`
+	function reloadLogsWithoutFilterError() {
+		if (resultError == '' && argError == '') {
+			filterTimeout && clearTimeout(filterTimeout)
+			filterTimeout = setTimeout(() => {
+				jobLoader?.loadJobs(minTs, maxTs, true)
+			}, 2000)
 		}
 	}
 
-	$: ($workspaceStore && loadJobs()) ||
-		(path && success && isSkipped && jobKinds && user && folder && minTs && maxTs && hideSchedules)
+	function reset() {
+		minTs = undefined
+		maxTs = undefined
 
-	async function fetchJobs(
-		startedBefore: string | undefined,
-		startedAfter: string | undefined
-	): Promise<Job[]> {
-		return JobService.listJobs({
-			workspace: $workspaceStore!,
-			createdOrStartedBefore: startedBefore,
-			createdOrStartedAfter: startedAfter,
-			schedulePath,
-			scriptPathExact: path === null || path === '' ? undefined : path,
-			createdBy: user === null || user === '' ? undefined : user,
-			scriptPathStart: folder === null || folder === '' ? undefined : `f/${folder}/`,
-			jobKinds,
-			success: success == 'success' ? true : success == 'failure' ? false : undefined,
-			running: success == 'running' ? true : undefined,
-			isSkipped,
-			isFlowStep: jobKindsCat != 'all' ? false : undefined,
-			args:
-				argFilter && argFilter != '{}' && argFilter != '' && argError == '' ? argFilter : undefined,
-			result:
-				resultFilter && resultFilter != '{}' && resultFilter != '' && resultError == ''
-					? resultFilter
-					: undefined
-		})
+		autoRefresh = true
+		jobs = undefined
+		completedJobs = undefined
+		selectedManualDate = 0
+		selectedId = undefined
+		selectedWorkspace = undefined
+		jobLoader?.loadJobs(minTs, maxTs, true)
 	}
-
-	let loading: boolean = false
-	async function loadJobs(): Promise<void> {
-		loading = true
-		getCount()
-		try {
-			jobs = await fetchJobs(maxTs, minTs)
-
-			computeCompletedJobs()
-
-			if (hideSchedules && !schedulePath) {
-				jobs = jobs.filter(
-					(job) => !(job && 'running' in job && job.scheduled_for && forLater(job.scheduled_for))
-				)
-			}
-		} catch (err) {
-			sendUserToast(`There was a problem fetching jobs: ${err}`, true)
-			console.error(JSON.stringify(err))
-		}
-		loading = false
-	}
-
-	async function getCount() {
-		const qc = (await JobService.getQueueCount({ workspace: $workspaceStore! })).database_length
-		if (queue_count) {
-			queue_count.set(qc)
-		} else {
-			queue_count = tweened(qc, { duration: 1000 })
-		}
-	}
-
-	async function syncer() {
-		getCount()
-		if (sync && jobs && maxTs == undefined) {
-			if (success == 'running') {
-				loadJobs()
-			} else {
-				let ts: string | undefined = undefined
-				let cursor = 0
-				while (cursor < jobs.length && minTs == undefined) {
-					let invCursor = jobs.length - 1 - cursor
-					let isQueuedJob =
-						cursor == jobs?.length - 1 || jobs[invCursor].type == Job.type.QUEUED_JOB
-					if (isQueuedJob) {
-						if (cursor > 0) {
-							const date = new Date(jobs[invCursor + 1]?.created_at!)
-							date.setMilliseconds(date.getMilliseconds() + 1)
-							ts = date.toISOString()
-						}
-						break
-					}
-					cursor++
-				}
-
-				loading = true
-				const newJobs = await fetchJobs(maxTs, minTs ?? ts)
-				if (newJobs && newJobs.length > 0 && jobs) {
-					const oldJobs = jobs?.map((x) => x.id)
-					jobs = newJobs.filter((x) => !oldJobs.includes(x.id)).concat(jobs)
-					newJobs
-						.filter((x) => oldJobs.includes(x.id))
-						.forEach((x) => (jobs![jobs?.findIndex((y) => y.id == x.id)!] = x))
-					jobs = jobs
-					computeCompletedJobs()
-
-					if (hideSchedules && !schedulePath) {
-						jobs = jobs.filter(
-							(job) =>
-								!(job && 'running' in job && job.scheduled_for && forLater(job.scheduled_for))
-						)
-					}
-				}
-				loading = false
-			}
-		}
-	}
-
-	let sync = true
-	let mounted: boolean = false
-
-	function updateFiltersFromURL() {
-		path = $page.params.path
-		user = $page.url.searchParams.get('user')
-		folder = $page.url.searchParams.get('folder')
-		success = ($page.url.searchParams.get('success') ?? undefined) as
-			| 'success'
-			| 'failure'
-			| 'running'
-			| undefined
-		isSkipped =
-			$page.url.searchParams.get('is_skipped') != undefined
-				? $page.url.searchParams.get('is_skipped') == 'true'
-				: false
-
-		hideSchedules =
-			$page.url.searchParams.get('hide_scheduled') != undefined
-				? $page.url.searchParams.get('hide_scheduled') == 'true'
-				: false
-
-		argFilter = $page.url.searchParams.get('arg')
-			? JSON.parse(decodeURIComponent($page.url.searchParams.get('arg') ?? '{}'))
-			: undefined
-		resultFilter = $page.url.searchParams.get('result')
-			? JSON.parse(decodeURIComponent($page.url.searchParams.get('result') ?? '{}'))
-			: undefined
-
-		schedulePath = $page.url.searchParams.get('schedule_path') ?? undefined
-		jobKindsCat = $page.url.searchParams.get('job_kinds') ?? 'runs'
-
-		// Handled on the main page
-		minTs = $page.url.searchParams.get('min_ts') ?? undefined
-	}
-
-	onMount(() => {
-		mounted = true
-		loadPaths()
-		loadUsernames()
-		loadFolders()
-		intervalId = setInterval(syncer, 5000)
-
-		document.addEventListener('visibilitychange', () => {
-			if (document.hidden) {
-				sync = false
-			} else {
-				sync = true
-			}
-		})
-
-		window.addEventListener('popstate', updateFiltersFromURL)
-		return () => {
-			window.removeEventListener('popstate', updateFiltersFromURL)
-		}
-	})
-
-	onDestroy(() => {
-		if (intervalId) {
-			clearInterval(intervalId)
-		}
-	})
-
-	$: if (mounted && !intervalId && autoRefresh) {
-		intervalId = setInterval(syncer, 5000)
-	}
-
-	$: if (mounted && intervalId && !autoRefresh) {
-		clearInterval(intervalId)
-		intervalId = undefined
-	}
-
-	let paths: string[] = []
-	let usernames: string[] = []
-	let folders: string[] = []
 
 	async function loadUsernames(): Promise<void> {
 		usernames = await UserService.listUsernames({ workspace: $workspaceStore! })
@@ -320,92 +221,37 @@
 		paths = npaths_scripts.concat(npaths_flows).sort()
 	}
 
-	let completedJobs: CompletedJob[] | undefined = undefined
-
-	function computeCompletedJobs() {
-		completedJobs =
-			jobs?.filter((x) => x.type == 'CompletedJob').map((x) => x as CompletedJob) ?? []
+	$: if ($workspaceStore) {
+		loadUsernames()
+		loadFolders()
+		loadPaths()
 	}
-
-	let argError = ''
-	let resultError = ''
-	let filterTimeout: NodeJS.Timeout | undefined = undefined
-
-	function reloadLogsWithoutFilterError() {
-		if (resultError == '' && argError == '') {
-			filterTimeout && clearTimeout(filterTimeout)
-			filterTimeout = setTimeout(() => {
-				loadJobs()
-			}, 2000)
-		}
-	}
-
-	const manualDates = [
-		{
-			label: 'Last 1000 runs',
-			setMinMax: () => {
-				minTs = undefined
-				maxTs = undefined
-			}
-		},
-		{
-			label: 'Within 30 seconds',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 30 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last minute',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last 5 minutes',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 5 * 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last 30 minutes',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 30 * 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last 24 hours',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 24 * 60 * 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last 7 days',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		},
-		{
-			label: 'Within last month',
-			setMinMax: () => {
-				minTs = new Date(new Date().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
-				maxTs = new Date().toISOString()
-			}
-		}
-	]
-
-	let selectedManualDate = 0
-	let autoRefresh: boolean = true
-	let runDrawer: Drawer
-	let cancelAllJobs = false
-
-	let innerWidth = window.innerWidth
 </script>
+
+<JobLoader
+	{allWorkspaces}
+	bind:jobs
+	{user}
+	{folder}
+	{path}
+	{success}
+	{isSkipped}
+	{argFilter}
+	{resultFilter}
+	{schedulePath}
+	{jobKindsCat}
+	computeMinAndMax={manualDatePicker?.computeMinMax}
+	bind:minTs
+	bind:maxTs
+	{jobKinds}
+	bind:queue_count
+	{autoRefresh}
+	bind:completedJobs
+	{argError}
+	{resultError}
+	bind:loading
+	bind:this={jobLoader}
+/>
 
 <ConfirmationModal
 	title="Confirm cancelling all jobs"
@@ -414,7 +260,7 @@
 	on:confirmed={async () => {
 		cancelAllJobs = false
 		let uuids = await JobService.cancelAll({ workspace: $workspaceStore ?? '' })
-		loadJobs()
+		jobLoader?.loadJobs(minTs, maxTs, true, true)
 		sendUserToast(`Canceled ${uuids.length} jobs`)
 	}}
 	on:canceled={() => {
@@ -425,7 +271,7 @@
 <Drawer bind:this={runDrawer}>
 	<DrawerContent title="Run details" on:close={runDrawer.closeDrawer}>
 		{#if selectedId}
-			<JobPreview blankLink id={selectedId} />
+			<JobPreview blankLink id={selectedId} workspace={selectedWorkspace} />
 		{/if}
 	</DrawerContent>
 </Drawer>
@@ -465,6 +311,7 @@
 					bind:resultError
 					bind:jobKindsCat
 					bind:hideSchedules
+					bind:allWorkspaces
 					on:change={reloadLogsWithoutFilterError}
 					{usernames}
 					{folders}
@@ -480,21 +327,20 @@
 				on:zoom={async (e) => {
 					minTs = e.detail.min.toISOString()
 					maxTs = e.detail.max.toISOString()
+					jobLoader?.loadJobs(minTs, maxTs, true)
 				}}
 			/>
 		</div>
 		<div class="flex flex-col gap-1 md:flex-row w-full p-4">
-			<div class="flex gap-2 grow mb-2">
-				<RunsQueue {queue_count} />
-				<div class="flex"
-					><Button
-						size="xs"
-						color="light"
-						variant="contained"
-						title="Require to be an admin. Cancel all jobs in queue"
-						disabled={!$userStore?.is_admin && !$superadmin}
-						on:click={async () => (cancelAllJobs = true)}>Cancel All</Button
-					></div
+			<div class="flex gap-2 grow flex-row">
+				<RunsQueue {queue_count} {allWorkspaces} />
+				<Button
+					size="xs"
+					color="light"
+					variant="contained"
+					title="Require to be an admin. Cancel all jobs in queue"
+					disabled={!$userStore?.is_admin && !$superadmin}
+					on:click={async () => (cancelAllJobs = true)}>Cancel All</Button
 				>
 			</div>
 			<div class="flex flex-row gap-1 w-full max-w-xl">
@@ -532,47 +378,17 @@
 				</div>
 			</div>
 			<div class="flex flex-row gap-2 items-center">
-				<Button
-					size="xs"
-					color="light"
-					variant="border"
-					on:click={() => {
-						minTs = undefined
-						maxTs = undefined
-
-						autoRefresh = true
-						jobs = undefined
-						completedJobs = undefined
-						selectedManualDate = 0
-						selectedId = undefined
-						loadJobs()
+				<Button size="xs" color="light" variant="border" on:click={reset}>Reset</Button>
+				<ManuelDatePicker
+					on:loadJobs={() => {
+						jobLoader?.loadJobs(minTs, maxTs, true, true)
 					}}
-				>
-					Reset
-				</Button>
-				<Button
-					color="light"
-					size="xs"
-					wrapperClasses="border rounded-md"
-					on:click={() => {
-						manualDates[selectedManualDate].setMinMax()
-						loadJobs()
-					}}
-					dropdownItems={[
-						...manualDates.map((d, i) => ({
-							label: d.label,
-							onClick: () => {
-								selectedManualDate = i
-								d.setMinMax()
-								loadJobs()
-							}
-						}))
-					]}
-					startIcon={{ icon: RefreshCw, classes: loading ? 'animate-spin' : '' }}
-				>
-					{manualDates[selectedManualDate].label}
-				</Button>
-
+					bind:minTs
+					bind:maxTs
+					bind:selectedManualDate
+					{loading}
+					bind:this={manualDatePicker}
+				/>
 				<Toggle
 					size="xs"
 					bind:checked={autoRefresh}
@@ -589,6 +405,7 @@
 						<RunsTable
 							{jobs}
 							bind:selectedId
+							bind:selectedWorkspace
 							on:filterByPath={(e) => {
 								user = null
 								folder = null
@@ -615,7 +432,7 @@
 				</Pane>
 				<Pane size={40} minSize={15} class="border-t">
 					{#if selectedId}
-						<JobPreview id={selectedId} />
+						<JobPreview id={selectedId} workspace={selectedWorkspace} />
 					{:else}
 						<div class="text-xs m-4">No job selected</div>
 					{/if}
@@ -655,6 +472,7 @@
 					bind:argError
 					bind:resultError
 					bind:hideSchedules
+					bind:allWorkspaces
 					mobile={true}
 					on:change={reloadLogsWithoutFilterError}
 				/>
@@ -667,23 +485,22 @@
 				on:zoom={async (e) => {
 					minTs = e.detail.min.toISOString()
 					maxTs = e.detail.max.toISOString()
+					jobLoader?.loadJobs(minTs, maxTs, true)
 				}}
 			/>
 		</div>
 		<div class="flex flex-col gap-1 md:flex-row w-full p-4">
-			<div class="flex gap-2 grow mb-2">
+			<div class="flex items-center flex-row gap-2 grow mb-4">
 				{#if queue_count}
-					<RunsQueue {queue_count} />
+					<RunsQueue {queue_count} {allWorkspaces} />
 				{/if}
-				<div class="flex"
-					><Button
-						size="xs"
-						color="light"
-						variant="contained"
-						title="Require to be an admin. Cancel all jobs in queue"
-						disabled={!$userStore?.is_admin && !$superadmin}
-						on:click={async () => (cancelAllJobs = true)}>Cancel All</Button
-					></div
+				<Button
+					size="xs"
+					color="light"
+					variant="contained"
+					title="Require to be an admin. Cancel all jobs in queue"
+					disabled={!$userStore?.is_admin && !$superadmin}
+					on:click={async () => (cancelAllJobs = true)}>Cancel All</Button
 				>
 			</div>
 			<div class="flex flex-row gap-1 w-full max-w-xl">
@@ -721,48 +538,17 @@
 				</div>
 			</div>
 			<div class="flex flex-row gap-2 items-center">
-				<Button
-					size="xs"
-					color="light"
-					variant="border"
-					on:click={() => {
-						minTs = undefined
-						maxTs = undefined
-
-						autoRefresh = true
-						jobs = undefined
-						completedJobs = undefined
-						selectedManualDate = 0
-						selectedId = undefined
-						loadJobs()
+				<Button size="xs" color="light" variant="border" on:click={reset}>Reset</Button>
+				<ManuelDatePicker
+					on:loadJobs={() => {
+						jobLoader?.loadJobs(minTs, maxTs, true, true)
 					}}
-				>
-					Reset
-				</Button>
-				<Button
-					color="light"
-					size="xs"
-					wrapperClasses="border rounded-md"
-					on:click={() => {
-						manualDates[selectedManualDate].setMinMax()
-						loadJobs()
-					}}
-					dropdownItems={[
-						...manualDates.map((d, i) => ({
-							label: d.label,
-							onClick: () => {
-								selectedManualDate = i
-								d.setMinMax()
-								loadJobs()
-							}
-						}))
-					]}
-				>
-					<div class="flex flex-row items-center gap-2">
-						<RefreshCw size={14} class={loading ? 'animate-spin' : ''} />
-						{manualDates[selectedManualDate].label}
-					</div>
-				</Button>
+					bind:this={manualDatePicker}
+					bind:minTs
+					bind:maxTs
+					bind:selectedManualDate
+					{loading}
+				/>
 
 				<Toggle
 					size="xs"
@@ -776,6 +562,7 @@
 			<RunsTable
 				{jobs}
 				bind:selectedId
+				bind:selectedWorkspace
 				on:select={() => {
 					runDrawer.openDrawer()
 				}}

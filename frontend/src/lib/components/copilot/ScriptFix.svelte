@@ -59,11 +59,13 @@
 			await sleep(300)
 			showDiff()
 		} catch (err) {
-			if (err?.message) {
-				sendUserToast('Failed to generate code: ' + err.message, true)
-			} else {
-				sendUserToast('Failed to generate code', true)
-				console.error(err)
+			if (!abortController?.signal.aborted) {
+				if (err?.message) {
+					sendUserToast('Failed to generate code: ' + err.message, true)
+				} else {
+					sendUserToast('Failed to generate code', true)
+					console.error(err)
+				}
 			}
 			closePopup()
 		} finally {
@@ -160,11 +162,14 @@
 					<Button
 						title="Fix code"
 						size="xs"
-						color={genLoading ? 'red' : 'blue'}
+						color={genLoading ? 'red' : 'light'}
 						spacingSize="xs2"
 						startIcon={genLoading ? undefined : { icon: Wand2 }}
 						nonCaptureEvent={!genLoading}
 						on:click={genLoading ? () => abortController?.abort() : undefined}
+						btnClasses={genLoading
+							? ''
+							: 'text-violet-800 dark:text-violet-400 bg-violet-100 dark:bg-gray-700'}
 						>{#if genLoading}
 							<WindmillIcon
 								white

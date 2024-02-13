@@ -14,7 +14,7 @@
 	import {
 		addNewBranch,
 		addNode,
-		findCollapseNode,
+		getFirstNode,
 		getParents,
 		insertNode,
 		removeBranch,
@@ -52,6 +52,12 @@
 	}
 
 	function buildStartNode() {
+		const firstNode = getFirstNode(nodes)
+
+		if (!firstNode) {
+			return
+		}
+
 		const startNodeConfig = {
 			id: 'start',
 			data: {
@@ -62,7 +68,7 @@
 							id: 'start',
 							label: 'Start',
 							next: {
-								id: nodes[0].id,
+								id: firstNode.id,
 								condition: {
 									type: 'evalv2',
 									expr: 'true',
@@ -73,22 +79,23 @@
 						canDelete: false,
 						label: 'Start'
 					},
-					cb: (e: string, detail: any) => nodeCallbackHandler(e, detail, nodes[0], [])
+					cb: (e: string, detail: any) => nodeCallbackHandler(e, detail, undefined, [], false)
 				}
 			}
 		}
 
 		const startNode = createNode(startNodeConfig)
 		displayedNodes.push(startNode)
+
 		edges.push(
 			createEdge({
-				id: `start-${nodes[0].id}`,
+				id: `start-${firstNode?.id}`,
 				source: 'start',
-				target: nodes[0].id
+				target: firstNode?.id
 			})
 		)
 	}
-	const { app, runnableComponents, componentControl } =
+	const { app, runnableComponents, componentControl, debuggingComponents } =
 		getContext<AppViewerContext>('AppViewerContext')
 
 	function buildEndNode() {
@@ -174,7 +181,7 @@
 	function nodeCallbackHandler(
 		event: string,
 		detail: string,
-		graphNode: DecisionTreeNode,
+		graphNode: DecisionTreeNode | undefined,
 		parentIds: string[],
 		branchInsert: boolean = false
 	) {
@@ -183,25 +190,29 @@
 				$selectedNodeId = detail
 				const index = nodes.findIndex((node) => node.id === detail)
 				$componentControl?.[component.id]?.setTab?.(index)
+				$debuggingComponents[component.id] = index
 
 				break
 			case 'nodeInsert': {
 				addSubGrid()
 
 				if (branchInsert) {
-					if (parentIds.length === 1) {
+					if (parentIds.length === 1 && graphNode) {
+						// console.log('A', parentIds)
 						nodes = insertNode(nodes, parentIds[0], graphNode)
 					} else {
+						// console.log('B', parentIds)
 						// find parent with multiple next
 						const parentWithMultipleNext = nodes.find((node) => {
 							return node.next.length > 1 && parentIds.includes(node.id)
 						})
 
 						if (!parentWithMultipleNext) {
+							deleteSubgrid(nodes.length - 1)
 							return nodes
 						}
 
-						nodes = insertNode(nodes, parentWithMultipleNext.id, graphNode)
+						nodes = insertNode(nodes, parentWithMultipleNext.id, graphNode!)
 					}
 				} else {
 					nodes = addNode(nodes, graphNode)
@@ -211,21 +222,24 @@
 			}
 
 			case 'delete': {
-				const graphhNodeIndex = nodes.findIndex((node) => node.id == graphNode.id)
+				const graphhNodeIndex = nodes.findIndex((node) => node.id == graphNode?.id)
+
 				if (graphhNodeIndex > -1) {
 					deleteSubgrid(graphhNodeIndex)
 				}
+
 				nodes = removeNode(nodes, graphNode)
 				break
 			}
 			case 'addBranch': {
 				addSubGrid()
-				nodes = addNewBranch(nodes, graphNode)
+				nodes = addNewBranch(nodes, graphNode!)
 				break
 			}
 			case 'removeBranch': {
 				nodes = removeBranch(nodes, graphNode, parentIds[0], (nodeId) => {
 					const index = nodes.findIndex((node) => node.id === nodeId)
+
 					deleteSubgrid(index)
 				})
 				break
@@ -237,17 +251,16 @@
 	}
 
 	function buildGraphNodes() {
-		let branchCount = 1
-
 		nodes?.forEach((graphNode, index) => {
 			const parentIds = getParents(nodes, graphNode.id)
 			const parentNext = nodes.find((node) => node.id == parentIds[0])?.next
 			const hasParentBranches = parentNext ? parentNext.length > 1 : false
 
 			if (hasParentBranches) {
+				const positionRelativeToParent = parentNext?.findIndex((next) => next.id == graphNode.id)
 				const branchHeaderId = `${parentIds[0]}-${graphNode.id}-branch-header`
-				const collapseNode = findCollapseNode(nodes, parentIds[0])
 
+				// We create a header node for the branch, which will be the parent of the actual node
 				displayedNodes.push(
 					createNode({
 						id: branchHeaderId,
@@ -258,10 +271,13 @@
 									node: graphNode,
 									canDelete: true,
 									label:
-										collapseNode === graphNode.id ? 'Default branch' : `Branch ${branchCount++}`
+										positionRelativeToParent === 0
+											? 'Default branch'
+											: `Branch ${positionRelativeToParent}`
 								},
-								cb: (e: string, detail: any) =>
+								cb: (e: string, detail: any) => {
 									nodeCallbackHandler(e, detail, graphNode, parentIds, true)
+								}
 							}
 						},
 						parentIds: [parentIds[0]]
@@ -272,6 +288,7 @@
 					graphNode.next.length === 0 ||
 					(graphNode.next.length === 1 && getParents(nodes, graphNode.next[0].id).length > 1)
 
+				// We create the actual node
 				displayedNodes.push(
 					createNode({
 						id: graphNode.id,
@@ -280,12 +297,12 @@
 								component: DecisionTreeGraphNode,
 								props: {
 									node: graphNode,
-									canDelete:
-										graphNode.next.length === 1 && getParents(nodes, graphNode.id).length === 1,
+									canDelete: !(graphNode.next.length > 1 && parentIds.length > 1),
 									canAddBranch: !cannotAddBranch,
 									index
 								},
-								cb: (e: string, detail: any) => nodeCallbackHandler(e, detail, graphNode, parentIds)
+								cb: (e: string, detail: any) =>
+									nodeCallbackHandler(e, detail, graphNode, parentIds, false)
 							}
 						},
 						parentIds: [
@@ -298,6 +315,7 @@
 					})
 				)
 
+				// Edge between branch header and node
 				edges.push(
 					createEdge({
 						id: `${graphNode.id}-${branchHeaderId}`,
@@ -338,11 +356,14 @@
 								component: DecisionTreeGraphNode,
 								props: {
 									node: graphNode,
-									canDelete: !cannotAddBranch,
+									canDelete:
+										!cannotAddBranch &&
+										(graphNode.next.length == 1 || !parentIds.includes('start')),
 									canAddBranch: !cannotAddBranch,
 									index
 								},
-								cb: (e: string, detail: any) => nodeCallbackHandler(e, detail, graphNode, parentIds)
+								cb: (e: string, detail: any) =>
+									nodeCallbackHandler(e, detail, graphNode, parentIds, false)
 							}
 						},
 						parentIds: parentIds
@@ -443,7 +464,7 @@
 	})
 
 	$: if (nodes.length > 0 && !$selectedNodeId) {
-		$selectedNodeId = nodes[0].id
+		$selectedNodeId = getFirstNode(nodes)?.id
 	}
 </script>
 

@@ -54,6 +54,8 @@
 		args = nargs
 	}
 
+	let keys: string[] = []
+
 	function removeExtraKey() {
 		const nargs = {}
 		Object.keys(args ?? {}).forEach((key) => {
@@ -68,7 +70,6 @@
 	let itemPicker: ItemPicker | undefined = undefined
 	let variableEditor: VariableEditor | undefined = undefined
 
-	let keys: string[] = []
 	$: {
 		let lkeys = Object.keys(schema?.properties ?? {})
 		if (schema?.properties && JSON.stringify(lkeys) != JSON.stringify(keys)) {
@@ -92,12 +93,14 @@
 	$: schema && reorder()
 
 	function reorder() {
-		console.log('reodering')
+		console.log('reordering')
 		if (schema?.order && Array.isArray(schema.order)) {
 			const n = {}
 
 			;(schema.order as string[]).forEach((x) => {
-				n[x] = schema.properties[x]
+				if (schema.properties && schema.properties[x] != undefined) {
+					n[x] = schema.properties[x]
+				}
 			})
 
 			Object.keys(schema.properties ?? {})

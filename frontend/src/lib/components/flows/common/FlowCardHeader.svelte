@@ -2,6 +2,7 @@
 	import Badge from '$lib/components/common/badge/Badge.svelte'
 	import Button from '$lib/components/common/button/Button.svelte'
 	import LanguageIcon from '$lib/components/common/languageIcons/LanguageIcon.svelte'
+	import MetadataGen from '$lib/components/copilot/MetadataGen.svelte'
 	import IconedPath from '$lib/components/IconedPath.svelte'
 	import { ScriptService, type FlowModule, type PathScript } from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
@@ -38,10 +39,18 @@
 				{#if flowModule.value.type === 'identity'}
 					<span class="font-bold text-xs">Identity (input copied to output)</span>
 				{:else if flowModule?.value.type === 'rawscript'}
-					<div class="w-8 mx-0.5">
+					<div class="mx-0.5">
 						<LanguageIcon lang={flowModule.value.language} width={20} height={20} />
 					</div>
-					<input bind:value={flowModule.summary} placeholder={'Summary'} class="w-full grow" />
+					<MetadataGen
+						bind:content={flowModule.summary}
+						promptConfigName="summary"
+						code={flowModule.value.content}
+						class="w-full"
+						elementProps={{
+							placeholder: 'Summary'
+						}}
+					/>
 				{:else if flowModule?.value.type === 'script' && 'path' in flowModule.value && flowModule.value.path}
 					<IconedPath path={flowModule.value.path} hash={flowModule.value.hash} class="grow" />
 

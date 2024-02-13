@@ -14,7 +14,7 @@
 	} from '$lib/gen'
 	import { userStore, workspaceStore } from '$lib/stores'
 	import type uFuzzy from '@leeoniya/ufuzzy'
-	import { Code2, LayoutDashboard, SearchCode } from 'lucide-svelte'
+	import { Code2, FoldVertical, LayoutDashboard, SearchCode, UnfoldVertical } from 'lucide-svelte'
 
 	export let filter = ''
 	export let subtab: 'flow' | 'script' | 'app' = 'script'
@@ -397,7 +397,7 @@
 			<div class="mt-10" />
 		{/if}
 		{#if !loading}
-			<div class="flex w-full flex-row-reverse gap-2">
+			<div class="flex w-full flex-row-reverse gap-2 mt-4 mb-1 items-center h-6">
 				<Toggle size="xs" bind:checked={archived} options={{ right: 'Show archived' }} />
 				{#if $userStore?.is_super_admin && $userStore.username.includes('@')}
 					<Toggle size="xs" bind:checked={filterUserFolders} options={{ right: 'Only f/*' }} />
@@ -411,18 +411,21 @@
 				<Toggle size="xs" bind:checked={treeView} options={{ right: 'Tree view' }} />
 				{#if treeView}
 					<Button
-						wrapperClasses="mb-0.5"
+						btnClasses="py-0 h-6"
 						size="xs"
-						variant="contained"
+						variant="border"
 						color="light"
 						on:click={() => (collapseAll = !collapseAll)}
+						startIcon={{
+							icon: collapseAll ? UnfoldVertical : FoldVertical
+						}}
 					>
 						{#if collapseAll}
-							Expand
+							Expand all
 						{:else}
-							Collapse
-						{/if}</Button
-					>
+							Collapse all
+						{/if}
+					</Button>
 				{/if}
 			</div>
 		{/if}

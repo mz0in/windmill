@@ -60,7 +60,7 @@ use windmill_common::{
     schedule::Schedule,
     scripts::{ScriptHash, ScriptLang},
     users::{SUPERADMIN_NOTIFICATION_EMAIL, SUPERADMIN_SECRET_EMAIL},
-    worker::{to_raw_value, WORKER_CONFIG},
+    worker::{to_raw_value, DEFAULT_TAGS_PER_WORKSPACE, WORKER_CONFIG},
     DB, METRICS_ENABLED,
 };
 
@@ -74,6 +74,10 @@ use crate::{
 
 lazy_static::lazy_static! {
     pub static ref HTTP_CLIENT: Client = reqwest::ClientBuilder::new()
+        .user_agent("windmill/beta")
+        .build().unwrap();
+
+    pub static ref HTTP_CLIENT_WORKER: Client = reqwest::ClientBuilder::new()
         .user_agent("windmill/beta")
         .build().unwrap();
 
@@ -127,7 +131,7 @@ pub async fn cancel_job<'c: 'async_recursion>(
     rsmq: Option<rsmq_async::MultiplexedRsmq>,
     force_cancel: bool,
 ) -> error::Result<(Transaction<'c, Postgres>, Option<Uuid>)> {
-    let job_running = get_queued_job(id, &w_id, &mut tx).await?;
+    let job_running = get_queued_job_tx(id, &w_id, &mut tx).await?;
 
     if job_running.is_none() {
         return Ok((tx, None));
@@ -586,9 +590,10 @@ pub async fn add_completed_job<
         .await?;
     }
     if queued_job.concurrent_limit.is_some() {
+        let concurrency_key = concurrency_key(db, queued_job).await;
         if let Err(e) = sqlx::query_scalar!(
             "UPDATE concurrency_counter SET job_uuids = job_uuids - $2 WHERE concurrency_id = $1",
-            queued_job.full_path(),
+            concurrency_key,
             queued_job.id.hyphenated().to_string(),
         )
         .execute(&mut tx)
@@ -964,6 +969,7 @@ pub async fn handle_maybe_scheduled_job<'c, R: rsmq_async::RsmqConnection + Clon
     script_path: &str,
     w_id: &str,
 ) -> windmill_common::error::Result<QueueTransaction<'c, R>> {
+    tracing::info!("Schedule {schedule_path} scheduling next job for {script_path} in {w_id}",);
     let schedule = get_schedule_opt(tx.transaction_mut(), w_id, schedule_path).await?;
 
     if schedule.is_none() {
@@ -1026,6 +1032,13 @@ pub async fn handle_maybe_scheduled_job<'c, R: rsmq_async::RsmqConnection + Clon
             }
         }
     } else {
+        if script_path != schedule.script_path {
+            tracing::warn!(
+                "Schedule {schedule_path} in {w_id} has a different script path than the job. Not scheduling again"
+            );
+        } else {
+            tracing::info!("Schedule {schedule_path} in {w_id} is disabled. Not scheduling again.");
+        }
         Ok(tx)
     }
 }
@@ -1437,6 +1450,8 @@ pub async fn pull<R: rsmq_async::RsmqConnection + Send + Clone>(
         // Else the job is subject to concurrency limits
         let job_script_path = pulled_job.script_path.clone().unwrap();
 
+        let job_concurrency_key = concurrency_key(db, &pulled_job).await;
+        tracing::warn!("Concurrency key is '{}'", job_concurrency_key);
         let job_custom_concurrent_limit = pulled_job.concurrent_limit.unwrap();
         // setting concurrency_time_window to 0 will count only the currently running jobs
         let job_custom_concurrency_time_window_s =
@@ -1464,7 +1479,7 @@ pub async fn pull<R: rsmq_async::RsmqConnection + Send + Clone>(
         ON CONFLICT (concurrency_id) 
         DO UPDATE SET job_uuids = jsonb_set(concurrency_counter.job_uuids, array[$3], '{}')
         RETURNING (SELECT COUNT(*) FROM jsonb_object_keys(job_uuids))",
-            pulled_job.full_path(),
+            job_concurrency_key,
             jobs_uuids_init_json_value,
             pulled_job.id.hyphenated().to_string(),
         )
@@ -1518,7 +1533,7 @@ pub async fn pull<R: rsmq_async::RsmqConnection + Send + Clone>(
         }
         let x = sqlx::query_scalar!(
             "UPDATE concurrency_counter SET job_uuids = job_uuids - $2 WHERE concurrency_id = $1 RETURNING (SELECT COUNT(*) FROM jsonb_object_keys(job_uuids))",
-            pulled_job.full_path(),
+            job_concurrency_key,
             pulled_job.id.hyphenated().to_string(),
 
         )
@@ -1774,6 +1789,55 @@ async fn pull_single_job_and_mark_as_running_no_concurrency_limit<
         }
     };
     Ok(job)
+}
+
+async fn concurrency_key(db: &Pool<Postgres>, queued_job: &QueuedJob) -> String {
+    if queued_job.is_flow() {
+        // custom concurrency keys are not yet supported for flows
+        queued_job.full_path_with_workspace()
+    } else {
+        let concurrency_key = sqlx::query_scalar!(
+            "SELECT concurrency_key FROM script WHERE hash = $1",
+            queued_job.script_hash.unwrap_or(ScriptHash(0)).0
+        )
+        .fetch_one(db)
+        .await;
+        match concurrency_key {
+            Ok(Some(custom_concurrency_key)) => {
+                let workspaced =
+                    custom_concurrency_key.replace("$workspace", queued_job.workspace_id.as_str());
+                if RE_ARG_TAG.is_match(&workspaced) {
+                    let mut interpolated = workspaced.clone();
+                    for cap in RE_ARG_TAG.captures_iter(&workspaced) {
+                        let arg_name = cap.get(1).unwrap().as_str();
+                        let arg_value = match queued_job.args.as_ref() {
+                            Some(Json(args_map_json)) => match args_map_json.get(arg_name) {
+                                Some(arg_value_raw) => {
+                                    serde_json::to_string(arg_value_raw).unwrap_or_default()
+                                }
+                                None => "".to_string(),
+                            },
+                            None => "".to_string(),
+                        };
+                        interpolated = interpolated
+                            .replace(format!("$args[{}]", arg_name).as_str(), arg_value.as_str());
+                    }
+                    interpolated
+                } else {
+                    workspaced
+                }
+            }
+            Ok(None) => queued_job.full_path_with_workspace(),
+            _ => {
+                tracing::warn!(
+                    "Unable to retrieve concurrency key for script {:?} | {:?}",
+                    queued_job.script_path,
+                    queued_job.script_hash
+                );
+                queued_job.full_path_with_workspace()
+            }
+        }
+    }
 }
 
 #[derive(FromRow)]
@@ -2110,7 +2174,7 @@ pub async fn job_is_complete(db: &DB, id: Uuid, w_id: &str) -> error::Result<boo
     .unwrap_or(false))
 }
 
-pub async fn get_queued_job<'c>(
+pub async fn get_queued_job_tx<'c>(
     id: Uuid,
     w_id: &str,
     tx: &mut Transaction<'c, Postgres>,
@@ -2122,6 +2186,22 @@ pub async fn get_queued_job<'c>(
     .bind(id)
     .bind(w_id)
     .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(row) = r {
+        Ok(Some(QueuedJob::from_row(&row)?.to_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn get_queued_job(id: Uuid, w_id: &str, db: &DB) -> error::Result<Option<QueuedJob>> {
+    let r = sqlx::query(
+        "SELECT *
+            FROM queue WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(id)
+    .bind(w_id)
+    .fetch_optional(db)
     .await?;
     if let Some(row) = r {
         Ok(Some(QueuedJob::from_row(&row)?.to_owned()))
@@ -2162,7 +2242,7 @@ macro_rules! fetch_scalar_isolated {
 
 use sqlx::types::JsonRawValue;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct PushArgs<T> {
     #[serde(flatten)]
     pub extra: HashMap<String, Box<RawValue>>,
@@ -2233,7 +2313,7 @@ where
                 .into_iter()
                 .map(|(k, v)| (k, to_raw_value(&v)))
                 .collect::<HashMap<_, _>>();
-            return Ok(PushArgs { extra: HashMap::new(), args: Json(payload) });
+            return Ok(PushArgs { extra, args: Json(payload) });
         } else {
             Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response())
         }
@@ -2514,6 +2594,20 @@ pub async fn push<'c, T: Serialize + Send + Sync, R: rsmq_async::RsmqConnection 
             None,
             None,
             dedicated_worker,
+            None,
+        ),
+        JobPayload::RawScriptDependencies { script_path, content, language } => (
+            None,
+            Some(script_path),
+            Some((content, None)),
+            JobKind::Dependencies,
+            None,
+            None,
+            Some(language),
+            None,
+            None,
+            None,
+            None,
             None,
         ),
         JobPayload::FlowDependencies { path, dedicated_worker } => {
@@ -2844,6 +2938,8 @@ pub async fn push<'c, T: Serialize + Send + Sync, R: rsmq_async::RsmqConnection 
         .map(|e| (Some(e.0), e.1))
         .unwrap_or_else(|| (None, None));
 
+    let per_workspace: bool = DEFAULT_TAGS_PER_WORKSPACE.load(std::sync::atomic::Ordering::Relaxed);
+
     let tag = if dedicated_worker.is_some_and(|x| x) {
         format!(
             "{}:{}{}",
@@ -2856,27 +2952,16 @@ pub async fn push<'c, T: Serialize + Send + Sync, R: rsmq_async::RsmqConnection 
             script_path.clone().expect("dedicated script has a path")
         )
     } else if job_kind == JobKind::Script_Hub {
-        "hub".to_string()
+        if per_workspace {
+            format!("hub-{}", workspace_id)
+        } else {
+            "hub".to_string()
+        }
     } else {
         if tag == Some("".to_string()) {
             tag = None;
         }
-        let default = || {
-            if job_kind == JobKind::Flow
-                || job_kind == JobKind::FlowPreview
-                || job_kind == JobKind::Identity
-            {
-                "flow".to_string()
-            } else if job_kind == JobKind::Dependencies
-                || job_kind == JobKind::FlowDependencies
-                || job_kind == JobKind::DeploymentCallback
-            {
-                // using the dependency tag for deployment callback for now. We can create a separate tag when we need
-                "dependency".to_string()
-            } else {
-                "deno".to_string()
-            }
-        };
+
         let interpolated_tag = tag.map(|x| {
             let workspaced = x.as_str().replace("$workspace", workspace_id).to_string();
             if RE_ARG_TAG.is_match(&workspaced) {
@@ -2897,10 +2982,38 @@ pub async fn push<'c, T: Serialize + Send + Sync, R: rsmq_async::RsmqConnection 
             }
         });
 
+        let default = || {
+            let ntag = if job_kind == JobKind::Flow
+                || job_kind == JobKind::FlowPreview
+                || job_kind == JobKind::Identity
+            {
+                "flow".to_string()
+            } else if job_kind == JobKind::Dependencies
+                || job_kind == JobKind::FlowDependencies
+                || job_kind == JobKind::DeploymentCallback
+            {
+                // using the dependency tag for deployment callback for now. We can create a separate tag when we need
+                "dependency".to_string()
+            } else {
+                "deno".to_string()
+            };
+            if per_workspace {
+                format!("{}-{}", ntag, workspace_id)
+            } else {
+                ntag
+            }
+        };
+
         interpolated_tag.unwrap_or_else(|| {
             language
                 .as_ref()
-                .map(|x| x.as_str().to_string())
+                .map(|x| {
+                    if per_workspace {
+                        format!("{}-{}", x.as_str(), workspace_id)
+                    } else {
+                        x.as_str().to_string()
+                    }
+                })
                 .unwrap_or_else(default)
         })
     };
@@ -2966,7 +3079,7 @@ pub async fn push<'c, T: Serialize + Send + Sync, R: rsmq_async::RsmqConnection 
         root_job,
         tag,
         concurrent_limit,
-        concurrency_time_window_s,
+        if concurrent_limit.is_some() {  concurrency_time_window_s } else { None },
         custom_timeout,
         flow_step_id,
         cache_ttl,

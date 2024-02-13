@@ -174,7 +174,7 @@
 
 {#if componentSettings?.item?.data}
 	{@const component = componentSettings.item.data}
-	<div class="flex justify-between items-center px-3 py-2 bg-surface-selected">
+	<div class="flex justify-between items-center px-3 py-2 bg-surface-secondary">
 		<div class="text-xs text-primary font-semibold"
 			>{components[componentSettings.item.data.type]?.name ?? 'Unknown'}</div
 		>
@@ -220,12 +220,12 @@
 						<ComponentInputTypeEditor
 							{evalV2editor}
 							bind:componentInput={componentSettings.item.data.componentInput}
-							id={component.id}
 						/>
 
 						<div class="flex flex-col w-full gap-2 mt-2">
 							{#if componentSettings.item.data.componentInput.type === 'static'}
 								<StaticInputEditor
+									id={component.id}
 									fieldType={componentInput?.fieldType}
 									subFieldType={componentInput?.subFieldType}
 									format={componentInput?.format}
@@ -296,7 +296,7 @@
 									<div class="flex flex-row items-center gap-2 text-sm font-semibold">
 										Runnable Inputs
 
-										<Tooltip wrapperClass="flex">
+										<Tooltip>
 											The runnable inputs are inferred from the inputs of the flow or script
 											parameters this component is attached to.
 										</Tooltip>
@@ -371,6 +371,7 @@
 					inputSpecsConfiguration={initialConfiguration}
 					bind:inputSpecs={componentSettings.item.data.configuration}
 					userInputEnabled={false}
+					acceptSelf
 				/>
 			</PanelSection>
 		{:else if componentSettings.item.data.type != 'containercomponent'}

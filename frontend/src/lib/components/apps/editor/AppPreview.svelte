@@ -102,7 +102,8 @@
 		allIdsInPath,
 		darkMode,
 		cssEditorOpen: writable(false),
-		previewTheme: writable(undefined)
+		previewTheme: writable(undefined),
+		debuggingComponents: writable({})
 	})
 
 	let previousSelectedIds: string[] | undefined = undefined
@@ -133,7 +134,9 @@
 			css = currentAppStore.theme.css
 		} else if (currentAppStore.theme.type === 'path' && currentAppStore.theme.path) {
 			let loadedCss = await getTheme(workspace, currentAppStore.theme.path)
-			css = loadedCss.value
+			if (loadedCss) {
+				css = loadedCss.value
+			}
 		}
 	}
 

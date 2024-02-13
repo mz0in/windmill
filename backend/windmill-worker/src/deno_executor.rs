@@ -117,7 +117,13 @@ pub async fn generate_deno_lock(
         .current_dir(job_dir)
         .args(vec![
             "cache",
-            "--unstable",
+            "--unstable-unsafe-proto",
+            "--unstable-bare-node-builtins",
+            "--unstable-webgpu",
+            "--unstable-ffi",
+            "--unstable-fs",
+            "--unstable-worker-options",
+            "--unstable-http",
             "--lock=lock.json",
             "--lock-write",
             "--import-map",
@@ -218,7 +224,9 @@ async function run() {{
     await Deno.writeTextFile("result.json", res_json);
     Deno.exit(0);
 }}
-run().catch(async (e) => {{
+try {{
+    await run();
+}} catch(e) {{
     let err = {{ message: e.message, name: e.name, stack: e.stack }};
     let step_id = Deno.env.get("WM_FLOW_STEP_ID");
     if (step_id) {{
@@ -226,7 +234,7 @@ run().catch(async (e) => {{
     }}
     await Deno.writeTextFile("result.json", JSON.stringify(err));
     Deno.exit(1);
-}});
+}}
     "#,
         );
         write_file(job_dir, "wrapper.ts", &wrapper_content).await?;
@@ -278,7 +286,13 @@ run().catch(async (e) => {{
         args.push("--import-map");
         args.push(&import_map_path);
         args.push(&reload);
-        args.push("--unstable");
+        args.push("--unstable-unsafe-proto");
+        args.push("--unstable-bare-node-builtins");
+        args.push("--unstable-webgpu");
+        args.push("--unstable-ffi");
+        args.push("--unstable-fs");
+        args.push("--unstable-worker-options");
+        args.push("--unstable-http");
         if let Some(reqs) = requirements_o {
             if !reqs.is_empty() {
                 let _ = write_file(job_dir, "lock.json", &reqs).await?;
@@ -423,6 +437,8 @@ pub async fn start_worker(
         None,
         None,
         None,
+        None,
+        None,
     )
     .await;
     let context_envs = build_envs_map(context.to_vec()).await;
@@ -499,7 +515,13 @@ for await (const chunk of Deno.stdin.readable) {{
             "--import-map",
             &format!("{job_dir}/import_map.json"),
             &format!("--reload={base_internal_url}"),
-            "--unstable",
+            "--unstable-unsafe-proto",
+            "--unstable-bare-node-builtins",
+            "--unstable-webgpu",
+            "--unstable-ffi",
+            "--unstable-fs",
+            "--unstable-worker-options",
+            "--unstable-http",
             "-A",
             &format!("{job_dir}/wrapper.ts"),
         ],

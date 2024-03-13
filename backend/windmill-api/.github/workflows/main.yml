@@ -1,0 +1,35 @@
+backend/windmill-api/.github/workflows/main.yml:
+
+name: Build and Push
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          repository: mz0in/windmill
+
+      - name: Set up Depot CLI
+        run: |
+          curl -sSL https://github.com/depot/cli/releases/download/v2.50.0/depot-linux-amd64 -o depot
+          chmod +x depot
+          sudo mv depot /usr/local/bin/
+
+      - name: Authenticate with Depot
+        run: |
+          # Check if the existing token is valid or generate a new token
+          # Replace `YOUR_AUTH_TOKEN` with the correct authentication token or mechanism
+          depot auth login
+
+      - name: Build and Push Docker image
+        uses: depot/build-push-action@v1
+        with:
+          context: .
+          dockerfile: ./docker/DockerfileMssql
+          tag: ghcr.io/mz0in/windmill-ee:mssql

@@ -1,6 +1,6 @@
 [package]
 name = "windmill"
-version = "1.268.0"
+version = "1.290.1"
 authors.workspace = true
 edition.workspace = true
 
@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.268.0"
+version = "1.290.1"
 authors = ["Ruben Fiszel <ruben@windmill.dev>"]
 edition = "2021"
 
@@ -35,21 +35,27 @@ opt-level = 0
 incremental = true
 
 [features]
-enterprise = ["windmill-worker/enterprise", "windmill-queue/enterprise", "windmill-api/enterprise", "windmill-git-sync/enterprise"]
+default = []
+enterprise = ["windmill-worker/enterprise", "windmill-queue/enterprise", "windmill-api/enterprise", "windmill-git-sync/enterprise", "windmill-common/prometheus", "windmill-common/enterprise"]
 enterprise_saml = ["windmill-api/enterprise_saml"]
 stripe = ["windmill-api/stripe"]
 benchmark = ["windmill-api/benchmark", "windmill-worker/benchmark", "windmill-queue/benchmark"]
 flamegraph = ["windmill-common/flamegraph", "windmill-worker/flamegraph"]
 loki = ["windmill-common/loki"]
 pg_embed = ["dep:pg-embed"]
+embedding = ["windmill-api/embedding"]
+parquet = ["windmill-api/parquet", "windmill-common/parquet", "windmill-worker/parquet"]
+prometheus = ["windmill-common/prometheus", "windmill-api/prometheus", "windmill-worker/prometheus", "windmill-queue/prometheus"]
+flow_testing = ["windmill-worker/flow_testing"]
 
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
 dotenv.workspace = true
-windmill-common = { workspace = true, features = ["tracing_init"] }
+windmill-queue.workspace = true
+windmill-common = { workspace = true, default-features = false }
 windmill-git-sync.workspace = true
-windmill-api.workspace = true
+windmill-api = { workspace = true, default-features = false }
 windmill-worker.workspace = true
 futures.workspace = true
 tracing.workspace = true
@@ -69,6 +75,7 @@ uuid.workspace = true
 gethostname.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+deno_core.workspace = true
 pg-embed = {git = "https://github.com/faokunega/pg-embed", optional = true, default-features = false, features = ['rt_tokio']} 
 
 [dev-dependencies]
@@ -81,10 +88,10 @@ windmill-api-client.workspace = true
 
 
 [workspace.dependencies]
-windmill-api = { path = "./windmill-api" }
+windmill-api = { path = "./windmill-api", default-features = false  }
 windmill-queue = { path = "./windmill-queue" }
 windmill-worker = { path = "./windmill-worker" }
-windmill-common = { path = "./windmill-common" }
+windmill-common = { path = "./windmill-common", default-features = false }
 windmill-audit = { path = "./windmill-audit" }
 windmill-git-sync = { path = "./windmill-git-sync" }
 windmill-parser = { path = "./parsers/windmill-parser" }
@@ -126,7 +133,7 @@ rand = "0.8.5"
 rand_core = { version = "^0", features = ["std"] }
 magic-crypt = "^3"
 git-version = "^0"
-rustpython-parser = "0.3.0"
+rustpython-parser = { git = "https://github.com/RustPython/Parser", rev = "29c4728dbedc7e69cc2560b9b34058bbba9b1303" }
 cron = "^0"
 mail-send = { version = "0.4.0", features = ["builder"], default-features=false }
 urlencoding = "^2"
@@ -141,19 +148,19 @@ tokio-util = { version = "^0", features = ["io"] }
 json-pointer = "^0"
 itertools = "^0"
 regex = "^1"
-deno_fetch = "0.139.0"
-deno_tls = "0.102.0"
-deno_console = "0.115.0"
-deno_url = "0.115.0"
-deno_webidl = "0.115.0"
-deno_web = "0.146.0"
-deno_core = "0.200.0"
-deno_ast = { version = "0.28.0", features = ["transpiling"] }
+deno_fetch = "0.162.0"
+deno_tls = "0.125.0"
+deno_console = "0.138.0"
+deno_url = "0.138.0"
+deno_webidl = "0.138.0"
+deno_web = "0.169.0"
+deno_core = "0.262.0"
+deno_ast = { version = "0.33.3", features = ["transpiling"] }
 async-recursion = "^1"
-swc_common = "0.31.21"
-swc_ecma_parser = "0.137.15"
-swc_ecma_ast = "0.107.7"
-swc_ecma_visit = "0.93.7"
+swc_common = "=0.33.17"
+swc_ecma_parser = "=0.143.3"
+swc_ecma_ast = "=0.112.2"
+swc_ecma_visit = "=0.98.2"
 base64 = "0.21.0"
 hmac = "0.12.1"
 sha2 = "0.10.6"
@@ -219,3 +226,6 @@ polars = { version = "0.35.4", features = ["lazy", "parquet", "aws", "azure", "c
 polars-io = { version = "0.35.4", features = ["csv"] }
 object_store = { version = "0.8.0", features = ["aws", "azure"] }
 openidconnect = { version = "3.4.0" }
+
+aws-config = "^1"
+aws-sdk-sts = "^1"

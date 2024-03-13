@@ -368,6 +368,14 @@ export function insertNewGridItem(
 		: undefined
 
 	if (key && app.subgrids[key] === undefined) {
+		let parent = findGridItemById(app.grid, app.subgrids, key)?.data
+		let subgrids = parent?.numberOfSubgrids
+		if (subgrids === undefined) {
+			throw Error(`Invalid subgrid selected, the parent has no subgrids: ${key}, parent: ${JSON.stringify(parent)}`)
+		}
+		if (focusedGrid?.subGridIndex && (focusedGrid?.subGridIndex < 0 || focusedGrid?.subGridIndex >= subgrids)) {
+			throw Error(`Invalid subgrid selected: ${key}, max subgrids: ${subgrids}`)
+		}
 		// If ever the subgrid is undefined, we want to make sure it is defined
 		app.subgrids[key] = []
 	}
@@ -469,7 +477,17 @@ export function getAllSubgridsAndComponentIds(
 }
 
 export function getAllGridItems(app: App): GridItem[] {
-	return app.grid.concat(Object.values(app.subgrids ?? {}).flat())
+	return app.grid
+		.concat(Object.values(app.subgrids ?? {}).flat())
+		.map((x) => {
+			if (x?.data?.type === 'tablecomponent') {
+				return [x, ...x?.data?.actionButtons?.map((x) => ({ data: x, id: x.id }))]
+			} else if (x?.data?.type === 'menucomponent') {
+				return [x, ...x?.data?.menuItems?.map((x) => ({ data: x, id: x.id }))]
+			}
+			return [x]
+		})
+		.flat()
 }
 
 export function deleteGridItem(

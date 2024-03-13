@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::{
     db::{ApiAuthed, DB},
     ee::validate_license_key,
-    utils::require_super_admin,
+    utils::{generate_instance_username_for_all_users, require_super_admin},
     HTTP_CLIENT,
 };
 
@@ -26,7 +26,7 @@ use serde::Deserialize;
 use tokio::time::timeout;
 use windmill_common::{
     error::{self, to_anyhow, JsonResult, Result},
-    global_settings::ENV_SETTINGS,
+    global_settings::{AUTOMATE_USERNAME_CREATION_SETTING, ENV_SETTINGS},
     server::Smtp,
 };
 
@@ -56,8 +56,11 @@ pub async fn test_email(
     require_super_admin(&db, &authed.email).await?;
     let smtp = test_email.smtp;
     let to = test_email.to;
-    let client = SmtpClientBuilder::new(smtp.host, smtp.port)
+    let mut client = SmtpClientBuilder::new(smtp.host, smtp.port)
         .implicit_tls(smtp.tls_implicit.unwrap_or(false));
+    if std::env::var("ACCEPT_INVALID_CERTS").is_ok() {
+        client = client.allow_invalid_certs();
+    }
     let client = if let (Some(username), Some(password)) = (smtp.username, smtp.password) {
         if !username.is_empty() {
             client.credentials((username, password))
@@ -141,6 +144,22 @@ pub async fn set_global_setting_internal(
     key: String,
     value: serde_json::Value,
 ) -> error::Result<()> {
+    match key.as_str() {
+        AUTOMATE_USERNAME_CREATION_SETTING => {
+            if value.clone().as_bool().unwrap_or(false) {
+                generate_instance_username_for_all_users(db)
+                    .await
+                    .map_err(|err| {
+                        error::Error::InternalErr(format!(
+                            "Failed to generate instance wide usernames: {}",
+                            err
+                        ))
+                    })?;
+            }
+        }
+        _ => {}
+    }
+
     match value {
         serde_json::Value::Null => {
             delete_global_setting(db, &key).await?;
@@ -159,6 +178,7 @@ pub async fn set_global_setting_internal(
             tracing::info!("Set global setting {} to {}", key, v);
         }
     };
+
     Ok(())
 }
 
@@ -167,7 +187,10 @@ pub async fn get_global_setting(
     authed: ApiAuthed,
     Path(key): Path<String>,
 ) -> JsonResult<serde_json::Value> {
-    if !key.starts_with("default_error_handler_") && !key.starts_with("default_recovery_handler_") {
+    if !key.starts_with("default_error_handler_")
+        && !key.starts_with("default_recovery_handler_")
+        && key != AUTOMATE_USERNAME_CREATION_SETTING
+    {
         require_super_admin(&db, &authed.email).await?;
     }
     let value = sqlx::query!("SELECT value FROM global_settings WHERE name = $1", key)
@@ -180,7 +203,7 @@ pub async fn get_global_setting(
 
 pub async fn send_stats(Extension(db): Extension<DB>, authed: ApiAuthed) -> Result<String> {
     require_super_admin(&db, &authed.email).await?;
-    windmill_common::stats::send_stats(
+    windmill_common::stats_ee::send_stats(
         &"manual".to_string(),
         &windmill_common::utils::Mode::Server,
         &HTTP_CLIENT,

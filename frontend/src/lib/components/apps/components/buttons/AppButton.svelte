@@ -61,16 +61,6 @@
 		jobId: undefined
 	})
 
-	if (rowContext && rowInputs) {
-		const inputOutput = { result: outputs.result.peak(), loading: false }
-		rowInputs.set(id, inputOutput)
-	}
-
-	if (iterContext && listInputs) {
-		const inputOutput = { result: outputs.result.peak(), loading: false }
-		listInputs.set(id, inputOutput)
-	}
-
 	if (controls) {
 		$componentControl[id] = controls
 	}
@@ -220,19 +210,17 @@
 				on:click={handleClick}
 				size={resolvedConfig.size}
 				color={resolvedConfig.color}
+				startIcon={{
+					icon: resolvedConfig.beforeIcon ? beforeIconComponent : undefined
+				}}
+				endIcon={{
+					icon: resolvedConfig.afterIcon ? afterIconComponent : undefined
+				}}
 				{loading}
 			>
-				<span class="truncate inline-flex gap-2 items-center">
-					{#if resolvedConfig.beforeIcon && beforeIconComponent}
-						<svelte:component this={beforeIconComponent} size={14} />
-					{/if}
-					{#if resolvedConfig.label?.toString() && resolvedConfig.label?.toString()?.length > 0}
-						<div>{resolvedConfig.label.toString()}</div>
-					{/if}
-					{#if resolvedConfig.afterIcon && afterIconComponent}
-						<svelte:component this={afterIconComponent} size={14} />
-					{/if}
-				</span>
+				{#if resolvedConfig.label?.toString() && resolvedConfig.label?.toString()?.length > 0}
+					<div>{resolvedConfig.label.toString()}</div>
+				{/if}
 			</Button>
 		{/key}
 	</AlignWrapper>

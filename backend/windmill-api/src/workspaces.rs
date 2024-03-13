@@ -6,10 +6,10 @@
  * LICENSE-AGPL for a copy of the license.
  */
 
-#[cfg(feature = "stripe")]
-use std::str::FromStr;
+use std::collections::HashMap;
 
 use crate::db::ApiAuthed;
+use crate::utils::{get_instance_username_or_create_pending, INVALID_USERNAME_CHARS};
 use crate::BASE_URL;
 use crate::{
     apps::AppWithLastVersion,
@@ -18,10 +18,9 @@ use crate::{
     resources::{Resource, ResourceType},
     users::{send_email_if_possible, WorkspaceInvite, VALID_USERNAME},
     utils::require_super_admin,
-    webhook_util::{InstanceEvent, WebhookShared},
+    webhook_util::WebhookShared,
 };
-#[cfg(feature = "stripe")]
-use axum::response::Redirect;
+
 use axum::{
     body::StreamBody,
     extract::{Extension, Path, Query},
@@ -31,14 +30,13 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-#[cfg(feature = "stripe")]
-use chrono::{Datelike, TimeZone, Timelike};
-use magic_crypt::MagicCryptTrait;
+
+use itertools::Itertools;
 use regex::Regex;
-#[cfg(feature = "stripe")]
-use stripe::CustomerId;
+
 use uuid::Uuid;
-use windmill_audit::{audit_log, ActionKind};
+use windmill_audit::audit_ee::audit_log;
+use windmill_audit::ActionKind;
 use windmill_common::db::UserDB;
 use windmill_common::s3_helpers::LargeFileStorage;
 use windmill_common::schedule::Schedule;
@@ -49,13 +47,17 @@ use windmill_common::workspaces::WorkspaceGitSyncSettings;
 use windmill_common::{
     error::{to_anyhow, Error, JsonResult, Result},
     flows::Flow,
+    global_settings::AUTOMATE_USERNAME_CREATION_SETTING,
     oauth2::WORKSPACE_SLACK_BOT_TOKEN_PATH,
     scripts::{Schema, Script, ScriptLang},
     utils::{paginate, rd_string, require_admin, Pagination},
     variables::ExportableListableVariable,
 };
+use windmill_git_sync::handle_deployment_metadata;
 use windmill_queue::QueueTransaction;
 
+use crate::oauth2_ee::InstanceEvent;
+use crate::variables::{decrypt, encrypt};
 use hyper::{header, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -63,6 +65,11 @@ use sqlx::{FromRow, Postgres, Transaction};
 use tempfile::TempDir;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use windmill_common::utils::not_found_if_none;
+
+lazy_static::lazy_static! {
+    static ref WORKSPACE_KEY_REGEXP: Regex = Regex::new("^[a-zA-Z0-9]{64}$").unwrap();
+}
 
 pub fn workspaced_service() -> Router {
     let router = Router::new()
@@ -94,20 +101,19 @@ pub fn workspaced_service() -> Router {
         .route("/edit_git_sync_config", post(edit_git_sync_config))
         .route("/edit_default_app", post(edit_default_app))
         .route("/default_app", get(get_default_app))
+        .route(
+            "/default_scripts",
+            post(edit_default_scripts).get(get_default_scripts),
+        )
+        .route(
+            "/encryption_key",
+            get(get_encryption_key).post(set_encryption_key),
+        )
         .route("/leave", post(leave_workspace));
 
     #[cfg(feature = "stripe")]
     {
-        if STRIPE_KEY.is_none() {
-            return router;
-        } else {
-            tracing::info!("stripe enabled");
-
-            return router
-                .route("/premium_info", get(premium_info))
-                .route("/checkout", get(stripe_checkout))
-                .route("/billing_portal", get(stripe_portal));
-        }
+        crate::stripe_ee::add_stripe_routes(router)
     }
 
     #[cfg(not(feature = "stripe"))]
@@ -128,11 +134,6 @@ pub fn global_service() -> Router {
             "/create_workspace_require_superadmin",
             get(create_workspace_require_superadmin),
         )
-}
-
-#[cfg(feature = "enterprise")]
-lazy_static::lazy_static! {
-    pub static ref STRIPE_KEY: Option<String> = std::env::var("STRIPE_KEY").ok();
 }
 
 #[derive(FromRow, Serialize)]
@@ -167,6 +168,8 @@ pub struct WorkspaceSettings {
     pub large_file_storage: Option<serde_json::Value>, // effectively: DatasetsStorage
     pub git_sync: Option<serde_json::Value>,           // effectively: WorkspaceGitSyncSettings
     pub default_app: Option<String>,
+    pub automatic_billing: bool,
+    pub default_scripts: Option<serde_json::Value>,
 }
 
 #[derive(FromRow, Serialize, Debug)]
@@ -234,7 +237,7 @@ struct EditLargeFileStorageConfig {
 struct CreateWorkspace {
     id: String,
     name: String,
-    username: String,
+    username: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -277,7 +280,7 @@ pub struct NewWorkspaceInvite {
 #[derive(Deserialize)]
 pub struct NewWorkspaceUser {
     pub email: String,
-    pub username: String,
+    pub username: Option<String>,
     pub is_admin: bool,
     pub operator: bool,
 }
@@ -323,258 +326,6 @@ async fn is_premium(
     tx.commit().await?;
     Ok(Json(row))
 }
-
-#[derive(Serialize)]
-pub struct PremiumWorkspaceInfo {
-    pub premium: bool,
-    pub usage: Option<i32>,
-    pub seats: Option<i32>,
-}
-#[cfg(feature = "stripe")]
-async fn premium_info(
-    authed: ApiAuthed,
-    Extension(db): Extension<DB>,
-    Path(w_id): Path<String>,
-) -> JsonResult<PremiumWorkspaceInfo> {
-    require_admin(authed.is_admin, &authed.username)?;
-    let mut tx = db.begin().await?;
-    let row = sqlx::query!(
-        r#"SELECT premium, usage.usage as "usage?", workspace_settings.customer_id, workspace_settings.plan FROM workspace LEFT JOIN workspace_settings ON workspace_settings.workspace_id = $1 LEFT JOIN usage ON usage.id = $1 AND month_ = EXTRACT(YEAR FROM current_date) * 12 + EXTRACT(MONTH FROM current_date) AND usage.is_workspace IS true WHERE workspace.id = $1"#,
-       &w_id
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    let result = PremiumWorkspaceInfo { premium: row.premium, usage: row.usage, seats: None };
-    #[cfg(feature = "enterprise")]
-    let mut result = result;
-    #[cfg(feature = "enterprise")]
-    if row.premium && row.plan == Some("team".to_string()) {
-        let customer_id = row.customer_id.ok_or(Error::InternalErr(format!(
-            "no customer id for workspace {}",
-            w_id
-        )))?;
-        let client = stripe::Client::new(
-            STRIPE_KEY
-                .clone()
-                .ok_or(Error::InternalErr(format!("stripe key not set")))?,
-        );
-        let customer_id = CustomerId::from_str(&customer_id).map_err(to_anyhow)?;
-        let subscriptions = stripe::Subscription::list(
-            &client,
-            &stripe::ListSubscriptions {
-                customer: Some(customer_id.clone()),
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(to_anyhow)?;
-        if subscriptions.data.len() > 1 {
-            return Err(Error::InternalErr(format!("multiple subscriptions for customer {}, please contact us at ccontact@windmill.dev", customer_id)));
-        }
-        let subscription = subscriptions.data.get(0).ok_or_else(|| {
-            Error::InternalErr(format!("no subscription for customer {}", customer_id))
-        })?;
-        result.seats = subscription
-            .items
-            .data
-            .iter()
-            .filter_map(|item| {
-                item.price
-                    .clone()
-                    .map(|p| {
-                        p.metadata.map(|m| {
-                            m.get("plan")
-                                .filter(|plan| plan == &"team")
-                                .map(|_| item.quantity.map(|x| x as i32))
-                        })
-                    })
-                    .flatten()
-                    .flatten()
-                    .flatten()
-            })
-            .collect::<Vec<_>>()
-            .get(0)
-            .copied();
-    }
-
-    Ok(Json(result))
-}
-
-#[cfg(feature = "stripe")]
-#[derive(Deserialize)]
-struct PlanQuery {
-    plan: String,
-    seats: Option<i32>,
-}
-
-#[cfg(feature = "stripe")]
-async fn stripe_checkout(
-    authed: ApiAuthed,
-    Path(w_id): Path<String>,
-    Query(plan): Query<PlanQuery>,
-    Extension(db): Extension<DB>,
-) -> Result<Redirect> {
-    // #[cfg(feature = "enterprise")]
-    {
-        require_admin(authed.is_admin, &authed.username)?;
-        let client = stripe::Client::new(
-            STRIPE_KEY
-                .clone()
-                .ok_or(Error::InternalErr(format!("stripe key not set")))?,
-        );
-        let base_url = BASE_URL.read().await.clone();
-        let success_rd = format!("{}/workspace_settings/checkout?success=true", base_url);
-        let failure_rd = format!("{}/workspace_settings/checkout?success=false", base_url);
-        let checkout_session = {
-            let mut params = stripe::CreateCheckoutSession::new(&success_rd);
-            params.mode = Some(stripe::CheckoutSessionMode::Subscription);
-            params.cancel_url = Some(&failure_rd);
-            params.line_items = match plan.plan.as_str() {
-                "team" => Some(vec![stripe::CreateCheckoutSessionLineItems {
-                    quantity: Some(plan.seats.unwrap_or(1) as u64),
-                    price: Some("price_1NCNOgGU3NdFi9eLuG4fZuEP".to_string()),
-                    adjustable_quantity: Some(
-                        stripe::CreateCheckoutSessionLineItemsAdjustableQuantity {
-                            enabled: true,
-                            minimum: Some(1),
-                            ..Default::default()
-                        },
-                    ),
-                    ..Default::default()
-                }]),
-                _ => Err(Error::BadRequest("invalid plan".to_string()))?,
-            };
-            params.client_reference_id = Some(&w_id);
-            let customer_id = sqlx::query_scalar!(
-                "SELECT customer_id FROM workspace_settings WHERE workspace_id = $1",
-                &w_id
-            )
-            .fetch_one(&db)
-            .await?;
-
-            match customer_id {
-                Some(customer_id) => {
-                    params.customer = Some(CustomerId::from_str(&customer_id).map_err(to_anyhow)?)
-                }
-                _ => params.customer_email = Some(&authed.email),
-            }
-
-            let now = Utc::now();
-            params.subscription_data = Some(stripe::CreateCheckoutSessionSubscriptionData {
-                metadata: {
-                    let mut map = std::collections::HashMap::new();
-                    map.insert("workspace_id".to_string(), w_id.clone());
-                    Some(map)
-                },
-                billing_cycle_anchor: if now.day() == 1 && now.hour() < 12 {
-                    // no need to prorate so close to the billing cycle renew date
-                    None
-                } else {
-                    // first of the next month (and possibly next year) at noon UTC
-                    let date = if now.month() == 12 {
-                        Utc.with_ymd_and_hms(now.year() + 1, 1, 1, 12, 0, 0)
-                            .single()
-                            .unwrap()
-                    } else {
-                        Utc.with_ymd_and_hms(now.year(), now.month() + 1, 1, 12, 0, 0)
-                            .single()
-                            .unwrap()
-                    };
-                    Some(date.timestamp())
-                },
-                ..Default::default()
-            });
-
-            stripe::CheckoutSession::create(&client, params)
-                .await
-                .map_err(to_anyhow)?
-        };
-        let uri = checkout_session
-            .url
-            .ok_or_else(|| Error::InternalErr(format!("stripe checkout redirect issue")))?;
-        Ok(Redirect::to(&uri))
-    }
-}
-
-#[cfg(feature = "stripe")]
-async fn stripe_portal(
-    authed: ApiAuthed,
-    Path(w_id): Path<String>,
-    Extension(db): Extension<DB>,
-) -> Result<Redirect> {
-    require_admin(authed.is_admin, &authed.username)?;
-    let customer_id = sqlx::query_scalar!(
-        "SELECT customer_id FROM workspace_settings WHERE workspace_id = $1",
-        w_id
-    )
-    .fetch_one(&db)
-    .await?
-    .ok_or_else(|| Error::InternalErr(format!("no customer id for workspace {}", w_id)))?;
-    let client = stripe::Client::new(
-        STRIPE_KEY
-            .clone()
-            .ok_or(Error::InternalErr(format!("stripe key not set")))?,
-    );
-    let success_rd = format!(
-        "{}/workspace_settings?tab=premium",
-        BASE_URL.read().await.clone()
-    );
-    let portal_session = {
-        let customer_id = CustomerId::from_str(&customer_id).unwrap();
-        let mut params = stripe::CreateBillingPortalSession::new(customer_id);
-        params.return_url = Some(&success_rd);
-        stripe::BillingPortalSession::create(&client, params)
-            .await
-            .map_err(to_anyhow)?
-    };
-    Ok(Redirect::to(&portal_session.url))
-}
-
-// async fn stripe_usage(
-//     authed: ApiAuthed,
-//     Path(w_id): Path<String>,
-//     Extension(db): Extension<DB>,
-//     Extension(base_url): Extension<Arc<BaseUrl>>,
-// ) -> Result<Redirect> {
-//     require_admin(authed.is_admin, &authed.username)?;
-//     let customer_id = sqlx::query_scalar!(
-//         "SELECT customer_id FROM workspace_settings WHERE workspace_id = $1",
-//         w_id
-//     )
-//     .fetch_one(&db)
-//     .await?
-//     .ok_or_else(|| Error::InternalErr(format!("no customer id for workspace {}", w_id)))?;
-//     let client = stripe::Client::new(std::env::var("STRIPE_KEY").expect("STRIPE_KEY"));
-//     let success_rd = format!("{}/workspace_settings?tab=premium", base_url.0);
-//     let portal_session = {
-//         let customer_id = CustomerId::from_str(&customer_id).unwrap();
-//         let subscriptions = stripe::Subscription::list(
-//             &client,
-//             stripe::ListSubscriptions { customer: Some(customer_id), ..Default::default() },
-//         )
-//         .await
-//         .map_err(to_anyhow)?
-//         .data[0];
-//         let getUsage =
-//             stripe::SubscriptionItem::list(
-//                 &client,
-//                 stripe::ListSubscriptionItems {
-//                     subscription: subscription.id,
-//                     ..Default::default()
-//                 },
-//             )
-//             .await
-//             .map_err(to_anyhow)
-//         };
-//         let mut params = stripe::ListSubscriptionItems::new(customer_id);
-//         params.return_url = Some(&success_rd);
-//         stripe::BillingPortalSession::create(&client, params)
-//             .await
-//             .map_err(to_anyhow)?
-//     };
-// }
 
 async fn exists_workspace(
     authed: ApiAuthed,
@@ -795,47 +546,62 @@ async fn auto_add_user(
     operator: &bool,
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<()> {
-    let mut username = email
-        .split('@')
-        .next()
-        .unwrap()
-        .to_string()
-        .replace(".", "");
+    let automate_username_creation = sqlx::query_scalar!(
+        "SELECT value FROM global_settings WHERE name = $1",
+        AUTOMATE_USERNAME_CREATION_SETTING,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|v| v.as_bool())
+    .flatten()
+    .unwrap_or(false);
 
-    username = INVALID_USERNAME_CHARS
-        .replace_all(&mut username, "")
-        .to_string();
+    let username = if automate_username_creation {
+        get_instance_username_or_create_pending(&mut *tx, &email).await?
+    } else {
+        let mut username = email
+            .split('@')
+            .next()
+            .unwrap()
+            .to_string()
+            .replace(".", "");
 
-    if username.is_empty() {
-        username = "user".to_string()
-    }
+        username = INVALID_USERNAME_CHARS
+            .replace_all(&mut username, "")
+            .to_string();
 
-    let base_username = username.clone();
-    let mut username_conflict = true;
-    let mut i = 1;
-    while username_conflict {
-        if i > 1000 {
-            return Err(Error::InternalErr(format!(
-                "too many username conflicts for {}",
-                email
-            )));
+        if username.is_empty() {
+            username = "user".to_string()
         }
-        if i > 1 {
-            username = format!("{}{}", base_username, i)
+
+        let base_username = username.clone();
+        let mut username_conflict = true;
+        let mut i = 1;
+        while username_conflict {
+            if i > 1000 {
+                return Err(Error::InternalErr(format!(
+                    "too many username conflicts for {}",
+                    email
+                )));
+            }
+            if i > 1 {
+                username = format!("{}{}", base_username, i)
+            }
+            username_conflict = sqlx::query_scalar!(
+                "SELECT EXISTS(SELECT 1 FROM usr WHERE username = $1 AND workspace_id = $2)",
+                &username,
+                &w_id
+            )
+            .fetch_one(&mut **tx)
+            .await?
+            .unwrap_or(false);
+            i += 1;
         }
-        username_conflict = sqlx::query_scalar!(
-            "SELECT EXISTS(SELECT 1 FROM usr WHERE username = $1 AND workspace_id = $2)",
-            &username,
-            &w_id
-        )
-        .fetch_one(&mut **tx)
-        .await?
-        .unwrap_or(false);
-        i += 1;
-    }
+        username
+    };
 
     sqlx::query!(
-        "INSERT INTO usr (workspace_id, username, email, is_admin, operator) VALUES ($1, $2, $3, false, $4)",
+        "INSERT INTO usr (workspace_id, username, email, is_admin, operator) VALUES ($1, $2, $3, false, $4) ON CONFLICT DO NOTHING",
         &w_id,
         &username,
         &email,
@@ -869,6 +635,7 @@ async fn auto_add_user(
 async fn edit_auto_invite(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
     Path(w_id): Path<String>,
     ApiAuthed { is_admin, email, username, .. }: ApiAuthed,
     Json(ea): Json<EditAutoInvite>,
@@ -896,6 +663,8 @@ async fn edit_auto_invite(
 
     let mut tx = db.begin().await?;
 
+    let mut users_to_auto_add = Option::None;
+
     if let (Some(operator), Some(auto_add)) = (ea.operator, ea.auto_add) {
         if BANNED_DOMAINS.contains(domain) {
             return Err(Error::BadRequest(format!(
@@ -915,16 +684,16 @@ async fn edit_auto_invite(
         .await?;
 
         if auto_add {
-            let users = sqlx::query!(
+            users_to_auto_add = Some(sqlx::query!(
                 "SELECT email FROM password WHERE ($2::text = '*' OR email LIKE CONCAT('%', $2::text)) AND NOT EXISTS (
                     SELECT 1 FROM usr WHERE workspace_id = $1::text AND email = password.email
                 )",
                 &w_id,
                 domain
             )
-            .fetch_all(&mut *tx).await?;
+            .fetch_all(&mut *tx).await?);
 
-            for user in users {
+            for user in users_to_auto_add.as_ref().unwrap() {
                 auto_add_user(&user.email, &w_id, &operator, &mut tx).await?;
             }
         } else {
@@ -961,6 +730,22 @@ async fn edit_auto_invite(
     )
     .await?;
     tx.commit().await?;
+
+    if let Some(users) = users_to_auto_add {
+        for user in users {
+            handle_deployment_metadata(
+                &email,
+                &username,
+                &db,
+                &w_id,
+                windmill_git_sync::DeployedObject::User { email: user.email.clone() },
+                Some(format!("Auto-added user '{}' to workspace", &user.email)),
+                rsmq.clone(),
+                true,
+            )
+            .await?;
+        }
+    }
 
     Ok(format!(
         "Edit auto-invite for workspace {} to {}",
@@ -1142,10 +927,23 @@ async fn edit_large_file_storage_config(
 }
 
 #[derive(Deserialize)]
-struct EditGitSyncConfig {
-    git_sync_settings: Option<WorkspaceGitSyncSettings>,
+pub struct EditGitSyncConfig {
+    pub git_sync_settings: Option<WorkspaceGitSyncSettings>,
 }
 
+#[cfg(not(feature = "enterprise"))]
+async fn edit_git_sync_config(
+    _authed: ApiAuthed,
+    Extension(_db): Extension<DB>,
+    Path(_w_id): Path<String>,
+    Json(_new_config): Json<EditGitSyncConfig>,
+) -> Result<String> {
+    return Err(Error::BadRequest(
+        "Git sync is only available on Windmill Enterprise Edition".to_string(),
+    ));
+}
+
+#[cfg(feature = "enterprise")]
 async fn edit_git_sync_config(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1153,13 +951,6 @@ async fn edit_git_sync_config(
     ApiAuthed { is_admin, username, .. }: ApiAuthed,
     Json(new_config): Json<EditGitSyncConfig>,
 ) -> Result<String> {
-    #[cfg(not(feature = "enterprise"))]
-    {
-        return Err(Error::BadRequest(
-            "Git sync is only available on Windmill Enterprise Edition".to_string(),
-        ));
-    }
-
     require_admin(is_admin, &username)?;
 
     let mut tx = db.begin().await?;
@@ -1201,10 +992,84 @@ async fn edit_git_sync_config(
 }
 
 #[derive(Deserialize)]
-struct EditDefaultApp {
-    default_app_path: Option<String>,
+pub struct EditDefaultApp {
+    pub default_app_path: Option<String>,
 }
 
+#[cfg(not(feature = "enterprise"))]
+async fn edit_default_app(
+    _authed: ApiAuthed,
+    Extension(_db): Extension<DB>,
+    Path(_w_id): Path<String>,
+    Json(_new_config): Json<EditDefaultApp>,
+) -> Result<String> {
+    return Err(Error::BadRequest(
+        "Setting a workspace default app is only available on Windmill Enterprise Edition"
+            .to_string(),
+    ));
+}
+
+async fn edit_default_scripts(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+    ApiAuthed { is_admin, username, .. }: ApiAuthed,
+    Json(new_config): Json<Option<serde_json::Value>>,
+) -> Result<String> {
+    require_admin(is_admin, &username)?;
+
+    let mut tx = db.begin().await?;
+
+    audit_log(
+        &mut *tx,
+        &authed.username,
+        "workspaces.edit_default_scripts",
+        ActionKind::Update,
+        &w_id,
+        Some(&authed.email),
+        None,
+    )
+    .await?;
+
+    if let Some(config) = new_config {
+        sqlx::query!(
+            "UPDATE workspace_settings SET default_scripts = $1 WHERE workspace_id = $2",
+            config,
+            &w_id
+        )
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query!(
+            "UPDATE workspace_settings SET default_scripts = NULL WHERE workspace_id = $1",
+            &w_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(format!("Edit default scripts for workspace {}", &w_id))
+}
+
+async fn get_default_scripts(
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+) -> JsonResult<Option<serde_json::Value>> {
+    let mut tx = db.begin().await?;
+    let default_scripts = sqlx::query_scalar!(
+        "SELECT default_scripts FROM workspace_settings WHERE workspace_id = $1",
+        &w_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|err| Error::InternalErr(format!("getting default_app: {err}")))?;
+    tx.commit().await?;
+
+    Ok(Json(default_scripts.flatten()))
+}
+
+#[cfg(feature = "enterprise")]
 async fn edit_default_app(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1232,7 +1097,7 @@ async fn edit_default_app(
         ActionKind::Update,
         &w_id,
         Some(&authed.email),
-        Some([("args_for_audit", args_for_audit.as_str())].into()),
+        Some([("default_app", args_for_audit.as_str())].into()),
     )
     .await?;
 
@@ -1333,6 +1198,95 @@ async fn edit_error_handler(
     Ok(format!("Edit error_handler for workspace {}", &w_id))
 }
 
+#[derive(Serialize)]
+pub struct GetEncryptionKeyResponse {
+    key: String,
+}
+
+async fn get_encryption_key(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+) -> JsonResult<GetEncryptionKeyResponse> {
+    require_super_admin(&db, &authed.email).await?;
+
+    let encryption_key_opt = sqlx::query_scalar!(
+        "SELECT key FROM workspace_key WHERE workspace_id = $1",
+        w_id
+    )
+    .fetch_optional(&db)
+    .await?;
+
+    let encryption_key = not_found_if_none(encryption_key_opt, "workspace_encryption_key", w_id)?;
+    return Ok(Json(GetEncryptionKeyResponse { key: encryption_key }));
+}
+
+#[derive(Deserialize)]
+struct SetEncryptionKeyRequest {
+    new_key: String,
+}
+
+async fn set_encryption_key(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Path(w_id): Path<String>,
+    Json(request): Json<SetEncryptionKeyRequest>,
+) -> Result<()> {
+    require_super_admin(&db, &authed.email).await?;
+
+    if !WORKSPACE_KEY_REGEXP.is_match(request.new_key.as_str()) {
+        return Err(Error::BadRequest(
+            "Encryption key should be an alphanumeric string of 64 characters".to_string(),
+        ));
+    }
+
+    let mut tx = db.begin().await?;
+    let previous_encryption_key = build_crypt(&mut tx, w_id.as_str()).await?;
+
+    sqlx::query!(
+        "UPDATE workspace_key SET key = $1 WHERE workspace_id = $2",
+        request.new_key.clone(),
+        w_id
+    )
+    .execute(&mut *tx)
+    .await?;
+    let new_encryption_key = build_crypt(&mut tx, w_id.as_str()).await?;
+
+    let mut truncated_new_key = request.new_key.clone();
+    truncated_new_key.truncate(8);
+    tracing::warn!(
+        "Re-encrypting all secrets for workspace {}. New key is {}***",
+        w_id,
+        truncated_new_key
+    );
+
+    let all_variables = sqlx::query!(
+        "SELECT path, value, is_secret FROM variable WHERE workspace_id = $1",
+        w_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for variable in all_variables {
+        if !variable.is_secret {
+            continue;
+        }
+        let decrypted_value = decrypt(&previous_encryption_key, variable.value)?;
+        let new_encrypted_value = encrypt(&new_encryption_key, decrypted_value.as_str());
+        sqlx::query!(
+            "UPDATE variable SET value = $1 WHERE workspace_id = $2 AND path = $3",
+            new_encrypted_value,
+            w_id,
+            variable.path
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    return Ok(());
+}
+
 async fn list_workspaces_as_super_admin(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1396,8 +1350,6 @@ lazy_static::lazy_static! {
             Err(_) => true,
         }
     };
-
-    pub static ref INVALID_USERNAME_CHARS: Regex = Regex::new(r"[^A-Za-z0-9_]").unwrap();
 
 }
 
@@ -1478,13 +1430,35 @@ async fn create_workspace(
     // .execute(&mut tx)
     // .await?;
 
+    let automate_username_creation = sqlx::query_scalar!(
+        "SELECT value FROM global_settings WHERE name = $1",
+        AUTOMATE_USERNAME_CREATION_SETTING,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|v| v.as_bool())
+    .flatten()
+    .unwrap_or(false);
+
+    let username = if automate_username_creation {
+        if nw.username.is_some() && nw.username.unwrap().len() > 0 {
+            return Err(Error::BadRequest(
+                "username is not allowed when username creation is automated".to_string(),
+            ));
+        }
+        get_instance_username_or_create_pending(&mut tx, &authed.email).await?
+    } else {
+        nw.username
+            .ok_or(Error::BadRequest("username is required".to_string()))?
+    };
+
     sqlx::query!(
         "INSERT INTO usr
             (workspace_id, email, username, is_admin)
             VALUES ($1, $2, $3, true)",
         nw.id,
         authed.email,
-        nw.username,
+        username,
     )
     .execute(&mut *tx)
     .await?;
@@ -1501,7 +1475,7 @@ async fn create_workspace(
         "INSERT INTO usr_to_group
             VALUES ($1, 'all', $2)",
         nw.id,
-        nw.username
+        username
     )
     .execute(&mut *tx)
     .await?;
@@ -1797,19 +1771,33 @@ async fn delete_workspace(
     Ok(format!("Deleted workspace {}", &w_id))
 }
 
-pub async fn invite_user_to_all_auto_invite_worspaces(db: &DB, email: &str) -> Result<()> {
+pub async fn invite_user_to_all_auto_invite_worspaces(
+    db: &DB,
+    email: &str,
+    rsmq: Option<rsmq_async::MultiplexedRsmq>,
+) -> Result<()> {
     let mut tx = db.begin().await?;
     let domain = email.split('@').last().unwrap();
     let workspaces = sqlx::query!(
-        "SELECT workspace_id, auto_invite_operator, auto_add FROM workspace_settings WHERE auto_invite_domain = $1 OR auto_invite_domain = '*'",
-        domain
+        "SELECT workspace_id, auto_invite_operator, auto_add FROM workspace_settings ws WHERE (auto_invite_domain = $1 OR auto_invite_domain = '*') AND NOT EXISTS (SELECT 1 FROM usr WHERE workspace_id = ws.workspace_id AND email = $2)",
+        domain,
+        email
     )
     .fetch_all(&mut *tx)
     .await?;
+    let mut auto_added_workspace_usernames: Vec<(String, String)> = vec![];
     for r in workspaces {
         if r.auto_add.is_some() && r.auto_add.unwrap() {
             let operator = r.auto_invite_operator.unwrap_or(false);
             auto_add_user(email, &r.workspace_id, &operator, &mut tx).await?;
+            let username = sqlx::query_scalar!(
+                "SELECT username FROM usr WHERE workspace_id = $1 AND email = $2",
+                r.workspace_id,
+                email
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            auto_added_workspace_usernames.push((r.workspace_id, username));
         } else {
             sqlx::query!(
                 "INSERT INTO workspace_invite
@@ -1825,6 +1813,21 @@ pub async fn invite_user_to_all_auto_invite_worspaces(db: &DB, email: &str) -> R
         }
     }
     tx.commit().await?;
+
+    for workspace_username_tuple in auto_added_workspace_usernames {
+        let (w_id, username) = workspace_username_tuple;
+        handle_deployment_metadata(
+            &email,
+            &username,
+            db,
+            &w_id,
+            windmill_git_sync::DeployedObject::User { email: email.to_string() },
+            Some(format!("Auto-added user '{}' to workspace", email)),
+            rsmq.clone(),
+            true,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -1882,6 +1885,7 @@ async fn add_user(
     ApiAuthed { username, email, is_admin, .. }: ApiAuthed,
     Extension(db): Extension<DB>,
     Extension(webhook): Extension<WebhookShared>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
     Path(w_id): Path<String>,
     Json(mut nu): Json<NewWorkspaceUser>,
 ) -> Result<(StatusCode, String)> {
@@ -1889,11 +1893,53 @@ async fn add_user(
     nu.email = nu.email.to_lowercase();
 
     let mut tx = db.begin().await?;
-    if !VALID_USERNAME.is_match(&nu.username) {
-        return Err(windmill_common::error::Error::BadRequest(format!(
-            "Usermame can only contain alphanumeric characters and underscores and must start with a letter"
+
+    let already_exists_email = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM usr WHERE workspace_id = $1 AND email = $2)",
+        &w_id,
+        nu.email,
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .unwrap_or(false);
+
+    if already_exists_email {
+        return Err(Error::BadRequest(format!(
+            "user with email {} already exists in workspace {}",
+            email, w_id
         )));
     }
+
+    let automate_username_creation = sqlx::query_scalar!(
+        "SELECT value FROM global_settings WHERE name = $1",
+        AUTOMATE_USERNAME_CREATION_SETTING,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|v| v.as_bool())
+    .flatten()
+    .unwrap_or(false);
+
+    let username = if automate_username_creation {
+        if nu.username.is_some() && nu.username.unwrap().len() > 0 {
+            return Err(Error::BadRequest(
+                "username is not allowed when username creation is automated".to_string(),
+            ));
+        }
+        get_instance_username_or_create_pending(&mut tx, &nu.email).await?
+    } else {
+        let username = nu
+            .username
+            .ok_or(Error::BadRequest("username is required".to_string()))?;
+
+        if !VALID_USERNAME.is_match(&username) {
+            return Err(windmill_common::error::Error::BadRequest(format!(
+                "Usermame can only contain alphanumeric characters and underscores and must start with a letter"
+            )));
+        }
+
+        username
+    };
 
     sqlx::query!(
         "INSERT INTO usr
@@ -1901,7 +1947,7 @@ async fn add_user(
             VALUES ($1, $2, $3, $4, $5)",
         &w_id,
         nu.email,
-        nu.username,
+        username,
         nu.is_admin,
         nu.operator
     )
@@ -1912,13 +1958,36 @@ async fn add_user(
         Group,
         "INSERT INTO usr_to_group (workspace_id, usr, group_) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         &w_id,
-        nu.username,
+        username,
         "all",
     )
     .execute(&mut *tx)
     .await?;
 
+    audit_log(
+        &mut *tx,
+        &username,
+        "users.add_to_workspace",
+        ActionKind::Create,
+        &w_id,
+        Some(&email),
+        None,
+    )
+    .await?;
+
     tx.commit().await?;
+
+    handle_deployment_metadata(
+        &email,
+        &username,
+        &db,
+        &w_id,
+        windmill_git_sync::DeployedObject::User { email: nu.email.clone() },
+        Some(format!("Added user '{}' to workspace", &nu.email)),
+        rsmq,
+        true,
+    )
+    .await?;
 
     send_email_if_possible(
         &format!("Added to Windmill's workspace: {w_id}"),
@@ -2084,11 +2153,17 @@ struct ArchiveQueryParams {
     skip_variables: Option<bool>,
     skip_resources: Option<bool>,
     include_schedules: Option<bool>,
+    include_users: Option<bool>,
+    include_groups: Option<bool>,
     default_ts: Option<String>,
 }
 
 #[inline]
-pub fn to_string_without_metadata<T>(value: &T, preserve_extra_perms: bool) -> Result<String>
+pub fn to_string_without_metadata<T>(
+    value: &T,
+    preserve_extra_perms: bool,
+    ignore_keys: Option<Vec<&str>>,
+) -> Result<String>
 where
     T: ?Sized + Serialize,
 {
@@ -2096,23 +2171,29 @@ where
     value
         .as_object_mut()
         .map(|obj| {
-            for key in [
-                "workspace_id",
-                "path",
-                "name",
-                "versions",
-                "id",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-                "edited_at",
-                "edited_by",
-                "archived",
-                "has_draft",
-                "draft_only",
-                "error",
-            ] {
+            let keys = [
+                vec![
+                    "workspace_id",
+                    "path",
+                    "name",
+                    "versions",
+                    "id",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "edited_at",
+                    "edited_by",
+                    "archived",
+                    "has_draft",
+                    "draft_only",
+                    "error",
+                ],
+                ignore_keys.unwrap_or(vec![]),
+            ]
+            .concat();
+
+            for key in keys {
                 if obj.contains_key(key) {
                     obj.remove(key);
                 }
@@ -2132,6 +2213,22 @@ where
         .ok_or_else(|| Error::BadRequest("Impossible to serialize value".to_string()))
 }
 
+#[derive(Serialize)]
+struct SimplifiedUser {
+    username: String,
+    role: String,
+    disabled: bool,
+    email: String,
+}
+
+#[derive(Serialize)]
+struct SimplifiedGroup {
+    name: String,
+    summary: Option<String>,
+    members: Vec<String>,
+    admins: Vec<String>,
+}
+
 async fn tarball_workspace(
     authed: ApiAuthed,
     Extension(user_db): Extension<UserDB>,
@@ -2145,6 +2242,8 @@ async fn tarball_workspace(
         skip_secrets,
         skip_variables,
         include_schedules,
+        include_users,
+        include_groups,
         default_ts,
     }): Query<ArchiveQueryParams>,
 ) -> Result<([(headers::HeaderName, String); 2], impl IntoResponse)> {
@@ -2175,7 +2274,7 @@ async fn tarball_workspace(
         for folder in folders {
             archive
                 .write_to_archive(
-                    &to_string_without_metadata(&folder, true).unwrap(),
+                    &to_string_without_metadata(&folder, true, None).unwrap(),
                     &format!("f/{}/folder.meta.json", folder.name),
                 )
                 .await?;
@@ -2259,7 +2358,7 @@ async fn tarball_workspace(
         .await?;
 
         for resource in resources {
-            let resource_str = &to_string_without_metadata(&resource, false).unwrap();
+            let resource_str = &to_string_without_metadata(&resource, false, None).unwrap();
             archive
                 .write_to_archive(&resource_str, &format!("{}.resource.json", resource.path))
                 .await?;
@@ -2276,7 +2375,7 @@ async fn tarball_workspace(
         .await?;
 
         for resource_type in resource_types {
-            let resource_str = &to_string_without_metadata(&resource_type, false).unwrap();
+            let resource_str = &to_string_without_metadata(&resource_type, false, None).unwrap();
             archive
                 .write_to_archive(
                     &resource_str,
@@ -2295,7 +2394,7 @@ async fn tarball_workspace(
         .await?;
 
         for flow in flows {
-            let flow_str = &to_string_without_metadata(&flow, false).unwrap();
+            let flow_str = &to_string_without_metadata(&flow, false, None).unwrap();
             archive
                 .write_to_archive(&flow_str, &format!("{}.flow.json", flow.path))
                 .await?;
@@ -2320,12 +2419,9 @@ async fn tarball_workspace(
                 && var.value.is_some()
                 && var.is_secret
             {
-                var.value = Some(
-                    mc.decrypt_base64_to_string(var.value.unwrap())
-                        .map_err(|e| Error::InternalErr(e.to_string()))?,
-                );
+                var.value = Some(decrypt(&mc, var.value.unwrap())?);
             }
-            let var_str = &to_string_without_metadata(&var, false).unwrap();
+            let var_str = &to_string_without_metadata(&var, false, None).unwrap();
             archive
                 .write_to_archive(&var_str, &format!("{}.variable.json", var.path))
                 .await?;
@@ -2345,7 +2441,7 @@ async fn tarball_workspace(
         .await?;
 
         for app in apps {
-            let app_str = &to_string_without_metadata(&app, false).unwrap();
+            let app_str = &to_string_without_metadata(&app, false, None).unwrap();
             archive
                 .write_to_archive(&app_str, &format!("{}.app.json", app.path))
                 .await?;
@@ -2363,9 +2459,103 @@ async fn tarball_workspace(
         .await?;
 
         for schedule in schedules {
-            let app_str = &to_string_without_metadata(&schedule, false).unwrap();
+            let app_str = &to_string_without_metadata(&schedule, false, None).unwrap();
             archive
                 .write_to_archive(&app_str, &format!("{}.schedule.json", schedule.path))
+                .await?;
+        }
+    }
+
+    if include_users.unwrap_or(false) {
+        let users = sqlx::query!(
+            "SELECT * FROM usr
+            WHERE workspace_id = $1",
+            &w_id
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for user in users {
+            let user = SimplifiedUser {
+                username: user.username,
+                role: if user.is_admin {
+                    "admin".to_string()
+                } else if user.operator {
+                    "operator".to_string()
+                } else {
+                    "developer".to_string()
+                },
+                disabled: user.disabled,
+                email: user.email,
+            };
+            let user_str = &to_string_without_metadata(
+                &user,
+                false,
+                Some(vec!["is_admin", "operator", "email"]),
+            )
+            .unwrap();
+            archive
+                .write_to_archive(&user_str, &format!("users/{}.user.json", user.email))
+                .await?;
+        }
+    }
+
+    if include_groups.unwrap_or(false) {
+        let groups = sqlx::query!(
+            r#"SELECT g_.workspace_id, name, summary, extra_perms, array_agg(u2g.usr) filter (where u2g.usr is not null) as members 
+            FROM usr u
+            JOIN usr_to_group u2g ON u2g.usr = u.username AND u2g.workspace_id = u.workspace_id
+            RIGHT JOIN group_ g_ ON g_.workspace_id = u.workspace_id AND g_.name = u2g.group_
+            WHERE g_.workspace_id = $1 AND g_.name != 'all'
+            GROUP BY g_.workspace_id, name, summary, extra_perms"#,
+            &w_id
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for group in groups {
+            let extra_perms: HashMap<String, bool> = serde_json::from_value(group.extra_perms)
+                .map_err(|e| {
+                    Error::InternalErr(format!(
+                        "Error parsing extra_perms for group {}: {}",
+                        group.name, e
+                    ))
+                })?;
+            tracing::info!("{:?}", extra_perms);
+            let members = group.members.unwrap_or(vec![]);
+            let admins: Vec<String> = extra_perms
+                .iter()
+                .filter_map(|(k, v)| {
+                    // only consider extra_perms that concern actual members of the group
+                    if members.contains(&k[2..].to_string()) && *v {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .sorted()
+                .collect();
+            let group = SimplifiedGroup {
+                name: group.name,
+                summary: group.summary,
+                members: members
+                    .iter()
+                    .filter_map(|x| {
+                        // remove members that are also admins as they are already in the admins list
+                        let full_name = format!("u/{}", x);
+                        if !admins.contains(&full_name) {
+                            Some(full_name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                admins,
+            };
+
+            let group_str = &to_string_without_metadata(&group, true, None).unwrap();
+            archive
+                .write_to_archive(&group_str, &format!("groups/{}.group.json", group.name))
                 .await?;
         }
     }

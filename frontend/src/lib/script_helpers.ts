@@ -65,8 +65,9 @@ export async function main(
   a: number,
   b: "my" | "enum",
   //c: Postgresql,
-  d = "inferred type string from default arg",
-  e = { nested: "object" },
+  //d: wmill.S3Object, // for large files backed by S3 (https://www.windmill.dev/docs/core_concepts/persistent_storage/large_data_files)
+  e = "inferred type string from default arg",
+  f = { nested: "object" },
 ) {
   // let x = await wmill.getVariable('u/user/foo')
   return { foo: a };
@@ -137,29 +138,43 @@ export async function main(message: string, name: string) {
 }
 `
 
-export const POSTGRES_INIT_CODE = `-- $1 name1 = default arg
+export const BUN_FAILURE_MODULE_CODE = `
+export async function main(message: string, name: string) {
+  const flow_id = process.env.WM_FLOW_JOB_ID
+  console.log("message", message)
+  console.log("name",name)
+  return { message, flow_id }
+}
+`
+
+export const POSTGRES_INIT_CODE = `-- to pin the database use '-- database f/your/path'
+-- $1 name1 = default arg
 -- $2 name2
 -- $3 name3
 INSERT INTO demo VALUES (\$1::TEXT, \$2::INT, \$3::TEXT[]) RETURNING *
 `
 
-export const MYSQL_INIT_CODE = `-- :name1 (text) = default arg
+export const MYSQL_INIT_CODE = `-- to pin the database use '-- database f/your/path'
+-- :name1 (text) = default arg
 -- :name2 (int)
 INSERT INTO demo VALUES (:name1, :name2)
 `
 
-export const BIGQUERY_INIT_CODE = `-- @name1 (string) = default arg
+export const BIGQUERY_INIT_CODE = `-- to pin the database use '-- database f/your/path'
+-- @name1 (string) = default arg
 -- @name2 (integer)
 -- @name3 (string[])
 INSERT INTO \`demodb.demo\` VALUES (@name1, @name2, @name3)
 `
 
-export const SNOWFLAKE_INIT_CODE = `-- ? name1 (varchar) = default arg
+export const SNOWFLAKE_INIT_CODE = `-- to pin the database use '-- database f/your/path'
+-- ? name1 (varchar) = default arg
 -- ? name2 (int)
 INSERT INTO demo VALUES (?, ?)
 `
 
-export const MSSQL_INIT_CODE = `-- @p1 name1 (varchar) = default arg
+export const MSSQL_INIT_CODE = `-- to pin the database use '-- database f/your/path'
+-- @p1 name1 (varchar) = default arg
 -- @p2 name2 (int)
 INSERT INTO demo VALUES (@p1, @p2)
 `
@@ -396,10 +411,13 @@ export function initialCode(
 	} else if (language == 'bun') {
 		if (kind === 'approval') {
 			return BUN_INIT_CODE_APPROVAL
+		} else if (kind === 'failure') {
+			return BUN_FAILURE_MODULE_CODE
 		}
 		if (subkind === 'flow') {
 			return BUN_INIT_CODE_CLEAR
 		}
+
 		return BUN_INIT_CODE
 	} else {
 		if (kind === 'failure') {

@@ -113,10 +113,10 @@
 <DarkModeObserver bind:darkMode />
 
 <div class="w-full" bind:clientWidth={wrapperWidth}>
-	<div class="flex flex-col gap-2 py-4 my-4" style={`max-width: ${wrapperWidth}px;`}>
+	<div class="flex flex-col gap-2 py-2 my-2" style={`max-width: ${wrapperWidth}px;`}>
 		<div class="flex flex-row justify-between items-center">
 			<div class="flex flex-row gap-2 items-center whitespace-nowrap w-full">
-				<input bind:value={search} placeholder="Search..." class="h-8 !text-xs !w-80" />
+				<input bind:value={search} placeholder="Search..." class="h-8 !text-xs" />
 				{#if selection.length > 0}
 					<span class="text-xs text-gray-500 dark:text-gray-200">
 						{pluralize(selection?.length ?? 1, 'item') + ' selected'}
@@ -147,18 +147,30 @@
 					color="light"
 					startIcon={{ icon: Download }}
 					on:click={() => {
-						const csv = structuredObjects
-							.filter(({ _id }) => {
-								if (selection.length > 0) {
-									return selection.includes(_id)
-								} else {
-									return true
-								}
-							})
-							.map(({ rowData }) => Object.values(rowData).join(','))
-							.join('\n')
+						const headers =
+							structuredObjects.length > 0
+								? Object.keys(structuredObjects[0].rowData).join(',')
+								: ''
+						const csvContent = [
+							headers, // Add headers as the first row
+							...structuredObjects
+								.filter(({ _id }) => {
+									if (selection.length > 0) {
+										return selection.includes(_id)
+									} else {
+										return true
+									}
+								})
+								.map(({ rowData }) =>
+									Object.values(rowData)
+										.map((field) =>
+											/[\",\n]/.test(field) ? '"' + field.replace(/"/g, '""') + '"' : field
+										)
+										.join(',')
+								)
+						].join('\n')
 
-						const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+						const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
 						const url = URL.createObjectURL(blob)
 						const link = document.createElement('a')
 						link.setAttribute('href', url)

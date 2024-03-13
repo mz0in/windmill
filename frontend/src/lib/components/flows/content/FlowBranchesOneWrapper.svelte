@@ -19,6 +19,7 @@
 	export let flowModule: FlowModule
 	export let previousModule: FlowModule | undefined
 	export let noEditor: boolean
+	export let enableAi = false
 
 	let value = flowModule.value as BranchOne
 	$: value = flowModule.value as BranchOne
@@ -31,15 +32,17 @@
 		<SplitPanesWrapper>
 			<Splitpanes horizontal>
 				<Pane size={flowModule ? 60 : 100}>
-					<Alert
-						type="info"
-						title="Only first branch whose condition is true will be run"
-						tooltip="Branch one"
-						documentationLink="https://www.windmill.dev/docs/flows/flow_branches#branch-one"
-						class="m-4"
-					>
-						The result of this step is the result of the branch.
-					</Alert>
+					{#if !noEditor}
+						<Alert
+							type="info"
+							title="Only first branch whose condition is true will be run"
+							tooltip="Branch one"
+							documentationLink="https://www.windmill.dev/docs/flows/flow_branches#branch-one"
+							class="m-4"
+						>
+							The result of this step is the result of the branch.
+						</Alert>
+					{/if}
 					<div class="p-4">
 						<h3 class="my-4">
 							{value.branches.length + 1} branch{value.branches.length + 1 > 1 ? 'es' : ''}
@@ -65,7 +68,17 @@
 										/>
 									</div>
 									<div class="w-full border">
-										<BranchPredicateEditor {branch} parentModule={flowModule} {previousModule} />
+										<BranchPredicateEditor
+											{branch}
+											on:updateSummary={(e) => {
+												if (!branch.summary) {
+													branch.summary = e.detail
+												}
+											}}
+											parentModule={flowModule}
+											{previousModule}
+											{enableAi}
+										/>
 									</div>
 								</div>
 							{/each}

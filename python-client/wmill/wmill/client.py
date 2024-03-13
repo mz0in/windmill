@@ -91,6 +91,10 @@ class Windmill:
         assert not (path and hash_), "path and hash_ are mutually exclusive"
         args = args or {}
         params = {"scheduled_in_secs": scheduled_in_secs} if scheduled_in_secs else {}
+        if os.environ.get("WM_JOB_ID"):
+            params["parent_job"] = os.environ.get("WM_JOB_ID")
+        if os.environ.get("WM_ROOT_FLOW_JOB_ID"):
+            params["root_job"] = os.environ.get("WM_ROOT_FLOW_JOB_ID")
         if path:
             endpoint = f"/w/{self.workspace}/jobs/run/p/{path}"
         elif hash_:
@@ -108,6 +112,10 @@ class Windmill:
         """Create a flow job and return its job id."""
         args = args or {}
         params = {"scheduled_in_secs": scheduled_in_secs} if scheduled_in_secs else {}
+        if os.environ.get("WM_JOB_ID"):
+            params["parent_job"] = os.environ.get("WM_JOB_ID")
+        if os.environ.get("WM_ROOT_FLOW_JOB_ID"):
+            params["root_job"] = os.environ.get("WM_ROOT_FLOW_JOB_ID")
         if path:
             endpoint = f"/w/{self.workspace}/jobs/run/f/{path}"
         else:
@@ -119,10 +127,10 @@ class Windmill:
         path: str = None,
         hash_: str = None,
         args: dict = None,
-        timeout: dt.timedelta | int | float = None,
+        timeout: dt.timedelta | int | float | None = None,
         verbose: bool = False,
         cleanup: bool = True,
-        assert_result_is_not_none: bool = True,
+        assert_result_is_not_none: bool = False,
     ) -> Any:
         """Run script synchronously and return its result."""
         args = args or {}
@@ -131,12 +139,21 @@ class Windmill:
             logger.info(f"running `{path}` synchronously with {args = }")
 
         if isinstance(timeout, dt.timedelta):
-            timeout = timeout.total_seconds
-
-        start_time = time.time()
+            timeout = timeout.total_seconds()
 
         job_id = self.run_script_async(path=path, hash_=hash_, args=args)
+        return self.wait_job(
+            job_id, timeout, verbose, cleanup, assert_result_is_not_none
+        )
 
+    def wait_job(
+        self,
+        job_id,
+        timeout: dt.timedelta | int | float | None = None,
+        verbose: bool = False,
+        cleanup: bool = True,
+        assert_result_is_not_none: bool = False,
+    ):
         def cancel_job():
             logger.warning(f"cancelling job: {job_id}")
             self.post(
@@ -147,8 +164,33 @@ class Windmill:
         if cleanup:
             atexit.register(cancel_job)
 
+        start_time = time.time()
+
+        if isinstance(timeout, dt.timedelta):
+            timeout = timeout.total_seconds()
+
         while True:
-            job = self.get_job(job_id)
+            result_res = self.get(f"/w/{self.workspace}/jobs_u/completed/get_result_maybe/{job_id}", False).json()
+
+            started = result_res["started"]
+            completed = result_res["completed"]
+            success = result_res["success"]
+
+            if not started and verbose:
+                logger.info(f"job {job_id} has not started yet")
+
+            if cleanup and completed:
+                atexit.unregister(cancel_job)
+
+            if completed:
+                result =  result_res["result"]
+                if success:
+                    if result is None and assert_result_is_not_none:
+                        raise Exception("Result was none")
+                    return result
+                else:
+                    error = result["error"]
+                    raise Exception(f"Job {job_id} was not successful: {str(error)}")
 
             if timeout and ((time.time() - start_time) > timeout):
                 msg = "reached timeout"
@@ -158,32 +200,12 @@ class Windmill:
                     json={"reason": msg},
                 )
                 raise TimeoutError(msg)
-
-            result = job.get("result")
-            canceled, canceled_reason = job.get("canceled"), job.get("canceled_reason")
-            success = job.get("success")
-            job_type = job.get("type", "")
-            completed = job_type.lower() == "completedjob"
-
-            if cleanup and completed:
-                atexit.unregister(cancel_job)
-
-            if completed:
-                if success:
-                    if assert_result_is_not_none and result is None:
-                        raise Exception(f"result is None for {job_id = }")
-                    return result
-                else:
-                    if canceled:
-                        raise Exception(f"job canceled: {canceled_reason}")
-                    else:
-                        error = result.get("error")
-                        raise Exception(f"job failed: {error}")
-
             if verbose:
                 logger.info(f"sleeping 0.5 seconds for {job_id = }")
 
+            
             time.sleep(0.5)
+
 
     def cancel_running(self) -> dict:
         """Cancel currently running executions of the same script."""
@@ -226,7 +248,7 @@ class Windmill:
         return self.get(f"/w/{self.workspace}/jobs_u/get_root_job_id/{job_id}").json()
 
 
-    def get_id_token(self, audience: str) -> dict:
+    def get_id_token(self, audience: str) -> str:
         return self.post(f"/w/{self.workspace}/oidc/token/{audience}").text
 
     def get_job_status(self, job_id: str) -> JobStatus:
@@ -715,7 +737,7 @@ def boto3_connection_settings(s3_resource_path: str = "") -> Boto3ConnectionSett
 
 
 @init_global_client
-def load_s3_file(s3object: S3Object, s3_resource_path: str = "") -> bytes:
+def load_s3_file(s3object: S3Object, s3_resource_path: str | None = None) -> bytes:
     """
     Load the entire content of a file stored in S3 as bytes
     """
@@ -723,7 +745,7 @@ def load_s3_file(s3object: S3Object, s3_resource_path: str = "") -> bytes:
 
 
 @init_global_client
-def load_s3_file_reader(s3object: S3Object, s3_resource_path: str = "") -> BufferedReader:
+def load_s3_file_reader(s3object: S3Object, s3_resource_path: str | None = None) -> BufferedReader:
     """
     Load the content of a file stored in S3
     """
@@ -734,7 +756,7 @@ def load_s3_file_reader(s3object: S3Object, s3_resource_path: str = "") -> Buffe
 def write_s3_file(
     s3object: S3Object | None,
     file_content: BufferedReader | bytes,
-    s3_resource_path: str = "",
+    s3_resource_path: str | None = None,
 ) -> S3Object:
     """
     Upload a file to S3
@@ -865,3 +887,52 @@ def run_script(
         cleanup=cleanup,
         timeout=timeout,
     )
+
+
+def task(*args, **kwargs):
+    from inspect import signature
+    def f(func, tag: str | None = None):
+        if os.environ.get("WM_JOB_ID") is None or os.environ.get("MAIN_OVERRIDE") == func.__name__:
+            def inner(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            return inner
+        else:
+
+            def inner(*args, **kwargs):
+                global _client
+                if _client is None:
+                    _client = Windmill()
+                w_id = os.environ.get("WM_WORKSPACE")
+                job_id = os.environ.get("WM_JOB_ID")
+                f_name = func.__name__
+                json = kwargs
+                params = list(signature(func).parameters)
+                for i, arg in enumerate(args):
+                    if i < len(params):
+                        p = params[i]
+                        key = p
+                        if key not in kwargs:
+                            json[key] = arg
+
+                params = {}
+                if tag is not None:
+                    params["tag"] = tag
+                r = _client.post(
+                    f"/w/{w_id}/jobs/run/workflow_as_code/{job_id}/{f_name}",
+                    json={"args": json},
+                    params=params,
+                )
+                job_id = r.text
+                print(f"Executing task {func.__name__} on job {job_id}")
+                r = _client.wait_job(job_id)
+                print(f"Task {func.__name__} ({job_id}) completed")
+                return r
+
+            return inner
+    if len(args) == 1 and len(kwargs) == 0 and callable(args[0]):
+        return f(args[0], None)
+    else:
+        return lambda x: f(x, kwargs.get("tag"))
+
+

@@ -128,7 +128,11 @@ pub fn parse_expr_for_ids(code: &str) -> anyhow::Result<Vec<(String, String)>> {
     Ok(visitor.idents.into_iter().collect())
 }
 
-pub fn parse_deno_signature(code: &str, skip_dflt: bool) -> anyhow::Result<MainArgSignature> {
+pub fn parse_deno_signature(
+    code: &str,
+    skip_dflt: bool,
+    main_override: Option<String>,
+) -> anyhow::Result<MainArgSignature> {
     let cm: Lrc<SourceMap> = Default::default();
     let fm = cm.new_source_file(FileName::Custom("main.ts".into()), code.into());
     let lexer = Lexer::new(
@@ -154,11 +158,12 @@ pub fn parse_deno_signature(code: &str, skip_dflt: bool) -> anyhow::Result<MainA
         })?
         .body;
 
+    let main_name = main_override.unwrap_or("main".to_string());
     let params = ast.into_iter().find_map(|x| match x {
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
             decl: Decl::Fn(FnDecl { ident: Ident { sym, .. }, function, .. }),
             ..
-        })) if &sym.to_string() == "main" => Some(function.params),
+        })) if &sym.to_string() == &main_name => Some(function.params),
         _ => None,
     });
 
@@ -370,18 +375,27 @@ fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(
             TsUnionType { types, .. },
         )) => {
-            if let Some(p) = if types.len() != 2 {
-                None
+            let (is_undefined_option, undefined_position) = if types.len() == 2 {
+                (true, find_undefined(types))
+            } else if types.into_iter().all(|x| {
+                x.as_ts_lit_type().is_some_and(|y| y.lit.as_str().is_some())
+                    || x.as_ts_keyword_type().is_some_and(|y| {
+                        y.kind == TsKeywordTypeKind::TsUndefinedKeyword
+                            || y.kind == TsKeywordTypeKind::TsStringKeyword
+                            || y.kind == TsKeywordTypeKind::TsNullKeyword
+                    })
+            }) {
+                (false, find_undefined(types))
             } else {
-                types.into_iter().position(|x| match **x {
-                    TsType::TsKeywordType(TsKeywordType { kind, .. }) => {
-                        kind == TsKeywordTypeKind::TsUndefinedKeyword
-                            || kind == TsKeywordTypeKind::TsNullKeyword
-                    }
-                    _ => false,
-                })
-            } {
-                let other_p = if p == 0 { 1 } else { 0 };
+                (false, None)
+            };
+
+            if is_undefined_option && undefined_position.is_some() {
+                let other_p = if undefined_position.unwrap() == 0 {
+                    1
+                } else {
+                    0
+                };
                 (tstype_to_typ(&types[other_p]).0, true)
             } else {
                 let literals = types
@@ -389,6 +403,8 @@ fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
                     .filter(|x| match ***x {
                         TsType::TsKeywordType(TsKeywordType { kind, .. }) => {
                             kind != TsKeywordTypeKind::TsStringKeyword
+                                && kind != TsKeywordTypeKind::TsUndefinedKeyword
+                                && kind != TsKeywordTypeKind::TsNullKeyword
                         }
                         _ => true,
                     })
@@ -404,7 +420,7 @@ fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
                 } else {
                     (
                         Typ::Str(Some(literals.into_iter().filter_map(|x| x).collect())),
-                        false,
+                        undefined_position.is_some(),
                     )
                 }
             }
@@ -439,6 +455,16 @@ fn tstype_to_typ(ts_type: &TsType) -> (Typ, bool) {
         }
         _ => (Typ::Unknown, false),
     }
+}
+
+fn find_undefined(types: &Vec<Box<TsType>>) -> Option<usize> {
+    types.into_iter().position(|x| match **x {
+        TsType::TsKeywordType(TsKeywordType { kind, .. }) => {
+            kind == TsKeywordTypeKind::TsUndefinedKeyword
+                || kind == TsKeywordTypeKind::TsNullKeyword
+        }
+        _ => false,
+    })
 }
 
 #[cfg(target_arch = "wasm32")]

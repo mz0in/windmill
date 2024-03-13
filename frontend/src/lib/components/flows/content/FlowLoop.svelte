@@ -21,6 +21,7 @@
 	import type { Job } from '$lib/gen'
 	import FlowLoopIterationPreview from '$lib/components/FlowLoopIterationPreview.svelte'
 	import FlowModuleDeleteAfterUse from './FlowModuleDeleteAfterUse.svelte'
+	import IteratorGen from '$lib/components/copilot/IteratorGen.svelte'
 
 	const { previewArgs, flowStateStore, flowStore } =
 		getContext<FlowEditorContext>('FlowEditorContext')
@@ -29,6 +30,7 @@
 	export let parentModule: FlowModule | undefined
 	export let previousModule: FlowModule | undefined
 	export let noEditor: boolean
+	export let enableAi = false
 
 	let editor: SimpleEditor | undefined = undefined
 	let selected: string = 'early-stop'
@@ -46,6 +48,9 @@
 	let previewOpen = false
 	let jobId: string | undefined = undefined
 	let job: Job | undefined = undefined
+
+	let iteratorFieldFocused = false
+	let iteratorGen: IteratorGen | undefined = undefined
 
 	$: previewIterationArgs = $flowStateStore[mod.id]?.previewArgs ?? {}
 </script>
@@ -71,16 +76,20 @@
 
 		<Splitpanes horizontal class="!max-h-[calc(100%-48px)]">
 			<Pane size={60} minSize={20} class="p-4">
-				<Alert
-					type="info"
-					title="For loops"
-					tooltip="For loops"
-					documentationLink="https://www.windmill.dev/docs/flows/flow_loops"
-					class="mb-4"
-				>
-					Add steps inside the loop and specify an iterator expression that defines the sequence
-					over which your subsequent steps will iterate.
-				</Alert>
+				{#if !noEditor}
+					<Alert
+						type="info"
+						title="For loops"
+						tooltip="For loops"
+						documentationLink="https://www.windmill.dev/docs/flows/flow_loops"
+						class="mb-4"
+						size="xs"
+					>
+						Add steps inside the loop and specify an iterator expression that defines the sequence
+						over which your subsequent steps will iterate.
+					</Alert>
+				{/if}
+
 				{#if mod.value.type === 'forloopflow'}
 					<div class="flex flex-row gap-8 mt-2 mb-6">
 						<div>
@@ -121,14 +130,52 @@
 							/>
 						</div>
 					</div>
-					<div class="my-2 text-sm font-bold">
-						Iterator expression
-						<Tooltip documentationLink="https://www.windmill.dev/docs/flows/flow_loops">
-							List to iterate over.
-						</Tooltip>
+
+					<div class="my-2 flex flex-row gap-2 items-center">
+						<div class="text-sm font-bold whitespace-nowrap">
+							Iterator expression
+							<Tooltip documentationLink="https://www.windmill.dev/docs/flows/flow_loops">
+								List to iterate over.
+							</Tooltip>
+						</div>
+						{#if enableAi}
+							<IteratorGen
+								bind:this={iteratorGen}
+								focused={iteratorFieldFocused}
+								arg={mod.value.iterator}
+								on:showExpr={(e) => {
+									editor?.setSuggestion(e.detail)
+								}}
+								on:setExpr={(e) => {
+									if (mod.value.type === 'forloopflow') {
+										mod.value.iterator = {
+											type: 'javascript',
+											expr: e.detail
+										}
+									}
+									editor?.setCode('')
+									editor?.insertAtCursor(e.detail)
+								}}
+								pickableProperties={stepPropPicker.pickableProperties}
+							/>
+						{/if}
+						<div class="flex w-full justify-end">
+							<Button
+								on:click={() => (previewOpen = true)}
+								startIcon={{ icon: Play }}
+								color="dark"
+								size="sm">Test an iteration</Button
+							>
+						</div>
 					</div>
+
 					{#if mod.value.iterator.type == 'javascript'}
-						<div class="border w-full" id="flow-editor-iterator-expression">
+						<!-- svelte-ignore a11y-no-static-element-interactions -->
+						<div
+							class="border w-full"
+							id="flow-editor-iterator-expression"
+							on:keyup={iteratorGen?.onKeyUp}
+						>
 							<PropPickerWrapper
 								notSelectable
 								pickableProperties={stepPropPicker.pickableProperties}
@@ -140,6 +187,13 @@
 							>
 								<SimpleEditor
 									bind:this={editor}
+									on:focus={() => {
+										iteratorFieldFocused = true
+									}}
+									on:blur={() => {
+										iteratorFieldFocused = false
+									}}
+									autofocus
 									lang="javascript"
 									bind:code={mod.value.iterator.expr}
 									class="small-editor"
@@ -156,11 +210,6 @@
 						/>
 					{/if}
 				{/if}
-				<div class="flex mt-4">
-					<Button on:click={() => (previewOpen = true)} startIcon={{ icon: Play }} color="dark"
-						>Test an iteration</Button
-					>
-				</div>
 			</Pane>
 			<Pane size={40} minSize={20} class="flex flex-col flex-1">
 				<Tabs bind:selected>

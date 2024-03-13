@@ -21,7 +21,8 @@
 		usageStore,
 		userStore,
 		workspaceStore,
-		type UserExt
+		type UserExt,
+		defaultScripts
 	} from '$lib/stores'
 	import CenteredModal from '$lib/components/CenteredModal.svelte'
 	import { afterNavigate, beforeNavigate, goto } from '$app/navigation'
@@ -50,16 +51,18 @@
 		goto('/user/login')
 	}
 
-	$: $page.url &&
-		userSettings != undefined &&
-		superadminSettings != undefined &&
-		onQueryChangeSettings()
+	$: $page.url && userSettings != undefined && onQueryChangeUserSettings()
+	$: $page.url && superadminSettings != undefined && onQueryChangeAdminSettings()
 	$: $page.url && onQueryChange()
 
-	function onQueryChangeSettings() {
+	function onQueryChangeUserSettings() {
 		if (userSettings && $page.url.hash === USER_SETTINGS_HASH) {
 			userSettings.openDrawer()
-		} else if (superadminSettings && $page.url.hash === SUPERADMIN_SETTINGS_HASH) {
+		}
+	}
+
+	function onQueryChangeAdminSettings() {
+		if (superadminSettings && $page.url.hash === SUPERADMIN_SETTINGS_HASH) {
 			superadminSettings.openDrawer()
 		}
 	}
@@ -184,22 +187,32 @@
 
 	let devOnly = $page.url.pathname.startsWith('/scripts/dev')
 
-	workspaceStore.subscribe(async (value) => {
-		if (value) {
-			workspacedOpenai.init(value)
-			try {
-				copilotInfo.set(await WorkspaceService.getCopilotInfo({ workspace: value }))
-			} catch (err) {
-				copilotInfo.set({
-					exists_openai_resource_path: false,
-					code_completion_enabled: false
-				})
-				console.error('Could not get copilot info')
-			}
+	async function loadCopilot(workspace: string) {
+		workspacedOpenai.init(workspace)
+		try {
+			copilotInfo.set(await WorkspaceService.getCopilotInfo({ workspace }))
+		} catch (err) {
+			copilotInfo.set({
+				exists_openai_resource_path: false,
+				code_completion_enabled: false
+			})
+			console.error('Could not get copilot info')
+		}
+	}
+
+	workspaceStore.subscribe(async (workspace) => {
+		if (workspace) {
+			loadCopilot(workspace)
 		}
 	})
-	$: onUserStore($userStore)
 
+	$: onUserStore($userStore)
+	$: $workspaceStore && $userStore && loadDefaultScripts($workspaceStore, $userStore)
+	async function loadDefaultScripts(workspace: string, user: UserExt | undefined) {
+		if (!user?.operator) {
+			$defaultScripts = await WorkspaceService.getDefaultScripts({ workspace })
+		}
+	}
 	let timeout: NodeJS.Timeout | undefined
 	async function onUserStore(u: UserExt | undefined) {
 		if (u && timeout) {

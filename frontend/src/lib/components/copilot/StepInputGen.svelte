@@ -3,7 +3,7 @@
 	import Button from '../common/button/Button.svelte'
 	import { getNonStreamingCompletion } from './lib'
 	import { sendUserToast } from '$lib/toast'
-	import type { InputTransform } from '$lib/gen'
+	import type { Flow, InputTransform } from '$lib/gen'
 	import ManualPopover from '../ManualPopover.svelte'
 	import { createEventDispatcher, getContext } from 'svelte'
 	import type { FlowEditorContext } from '../flows/types'
@@ -14,27 +14,62 @@
 	import { yamlStringifyExceptKeys } from './utils'
 	import type { FlowCopilotContext } from './flow'
 	import { copilotInfo, stepInputCompletionEnabled } from '$lib/stores'
+	import type { SchemaProperty } from '$lib/common'
+	import FlowCopilotInputsModal from './FlowCopilotInputsModal.svelte'
+	import { twMerge } from 'tailwind-merge'
 
 	let generatedContent = ''
 	let loading = false
 	export let focused = false
 	export let arg: InputTransform | any
+	export let schemaProperty: SchemaProperty
 	export let pickableProperties: PickableProperties | undefined = undefined
 	export let argName: string
+	export let showPopup: boolean
 
 	let empty = false
 	$: empty =
-		!arg || (arg.type === 'static' && !arg.value) || (arg.type === 'javascript' && !arg.expr)
+		Object.keys(arg ?? {}).length === 0 ||
+		(arg.type === 'static' && !arg.value) ||
+		(arg.type === 'javascript' && !arg.expr)
+
+	let btnFocused = false
 
 	let abortController = new AbortController()
+	let newFlowInput = ''
+
 	const { flowStore, selectedId } = getContext<FlowEditorContext>('FlowEditorContext')
 	const { stepInputsLoading, generatedExprs } =
 		getContext<FlowCopilotContext | undefined>('FlowCopilotContext') || {}
 
+	function createFlowInput() {
+		if (!newFlowInput) {
+			return
+		}
+		const properties = {
+			...($flowStore.schema?.properties as Record<string, SchemaProperty> | undefined),
+			[newFlowInput]: schemaProperty
+		}
+		const required = [
+			...(($flowStore.schema?.required as string[] | undefined) ?? []),
+			newFlowInput
+		]
+		$flowStore.schema = {
+			$schema: 'https://json-schema.org/draft/2020-12/schema',
+			properties,
+			required,
+			type: 'object'
+		}
+	}
+
 	async function generateStepInput() {
+		if (generatedContent.length > 0 || loading) {
+			return
+		}
 		abortController = new AbortController()
 		loading = true
-		const idOrders = dfs($flowStore.value.modules, (x) => x.id)
+		const flow: Flow = JSON.parse(JSON.stringify($flowStore))
+		const idOrders = dfs(flow.value.modules, (x) => x.id)
 		const upToIndex = idOrders.indexOf($selectedId)
 		if (upToIndex === -1) {
 			throw new Error('Could not find the selected id in the flow')
@@ -42,10 +77,7 @@
 
 		const flowDetails =
 			'Take into account the following information for never tested results:\n<flowDetails>\n' +
-			yamlStringifyExceptKeys(sliceModules($flowStore.value.modules, upToIndex, idOrders), [
-				'lock',
-				'input_transforms'
-			]) +
+			yamlStringifyExceptKeys(sliceModules(flow.value.modules, upToIndex, idOrders), ['lock']) +
 			'</flowDetails>'
 		try {
 			const availableData = {
@@ -55,13 +87,16 @@
 			const user = `I'm building a workflow which is a DAG of script steps.
 The current step is ${selectedId}, you can find the details for the step and previous ones below:
 ${flowDetails}
-Determine for the input "${argName}", what to pass either from the previous results of the flow inputs. Here's a summary of the available data:
+Determine for the input "${argName}", what to pass either from the previous results or the flow inputs. 
+All possibles inputs either start with results. or flow_input. and are followed by the key of the input.
+Here's a summary of the available data:
 <available>
 ${YAML.stringify(availableData)}</available>
-If none of the available results are appropriate, are already used or are more appropriate for other inputs, you can also imagine new flow_input properties which we will create programmatically based on what you provide.
+Favor results and flow_input.iter.value over flow inputs.
+If none of the results and flow inputs are appropriate (or a more appropriate for other step inputs), you can also imagine new flow_input properties which we will create programmatically based on what you provide.
 Reply with the most probable answer, do not explain or discuss.
 Use javascript object dot notation to access the properties.
-Return the input element directly: e.g. flow_input.property, results.a, results.a.property, flow_input.iter.value`
+Only return the expression without any wrapper.`
 
 			generatedContent = await getNonStreamingCompletion(
 				[
@@ -72,6 +107,17 @@ Return the input element directly: e.g. flow_input.property, results.a, results.
 				],
 				abortController
 			)
+
+			if (
+				pickableProperties &&
+				generatedContent.startsWith('flow_input.') &&
+				generatedContent.split('.')[1] &&
+				!(generatedContent.split('.')[1] in pickableProperties.flow_input)
+			) {
+				newFlowInput = generatedContent.split('.')[1]
+			} else {
+				newFlowInput = ''
+			}
 		} catch (err) {
 			if (!abortController.signal.aborted) {
 				sendUserToast('Could not generate summary: ' + err, true)
@@ -89,6 +135,9 @@ Return the input element directly: e.g. flow_input.property, results.a, results.
 			if (!loading && generatedContent) {
 				event.preventDefault()
 				dispatch('setExpr', generatedContent)
+				if (newFlowInput) {
+					openInputsModal = true
+				}
 				generatedContent = ''
 			}
 		} else {
@@ -98,49 +147,75 @@ Return the input element directly: e.g. flow_input.property, results.a, results.
 
 	const dispatch = createEventDispatcher()
 
+	function cancel() {
+		abortController.abort()
+		generatedContent = ''
+	}
+
 	function automaticGeneration() {
 		if (empty) {
 			generateStepInput()
 		}
 	}
 
+	function cancelOnOutOfFocus() {
+		setTimeout(() => {
+			if (!focused && !btnFocused) {
+				// only cancel if out of focus is not due to click on btn
+				cancel()
+			}
+		}, 150)
+	}
+
+	$: if (!focused) {
+		cancelOnOutOfFocus()
+	}
+
 	$: if ($copilotInfo.exists_openai_resource_path && $stepInputCompletionEnabled && focused) {
 		automaticGeneration()
 	}
 
-	function cancel() {
-		abortController.abort()
-		generatedContent = ''
-	}
-	$: if (!focused) {
-		cancel()
-	}
+	$: dispatch('showExpr', generatedContent)
+
+	$: dispatch('showExpr', $generatedExprs?.[argName] || '')
 
 	let out = true // hack to prevent regenerating answer when accepting the answer due to mouseenter on new icon
+	let openInputsModal = false
 </script>
 
 {#if $copilotInfo.exists_openai_resource_path && $stepInputCompletionEnabled}
+	<FlowCopilotInputsModal
+		on:confirmed={async () => {
+			createFlowInput()
+		}}
+		bind:open={openInputsModal}
+		inputs={[newFlowInput]}
+	/>
 	<ManualPopover
-		showTooltip={generatedContent.length > 0 || !!$generatedExprs?.[argName]}
+		showTooltip={showPopup && (generatedContent.length > 0 || !!$generatedExprs?.[argName])}
 		placement="bottom"
 		class="p-2"
 	>
 		<Button
 			size="xs"
 			color="light"
-			btnClasses="text-violet-800 dark:text-violet-400 bg-violet-100 dark:bg-gray-700 dark:hover:bg-surface-hover"
+			btnClasses={twMerge(
+				'text-violet-800 dark:text-violet-400 bg-violet-100 dark:bg-gray-700 dark:hover:bg-surface-hover',
+				!loading && generatedContent.length > 0
+					? 'bg-green-100 text-green-800 hover:bg-green-100 dark:text-green-400 dark:bg-green-700 dark:hover:bg-green-700'
+					: ''
+			)}
 			on:click={() => {
-				if (loading) {
-					cancel()
-				} else if (generatedContent.length > 0) {
+				if (!loading && generatedContent.length > 0) {
 					dispatch('setExpr', generatedContent)
+					if (newFlowInput) {
+						openInputsModal = true
+					}
 					generatedContent = ''
-				} else {
-					generateStepInput()
 				}
 			}}
 			on:mouseenter={(ev) => {
-				if (!generatedContent && !loading && out) {
+				if (out) {
 					out = false
 					generateStepInput()
 				}
@@ -157,6 +232,12 @@ Return the input element directly: e.g. flow_input.property, results.a, results.
 						? Check
 						: Wand2,
 				classes: loading || ($stepInputsLoading && empty) ? 'animate-spin' : ''
+			}}
+			on:focus={() => {
+				btnFocused = true
+			}}
+			on:blur={() => {
+				btnFocused = false
 			}}
 		>
 			{#if focused}

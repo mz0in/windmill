@@ -13,7 +13,7 @@ fn wrap_sig(r: anyhow::Result<MainArgSignature>) -> String {
 
 #[wasm_bindgen]
 pub fn parse_deno(code: &str) -> String {
-    wrap_sig(windmill_parser_ts::parse_deno_signature(code, false))
+    wrap_sig(windmill_parser_ts::parse_deno_signature(code, false, None))
 }
 
 #[wasm_bindgen]
@@ -55,7 +55,7 @@ pub fn parse_go(code: &str) -> String {
 
 #[wasm_bindgen]
 pub fn parse_python(code: &str) -> String {
-    wrap_sig(windmill_parser_py::parse_python_signature(code))
+    wrap_sig(windmill_parser_py::parse_python_signature(code, None))
 }
 
 #[wasm_bindgen]
@@ -81,6 +81,11 @@ pub fn parse_snowflake(code: &str) -> String {
 #[wasm_bindgen]
 pub fn parse_mssql(code: &str) -> String {
     wrap_sig(windmill_parser_sql::parse_mssql_sig(code))
+}
+
+#[wasm_bindgen]
+pub fn parse_db_resource(code: &str) -> Option<String> {
+    windmill_parser_sql::parse_db_resource(code)
 }
 
 #[wasm_bindgen]

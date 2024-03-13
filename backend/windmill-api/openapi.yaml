@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 
 info:
-  version: 1.268.0
+  version: 1.290.1
   title: Windmill API
 
   contact:
@@ -180,29 +180,27 @@ paths:
               schema:
                 type: string
 
-  /w/{workspace}/users/add:
-    post:
-      summary: create user (require admin privilege)
-      operationId: createUser
+  /w/{workspace}/users/{username}:
+    get:
+      summary: get user (require admin privilege)
+      operationId: getUser
       tags:
         - user
         - admin
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
-      requestBody:
-        description: new user
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NewUser"
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
       responses:
-        "201":
+        "200":
           description: user created
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/User"
 
   /w/{workspace}/users/update/{username}:
     post:
@@ -337,6 +335,76 @@ paths:
       responses:
         "200":
           description: user updated
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /users/username_info/{email}:
+    get:
+      summary: global username info (require super admin)
+      operationId: globalUsernameInfo
+      tags:
+        - user
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: user renamed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username:
+                    type: string
+                  workspace_usernames:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        workspace_id:
+                          type: string
+                        username:
+                          type: string
+                      required:
+                        - workspace_id
+                        - username
+                required:
+                  - username
+                  - workspace_usernames
+
+  /users/rename/{email}:
+    post:
+      summary: global rename user (require super admin)
+      operationId: globalUserRename
+      tags:
+        - user
+      parameters:
+        - name: email
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: new username
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                new_username:
+                  type: string
+              required:
+                - new_username
+      responses:
+        "200":
+          description: user renamed
           content:
             text/plain:
               schema:
@@ -664,6 +732,27 @@ paths:
               schema:
                 type: string
 
+  /saml/test_metadata:
+    post:
+      summary: test metadata
+      operationId: testMetadata
+      tags:
+        - setting
+      requestBody:
+        description: test metadata
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: status
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /users/email:
     get:
       summary: get current user email (if logged in)
@@ -861,7 +950,6 @@ paths:
                   type: string
               required:
                 - workspace_id
-                - username
       responses:
         "200":
           description: status
@@ -958,7 +1046,6 @@ paths:
                 - email
                 - is_admin
                 - operator
-                - username
       responses:
         "200":
           description: status
@@ -1176,6 +1263,8 @@ paths:
                     type: boolean
                   plan:
                     type: string
+                  automatic_billing:
+                    type: boolean
                   customer_id:
                     type: string
                   webhook:
@@ -1200,6 +1289,7 @@ paths:
                     type: string
                 required:
                   - code_completion_enabled
+                  - automatic_billing
 
   /w/{workspace}/workspaces/get_deploy_to:
     get:
@@ -1261,8 +1351,42 @@ paths:
                     type: number
                   seats:
                     type: number
+                  automatic_billing:
+                    type: boolean
                 required:
                   - premium
+                  - automatic_billing
+
+  /w/{workspace}/workspaces/set_automatic_billing:
+    post:
+      summary: set automatic billing
+      operationId: setAutomaticBilling
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        description: automatic billing
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                automatic_billing:
+                  type: boolean
+                seats:
+                  type: number
+              required:
+                - automatic_billing
+
+      responses:
+        "200":
+          description: status
+          content:
+            text/plain:
+              schema:
+                type: string
 
   /w/{workspace}/workspaces/edit_slack_command:
     post:
@@ -1574,6 +1698,91 @@ paths:
               schema:
                 type: string
 
+  /w/{workspace}/workspaces/default_scripts:
+    post:
+      summary: edit default scripts for workspace
+      operationId: editDefaultScripts
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        description: Workspace default app
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspaceDefaultScripts"
+
+      responses:
+        "200":
+          description: status
+          content:
+            text/plain:
+              schema:
+                type: string
+    get:
+      summary: get default scripts for workspace
+      operationId: get default scripts
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceDefaultScripts"
+
+  /w/{workspace}/workspaces/encryption_key:
+    get:
+      summary: retrieves the encryption key for this workspace
+      operationId: getWorkspaceEncryptionKey
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: string
+                required:
+                  - key
+    post:
+      summary: update the encryption key for this workspace
+      operationId: setWorkspaceEncryptionKey
+      tags:
+        - workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        description: New encryption key
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                new_key:
+                  type: string
+              required:
+                - new_key
+
+      responses:
+        "200":
+          description: status
+          content:
+            text/plain:
+              schema:
+                type: string
+
   /w/{workspace}/workspaces/default_app:
     get:
       summary: get default app for workspace
@@ -1627,6 +1836,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/User"
+
+  /w/{workspace}/users/list_usage:
+    get:
+      summary: list users usage
+      operationId: listUsersUsage
+      tags:
+        - user
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserUsage"
 
   /w/{workspace}/users/list_usernames:
     get:
@@ -4717,6 +4944,43 @@ paths:
                 type: string
                 format: uuid
 
+  /w/{workspace}/jobs/workflow_as_code/{job_id}/{entrypoint}:
+    post:
+      summary: run code-workflow task
+      operationId: runCodeWorkflowTask
+      tags:
+        - job
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: entrypoint
+          in: path
+          required: true
+          schema:
+            type: string
+
+      requestBody:
+        description: preview
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowTask"
+
+      responses:
+        "201":
+          description: job created
+          content:
+            text/plain:
+              schema:
+                type: string
+                format: uuid
+
   /w/{workspace}/jobs/run/dependencies:
     post:
       summary: run a one-off dependencies job
@@ -4926,6 +5190,11 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: has_null_parent
+          description: has null parent
+          in: query
+          schema:
+            type: boolean
       responses:
         "200":
           description: All completed jobs
@@ -4967,6 +5236,11 @@ paths:
             type: boolean
         - name: is_flow_step
           description: is the job a flow step
+          in: query
+          schema:
+            type: boolean
+        - name: has_null_parent
+          description: has null parent
           in: query
           schema:
             type: boolean
@@ -5089,6 +5363,8 @@ paths:
                     type: string
                   mem_peak:
                     type: integer
+                  flow_status:
+                    $ref: "#/components/schemas/WorkflowStatusRecord"
 
   /w/{workspace}/jobs_u/get_flow_debug_info/{id}:
     get:
@@ -5105,7 +5381,6 @@ paths:
           content:
             application/json:
               schema: {}
-
 
   /w/{workspace}/jobs_u/completed/get/{id}:
     get:
@@ -6335,6 +6610,9 @@ paths:
               properties:
                 owner:
                   type: string
+              required:
+                - owner
+
       responses:
         "200":
           description: owner added to folder
@@ -6362,6 +6640,10 @@ paths:
               properties:
                 owner:
                   type: string
+                write:
+                  type: boolean
+              required:
+                - owner
       responses:
         "200":
           description: owner removed from folder
@@ -8276,8 +8558,6 @@ components:
           type: array
           items:
             type: string
-        usage:
-          $ref: "#/components/schemas/Usage"
       required:
         - email
         - username
@@ -8289,9 +8569,11 @@ components:
         - folders
         - folders_owners
 
-    Usage:
+    UserUsage:
       type: object
       properties:
+        email:
+          type: string
         executions:
           type: number
 
@@ -8305,20 +8587,6 @@ components:
       required:
         - email
         - password
-
-    NewUser:
-      type: object
-      properties:
-        email:
-          type: string
-        username:
-          type: string
-        is_admin:
-          type: boolean
-      required:
-        - email
-        - username
-        - is_admin
 
     EditWorkspaceUser:
       type: object
@@ -8732,6 +9000,33 @@ components:
       required:
         - args
 
+    WorkflowTask:
+      type: object
+      properties:
+        args:
+          $ref: "#/components/schemas/ScriptArgs"
+      required:
+        - args
+
+    WorkflowStatusRecord:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/WorkflowStatus"
+
+    WorkflowStatus:
+      type: object
+      properties:
+        scheduled_for:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: number
+        name:
+          type: string
+
     CreateResource:
       type: object
       properties:
@@ -9132,7 +9427,6 @@ components:
       required:
         - id
         - name
-        - username
 
     Workspace:
       type: object
@@ -9182,6 +9476,8 @@ components:
         name:
           type: string
         company:
+          type: string
+        username:
           type: string
 
       required:
@@ -9480,7 +9776,13 @@ components:
       properties:
         type:
           type: string
-          enum: ["S3Storage", "AzureBlobStorage"]
+          enum:
+            [
+              "S3Storage",
+              "AzureBlobStorage",
+              "AzureWorkloadIdentity",
+              "S3AwsOidc",
+            ]
         s3_resource_path:
           type: string
         azure_blob_resource_path:
@@ -9570,11 +9872,31 @@ components:
               - secret
               - resourcetype
               - schedule
+              - user
+              - group
         repositories:
           type: array
           items:
             $ref: "#/components/schemas/GitRepositorySettings"
 
+    WorkspaceDefaultScripts:
+      type: object
+      properties:
+        order:
+          type: array
+          items:
+            type: string
+        hidden:
+          type: array
+          items:
+            type: string
+        default_script_content:
+          additionalProperties:
+            type: string
+
+        
+
+            
     GitRepositorySettings:
       type: object
       properties:
@@ -9584,6 +9906,22 @@ components:
           type: string
         use_individual_branch:
           type: boolean
+        exclude_types_override:
+          type: array
+          items:
+            type: string
+            enum:
+              - script
+              - flow
+              - app
+              - folder
+              - resource
+              - variable
+              - secret
+              - resourcetype
+              - schedule
+              - user
+              - group
       required:
         - script_path
         - git_repo_resource_path

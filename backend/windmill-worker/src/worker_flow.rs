@@ -9,13 +9,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::{hash_args, save_in_cache};
 use crate::js_eval::{eval_timeout, IdContext};
-use crate::{AuthedClient, PreviousResult, SendResult, KEEP_JOB_DIR};
+use crate::{AuthedClient, PreviousResult, SameWorkerPayload, SendResult, KEEP_JOB_DIR};
 use anyhow::Context;
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -64,7 +64,7 @@ pub async fn update_flow_status_after_job_completion<
     success: bool,
     result: &'a RawValue,
     unrecoverable: bool,
-    same_worker_tx: Sender<Uuid>,
+    same_worker_tx: Sender<SameWorkerPayload>,
     worker_dir: &str,
     stop_early_override: Option<bool>,
     rsmq: Option<R>,
@@ -73,6 +73,8 @@ pub async fn update_flow_status_after_job_completion<
 ) -> error::Result<()> {
     // this is manual tailrecursion because async_recursion blows up the stack
     // todo!();
+    potentially_crash_for_testing();
+
     let mut rec = update_flow_status_after_job_completion_internal(
         db,
         client,
@@ -92,6 +94,7 @@ pub async fn update_flow_status_after_job_completion<
     )
     .await?;
     while let Some(nrec) = rec {
+        potentially_crash_for_testing();
         rec = match update_flow_status_after_job_completion_internal(
             db,
             client,
@@ -165,7 +168,7 @@ pub async fn update_flow_status_after_job_completion_internal<
     mut success: bool,
     result: &'a RawValue,
     unrecoverable: bool,
-    same_worker_tx: Sender<Uuid>,
+    same_worker_tx: Sender<SameWorkerPayload>,
     worker_dir: &str,
     stop_early_override: Option<bool>,
     skip_error_handler: bool,
@@ -180,7 +183,7 @@ pub async fn update_flow_status_after_job_completion_internal<
         skip_if_stop_early,
         nresult,
         is_failure_step,
-        cleanup_module,
+        _cleanup_module,
     ) = {
         // tracing::debug!("UPDATE FLOW STATUS: {flow:?} {success} {result:?} {w_id} {depth}");
 
@@ -231,7 +234,7 @@ pub async fn update_flow_status_after_job_completion_internal<
 
         let (mut stop_early, skip_if_stop_early) = if let Some(se) = stop_early_override {
             //do not stop early if module is a flow step
-            let flow_job = get_queued_job(flow, w_id, db)
+            let flow_job = get_queued_job(&flow, w_id, db)
                 .await?
                 .ok_or_else(|| Error::InternalErr(format!("requiring flow to be in the queue")))?;
             let module = get_module(&flow_job, module_index);
@@ -361,17 +364,51 @@ pub async fn update_flow_status_after_job_completion_internal<
                             branch_chosen: None,
                         }
                     };
+                    let r = sqlx::query_scalar!(
+                        "DELETE FROM parallel_monitor_lock WHERE parent_flow_id = $1 RETURNING last_ping",
+                        flow,
+                    ).fetch_optional(db).await?;
+                    if r.is_some() {
+                        tracing::info!(
+                            "parallel flow has removed lock on its parent, last ping was {:?}",
+                            r.unwrap()
+                        );
+                    }
+
                     (true, Some(new_status))
                 } else {
+                    tx.commit().await?;
+
                     if parallelism.is_some() {
                         sqlx::query!(
                             "UPDATE queue SET suspend = suspend - 1 WHERE parent_job = $1",
                             flow
                         )
-                        .execute(&mut tx)
+                        .execute(db)
                         .await?;
                     }
-                    tx.commit().await?;
+
+                    sqlx::query!(
+                        "UPDATE queue
+                        SET last_ping = null
+                        WHERE id = $1",
+                        flow
+                    )
+                    .execute(db)
+                    .await?;
+
+                    let r = sqlx::query_scalar!(
+                        "DELETE FROM parallel_monitor_lock WHERE parent_flow_id = $1 and job_id = $2 RETURNING last_ping",
+                        flow,
+                        job_id_for_status
+                    ).fetch_optional(db).await?;
+                    if r.is_some() {
+                        tracing::info!(
+                            "parallel flow has removed lock on its parent, last ping was {:?}",
+                            r.unwrap()
+                        );
+                    }
+
                     return Ok(None);
                 }
             }
@@ -578,28 +615,28 @@ pub async fn update_flow_status_after_job_completion_internal<
 
     let done = if !should_continue_flow {
         let logs = if flow_job.canceled {
-            "Flow job canceled".to_string()
+            "Flow job canceled\n".to_string()
         } else if stop_early {
-            format!("Flow job stopped early because of a stop early predicate returning true")
+            format!("Flow job stopped early because of a stop early predicate returning true\n")
         } else if success {
-            "Flow job completed with success".to_string()
+            "Flow job completed with success\n".to_string()
         } else {
-            "Flow job completed with error".to_string()
+            "Flow job completed with error\n".to_string()
         };
 
         #[cfg(feature = "enterprise")]
         if flow_job.parent_job.is_none() {
             // run the cleanup step only when the root job is complete
-            if !cleanup_module.flow_jobs_to_clean.is_empty() {
+            if !_cleanup_module.flow_jobs_to_clean.is_empty() {
                 tracing::debug!(
                     "Cleaning up jobs arguments, result and logs as they were marked as delete_after_use {:?}",
-                    cleanup_module.flow_jobs_to_clean
+                    _cleanup_module.flow_jobs_to_clean
                 );
                 sqlx::query!(
                     "UPDATE completed_job
                     SET logs = '##DELETED##', args = '{}'::jsonb, result = '{}'::jsonb
                     WHERE id = ANY($1)",
-                    &cleanup_module.flow_jobs_to_clean,
+                    &_cleanup_module.flow_jobs_to_clean,
                 )
                 .execute(db)
                 .await?;
@@ -618,6 +655,7 @@ pub async fn update_flow_status_after_job_completion_internal<
                 canceled_job_to_result(&flow_job),
                 rsmq.clone(),
                 worker_name,
+                true,
             )
             .await?;
         } else {
@@ -653,6 +691,7 @@ pub async fn update_flow_status_after_job_completion_internal<
                     0,
                     None,
                     rsmq.clone(),
+                    true,
                 )
                 .await?;
             } else {
@@ -670,6 +709,7 @@ pub async fn update_flow_status_after_job_completion_internal<
                     0,
                     None,
                     rsmq.clone(),
+                    true,
                 )
                 .await?;
             }
@@ -700,6 +740,7 @@ pub async fn update_flow_status_after_job_completion_internal<
                     e,
                     rsmq.clone(),
                     worker_name,
+                    true,
                 )
                 .await;
                 true
@@ -763,6 +804,7 @@ async fn retrieve_flow_jobs_results(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    tracing::debug!("Retrieved results for flow jobs {:?}", results);
     Ok(to_raw_value(&results))
 }
 
@@ -1025,7 +1067,7 @@ pub async fn handle_flow<R: rsmq_async::RsmqConnection + Send + Sync + Clone>(
     db: &sqlx::Pool<sqlx::Postgres>,
     client: &AuthedClient,
     last_result: Option<Box<RawValue>>,
-    same_worker_tx: Sender<Uuid>,
+    same_worker_tx: Sender<SameWorkerPayload>,
     worker_dir: &str,
     rsmq: Option<R>,
     job_completed_tx: Sender<SendResult>,
@@ -1105,6 +1147,25 @@ pub struct RawArgs {
     pub args: Option<Json<HashMap<String, Box<RawValue>>>>,
 }
 
+lazy_static::lazy_static! {
+    static ref CRASH_FORCEFULLY_AT_STEP: Option<usize> = std::env::var("CRASH_FORCEFULLY_AT_STEP")
+        .ok()
+        .and_then(|x| x.parse::<usize>().ok());
+
+    static ref CRASH_STEP_COUNTER: AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+}
+
+#[inline(always)]
+fn potentially_crash_for_testing() {
+    #[cfg(feature = "flow_testing")]
+    if let Some(crash_at) = CRASH_FORCEFULLY_AT_STEP.as_ref() {
+        let counter = CRASH_STEP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        if &counter == crash_at {
+            panic!("CRASH#1 - expected crash for testing at step {}", crash_at);
+        }
+    }
+}
+
 // #[async_recursion]
 // #[instrument(level = "trace", skip_all)]
 async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>(
@@ -1114,7 +1175,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
     db: &sqlx::Pool<sqlx::Postgres>,
     client: &AuthedClient,
     last_job_result: Option<Box<RawValue>>,
-    same_worker_tx: Sender<Uuid>,
+    same_worker_tx: Sender<SameWorkerPayload>,
     worker_dir: &str,
     rsmq: Option<R>,
     job_completed_tx: Sender<SendResult>,
@@ -1159,29 +1220,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                     "error sending update flow message to job completed channel: {e}"
                 ))
             })?;
-        // let r;
-        // return update_flow_status_after_job_completion(
-        //     db,
-        //     client,
-        //     flow_job.id,
-        //     &Uuid::nil(),
-        //     flow_job.workspace_id.as_str(),
-        //     true,
-        //     if flow.modules.is_empty() {
-        //         r = to_raw_value(&flow_job_args);
-        //         &r
-        //     } else {
-        //         // it has to be an empty for loop event
-        //         serde_json::from_str("[]").unwrap()
-        //     },
-        //     true,
-        //     same_worker_tx,
-        //     worker_dir,
-        //     None,
-        //     rsmq,
-        //     worker_name,
-        // )
-        // .await;
+
         return Ok(());
     }
 
@@ -1228,25 +1267,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                                 "error sending update flow message to job completed channel: {e}"
                             ))
                         })?;
-                    // return update_flow_status_after_job_completion(
-                    //     db,
-                    //     client,
-                    //     flow_job.id,
-                    //     &Uuid::nil(),
-                    //     flow_job.workspace_id.as_str(),
-                    //     true,
-                    //     serde_json::from_str(
-                    //         "\"not allowed to overlap, scheduling next iteration\"",
-                    //     )
-                    //     .unwrap(),
-                    //     true,
-                    //     same_worker_tx,
-                    //     worker_dir,
-                    //     Some(true),
-                    //     rsmq,
-                    //     worker_name,
-                    // )
-                    // .await;
+
                     return Ok(());
                 }
             }
@@ -1279,22 +1300,6 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                         ))
                     })?;
 
-                // return update_flow_status_after_job_completion(
-                //     db,
-                //     client,
-                //     flow_job.id,
-                //     &Uuid::nil(),
-                //     flow_job.workspace_id.as_str(),
-                //     true,
-                //     serde_json::from_str("\"stopped early\"").unwrap(),
-                //     true,
-                //     same_worker_tx,
-                //     worker_dir,
-                //     Some(true),
-                //     rsmq,
-                //     worker_name,
-                // )
-                // .await;
                 return Ok(());
             }
         }
@@ -1486,6 +1491,16 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                 .execute(&mut *tx)
                 .await?;
 
+                sqlx::query!(
+                    "UPDATE queue
+                    SET last_ping = null
+                    WHERE id = $1 AND last_ping = $2",
+                    flow_job.id,
+                    flow_job.last_ping
+                )
+                .execute(&mut *tx)
+                .await?;
+
                 tx.commit().await?;
                 return Ok(());
 
@@ -1515,6 +1530,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                     0,
                     canceled_by,
                     rsmq.clone(),
+                    false,
                 )
                 .await?;
                 if flow_job.is_flow_step {
@@ -1535,23 +1551,6 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                                 "error sending update flow message to job completed channel: {e}"
                             ))
                             })?;
-                        // update_flow_status_after_job_completion(
-                        //     db,
-                        //     client,
-                        //     parent_job,
-                        //     &flow_job.id,
-                        //     &flow_job.workspace_id,
-                        //     true,
-                        //     &to_raw_value(&result),
-                        //     false,
-                        //     same_worker_tx.clone(),
-                        //     &worker_dir,
-                        //     None,
-                        //     rsmq,
-                        //     worker_name,
-                        // )
-                        // .await?;
-                        return Ok(());
                     }
                 }
                 return Ok(());
@@ -1832,7 +1831,7 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             // flow is reprocessed by the worker in a state where the module has completed successfully.
             // The next steps are pull -> handle flow -> push next flow job -> update flow status since module status is success
             same_worker_tx
-                .send(flow_job.id)
+                .send(SameWorkerPayload { job_id: flow_job.id, recoverable: true })
                 .await
                 .expect("send to same worker");
             return Ok(());
@@ -2032,6 +2031,19 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
     } else {
         Err(Error::BadRequest("Expected only one uuid".to_string()))
     };
+
+    if !is_one_uuid {
+        for uuid in &uuids {
+            sqlx::query!(
+                "INSERT INTO parallel_monitor_lock (parent_flow_id, job_id)
+                VALUES ($1, $2)",
+                flow_job.id,
+                uuid
+            )
+            .execute(&mut tx)
+            .await?;
+        }
+    }
     let first_uuid = uuids[0];
     let new_status = match next_status {
         NextStatus::NextLoopIteration {
@@ -2122,6 +2134,17 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
         .await?;
     };
 
+    potentially_crash_for_testing();
+
+    sqlx::query!(
+        "UPDATE queue
+        SET last_ping = null
+        WHERE id = $1",
+        flow_job.id
+    )
+    .execute(&mut tx)
+    .await?;
+
     tx.commit().await?;
     tracing::info!(id = %flow_job.id, root_id = %job_root, "all next flow jobs pushed: {uuids:?}");
 
@@ -2131,7 +2154,10 @@ async fn push_next_flow_job<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
                 "Cannot continue on same worker with multiple jobs, parallel cannot be used in conjunction with same_worker".to_string(),
             ));
         }
-        same_worker_tx.send(first_uuid).await.map_err(to_anyhow)?;
+        same_worker_tx
+            .send(SameWorkerPayload { job_id: first_uuid, recoverable: true })
+            .await
+            .map_err(to_anyhow)?;
     }
     return Ok(());
 }

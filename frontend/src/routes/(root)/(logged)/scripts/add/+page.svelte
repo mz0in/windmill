@@ -2,7 +2,7 @@
 	import { NewScript, Script, ScriptService } from '$lib/gen'
 
 	import { page } from '$app/stores'
-	import { workspaceStore } from '$lib/stores'
+	import { defaultScripts, workspaceStore } from '$lib/stores'
 	import ScriptBuilder from '$lib/components/ScriptBuilder.svelte'
 	import type { Schema } from '$lib/common'
 	import { decodeState, emptySchema } from '$lib/utils'
@@ -20,20 +20,34 @@
 
 	let scriptBuilder: ScriptBuilder | undefined = undefined
 
+	function decodeStateAndHandleError(state) {
+		try {
+			return decodeState(state)
+		} catch (e) {
+			console.error('Error decoding state', e)
+			return defaultScript
+		}
+	}
+
+	function defaultScript() {
+		return {
+			hash: '',
+			path: path ?? '',
+			summary: '',
+			content: '',
+			schema: schema,
+			is_template: false,
+			extra_perms: {},
+			language:
+				$defaultScripts?.order?.filter(
+					(x) => $defaultScripts?.hidden == undefined || !$defaultScripts.hidden.includes(x)
+				)?.[0] ?? 'bun',
+			kind: Script.kind.SCRIPT
+		}
+	}
+
 	let script: NewScript =
-		!path && initialState != undefined
-			? decodeState(initialState)
-			: {
-					hash: '',
-					path: path ?? '',
-					summary: '',
-					content: '',
-					schema: schema,
-					is_template: false,
-					extra_perms: {},
-					language: 'deno',
-					kind: Script.kind.SCRIPT
-			  }
+		!path && initialState != undefined ? decodeStateAndHandleError(initialState) : defaultScript()
 
 	async function loadTemplate(): Promise<void> {
 		if (templatePath) {

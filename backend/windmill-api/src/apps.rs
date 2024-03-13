@@ -28,7 +28,8 @@ use sha2::{Digest, Sha256};
 use sql_builder::{bind::Bind, SqlBuilder};
 use sqlx::{types::Uuid, FromRow};
 use std::str;
-use windmill_audit::{audit_log, ActionKind};
+use windmill_audit::audit_ee::audit_log;
+use windmill_audit::ActionKind;
 use windmill_common::{
     apps::ListAppQuery,
     db::UserDB,
@@ -40,6 +41,7 @@ use windmill_common::{
     },
     variables::build_crypt,
 };
+
 use windmill_git_sync::{handle_deployment_metadata, DeployedObject};
 use windmill_queue::{push, PushArgs, PushIsolationLevel, QueueTransaction};
 
@@ -798,19 +800,15 @@ async fn update_app(
             npolicy.on_behalf_of_email = Some(authed.email.clone());
             sqlb.set(
                 "policy",
-                &format!(
-                    "'{}'",
-                    serde_json::to_string(&json!(npolicy)).map_err(|e| {
-                        Error::BadRequest(format!("failed to serialize policy: {}", e))
-                    })?
-                ),
+                quote(serde_json::to_string(&json!(npolicy)).map_err(|e| {
+                    Error::BadRequest(format!("failed to serialize policy: {}", e))
+                })?),
             );
         }
 
         sqlb.returning("path");
 
         let sql = sqlb.sql().map_err(|e| Error::InternalErr(e.to_string()))?;
-        tracing::error!("update_app sql: {}", sql);
         let npath_o: Option<String> = sqlx::query_scalar(&sql).fetch_optional(&mut tx).await?;
         not_found_if_none(npath_o, "App", path)?
     } else {
@@ -1140,12 +1138,30 @@ fn build_args(
     args: HashMap<String, Box<RawValue>>,
 ) -> Result<PushArgs<HashMap<String, Box<RawValue>>>> {
     // disallow var and res access in args coming from the user for security reasons
-    for (_, v) in &args {
+    let mut safe_args: HashMap<String, Box<RawValue>> = args.clone();
+    for (k, v) in args {
         let args_str = serde_json::to_string(&v).unwrap_or_else(|_| "".to_string());
         if args_str.contains("$var:") || args_str.contains("$res:") {
-            return Err(Error::BadRequest(format!(
-            "For security reasons, variable or resource access is not allowed as dynamic argument"
-        )));
+            safe_args.insert(
+                k.to_string(),
+                RawValue::from_string(
+                    args_str
+                        .replace(
+                            "$var:",
+                            "The following variable has been ommited for security reasons: ",
+                        )
+                        .replace(
+                            "$res:",
+                            "The following resource has been ommited for security reasons: ",
+                        ),
+                )
+                .map_err(|e| {
+                    Error::InternalErr(format!(
+                        "failed to remove sensitive variable(s)/resource(s) with error: {}",
+                        e
+                    ))
+                })?,
+            );
         }
     }
     let key = format!("{}:{}", component, &path);
@@ -1168,5 +1184,5 @@ fn build_args(
     for (k, v) in static_args {
         extra.insert(k.to_string(), v.to_owned());
     }
-    Ok(PushArgs { extra, args: sqlx::types::Json(args) })
+    Ok(PushArgs { extra, args: sqlx::types::Json(safe_args) })
 }

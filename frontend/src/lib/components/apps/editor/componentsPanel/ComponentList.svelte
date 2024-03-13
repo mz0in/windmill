@@ -149,14 +149,14 @@
 	$: componentsFiltered = COMPONENT_SETS.map((set) => ({
 		...set,
 		components: set.components.filter((component) => {
-			const name = componentsRecord[component].name.toLowerCase()
-			return name.includes(search.toLowerCase())
+			const name = componentsRecord[component].name.toLowerCase();
+			return name.includes(search.toLowerCase().trim());
 		}),
 		presets: set.presets?.filter((preset) => {
-			const presetName = presetsRecord[preset].name.toLowerCase()
-			return presetName.includes(search.toLowerCase())
+			const presetName = presetsRecord[preset].name.toLowerCase();
+			return presetName.includes(search.toLowerCase().trim());
 		})
-	}))
+	}));
 
 	$: {
 		if ($workspaceStore) {
@@ -175,7 +175,7 @@
 		title="Custom Components"
 		on:close={ccDrawer.closeDrawer}
 		documentationLink="https://www.windmill.dev/docs/apps/react_components"
-		>
+	>
 		<ComponentsList on:reload={fetchCustomComponents} />
 	</DrawerContent>
 </Drawer>

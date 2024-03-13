@@ -7,12 +7,12 @@
  */
 
 use crate::db::ApiAuthed;
+#[cfg(feature = "embedding")]
 use crate::embeddings::load_embeddings_db;
-use crate::oauth2::AllClients;
-use crate::scim::has_scim_token;
+use crate::oauth2_ee::AllClients;
 use crate::tracing_init::MyOnFailure;
 use crate::{
-    oauth2::SlackVerifier,
+    oauth2_ee::SlackVerifier,
     tracing_init::{MyMakeSpan, MyOnResponse},
     users::OptAuthed,
     webhook_util::WebhookShared,
@@ -39,11 +39,13 @@ use windmill_common::utils::rd_string;
 use windmill_common::worker::ALL_TAGS;
 use windmill_common::BASE_URL;
 
+use crate::scim_ee::has_scim_token;
 use windmill_common::error::AppError;
 
 mod apps;
 mod audit;
 mod capture;
+mod concurrency_groups;
 mod configs;
 mod db;
 mod drafts;
@@ -56,22 +58,22 @@ mod granular_acls;
 mod groups;
 mod inputs;
 mod integration;
-pub mod job_helpers;
+#[cfg(feature = "parquet")]
+mod job_helpers_ee;
 pub mod job_metrics;
 pub mod jobs;
-pub mod oauth2;
-
-mod concurrency_groups;
-mod oidc;
+pub mod oauth2_ee;
+mod oidc_ee;
 mod openai;
 mod raw_apps;
 mod resources;
 mod saml_ee;
 mod schedule;
-mod scim;
+mod scim_ee;
 mod scripts;
 mod settings;
 mod static_assets;
+mod stripe_ee;
 mod tracing_init;
 mod users;
 mod utils;
@@ -88,6 +90,9 @@ pub const DEFAULT_BODY_LIMIT: usize = 2097152 * 100; // 200MB
 lazy_static::lazy_static! {
 
     pub static ref REQUEST_SIZE_LIMIT: Arc<RwLock<usize>> = Arc::new(RwLock::new(DEFAULT_BODY_LIMIT));
+
+    pub static ref SCIM_TOKEN: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    pub static ref SAML_METADATA: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
 
     pub static ref COOKIE_DOMAIN: Option<String> = std::env::var("COOKIE_DOMAIN").ok();
@@ -163,10 +168,32 @@ pub async fn run_server(
     let sp_extension = Arc::new(saml_ee::build_sp_extension().await?);
 
     let embeddings_db = if server_mode {
+        #[cfg(feature = "embedding")]
+        {
         Some(load_embeddings_db(&db))
+        }
+        #[cfg(not(feature = "embedding"))]
+        {
+        Some(())
+        }
     } else {
         None
     };
+
+
+    let job_helpers_service = {
+        #[cfg(feature = "parquet")]
+        {
+        job_helpers_ee::workspaced_service()
+        }
+
+
+        #[cfg(not(feature = "parquet"))]
+        {
+        Router::new()
+        }
+    };
+
 
     // build our application with a route
     let app = Router::new()
@@ -192,9 +219,9 @@ pub async fn run_server(
                         .nest("/groups", groups::workspaced_service())
                         .nest("/inputs", inputs::workspaced_service())
                         .nest("/job_metrics", job_metrics::workspaced_service())
-                        .nest("/job_helpers", job_helpers::workspaced_service())
+                        .nest("/job_helpers", job_helpers_service)
                         .nest("/jobs", jobs::workspaced_service())
-                        .nest("/oauth", oauth2::workspaced_service())
+                        .nest("/oauth", oauth2_ee::workspaced_service())
                         .nest("/openai", openai::workspaced_service())
                         .nest("/raw_apps", raw_apps::workspaced_service())
                         .nest("/resources", resources::workspaced_service())
@@ -206,7 +233,7 @@ pub async fn run_server(
                         )
                         .nest("/variables", variables::workspaced_service())
                         .nest("/workspaces", workspaces::workspaced_service())
-                        .nest("/oidc", oidc::workspaced_service()),
+                        .nest("/oidc", oidc_ee::workspaced_service()),
                 )
                 .nest("/workspaces", workspaces::global_service())
                 .nest(
@@ -229,14 +256,15 @@ pub async fn run_server(
                 .route_layer(from_extractor::<ApiAuthed>())
                 .route_layer(from_extractor::<users::Tokened>())
                 .nest("/jobs", jobs::global_root_service())
-                .nest("/oidc", oidc::global_service())
+                .nest("/oidc", oidc_ee::global_service())
                 .nest(
                     "/saml",
                     saml_ee::global_service().layer(Extension(Arc::clone(&sp_extension))),
                 )
                 .nest(
                     "/scim",
-                    scim::global_service().route_layer(axum::middleware::from_fn(has_scim_token)),
+                    scim_ee::global_service()
+                        .route_layer(axum::middleware::from_fn(has_scim_token)),
                 )
                 .nest("/concurrency_groups", concurrency_groups::global_service())
                 .nest("/scripts_u", scripts::global_unauthed_service())
@@ -264,7 +292,7 @@ pub async fn run_server(
                 )
                 .nest(
                     "/oauth",
-                    oauth2::global_service().layer(Extension(Arc::clone(&sp_extension))),
+                    oauth2_ee::global_service().layer(Extension(Arc::clone(&sp_extension))),
                 )
                 .route("/version", get(git_v))
                 .route("/uptodate", get(is_up_to_date))

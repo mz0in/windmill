@@ -24,21 +24,23 @@ pub mod flow_status;
 pub mod flows;
 pub mod global_settings;
 pub mod job_metrics;
+#[cfg(feature = "parquet")]
+pub mod job_s3_helpers_ee;
 pub mod jobs;
 pub mod more_serde;
 pub mod oauth2;
 pub mod s3_helpers;
+
 pub mod schedule;
 pub mod scripts;
 pub mod server;
-pub mod stats;
+pub mod stats_ee;
 pub mod users;
 pub mod utils;
 pub mod variables;
 pub mod worker;
 pub mod workspaces;
 
-#[cfg(feature = "tracing_init")]
 pub mod tracing_init;
 
 pub const DEFAULT_MAX_CONNECTIONS_SERVER: u32 = 50;
@@ -69,21 +71,23 @@ lazy_static::lazy_static! {
     pub static ref IS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 }
 
-#[cfg(feature = "tokio")]
 pub async fn shutdown_signal(
     tx: tokio::sync::broadcast::Sender<()>,
     mut rx: tokio::sync::broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     use std::io;
-    use tokio::signal::unix::SignalKind;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn terminate() -> io::Result<()> {
+        use tokio::signal::unix::SignalKind;
         tokio::signal::unix::signal(SignalKind::terminate())?
             .recv()
             .await;
+
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     tokio::select! {
         _ = terminate() => {},
         _ = tokio::signal::ctrl_c() => {},
@@ -91,6 +95,15 @@ pub async fn shutdown_signal(
             tracing::info!("shutdown monitor received killpill");
         },
     }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = rx.recv() => {
+            tracing::info!("shutdown monitor received killpill");
+        },
+    }
+
     println!("signal received, starting graceful shutdown");
     let _ = tx.send(());
     Ok(())
@@ -147,6 +160,7 @@ pub async fn serve_metrics(
     })
 }
 
+#[cfg(feature = "prometheus")]
 async fn metrics() -> Result<String, Error> {
     let metric_families = prometheus::gather();
     Ok(prometheus::TextEncoder::new()
@@ -154,11 +168,11 @@ async fn metrics() -> Result<String, Error> {
         .map_err(anyhow::Error::from)?)
 }
 
+#[cfg(feature = "prometheus")]
 async fn reset() -> () {
     todo!()
 }
 
-#[cfg(feature = "sqlx")]
 pub async fn connect_db(server_mode: bool) -> anyhow::Result<sqlx::Pool<sqlx::Postgres>> {
     use anyhow::Context;
     use std::env::var;
@@ -198,7 +212,6 @@ pub async fn connect_db(server_mode: bool) -> anyhow::Result<sqlx::Pool<sqlx::Po
     Ok(connect(&database_url, max_connections).await?)
 }
 
-#[cfg(feature = "sqlx")]
 pub async fn connect(
     database_url: &str,
     max_connections: u32,

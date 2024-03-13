@@ -1,21 +1,28 @@
 <script lang="ts">
-	import { DraftService, NewScript, Script, ScriptService, type NewScriptWithDraft } from '$lib/gen'
+	import {
+		DraftService,
+		NewScript,
+		Script,
+		ScriptService,
+		type NewScriptWithDraft,
+		ScheduleService
+	} from '$lib/gen'
 	import { goto } from '$app/navigation'
 	import { page } from '$app/stores'
 	import { inferArgs } from '$lib/infer'
 	import { initialCode } from '$lib/script_helpers'
-	import { enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
+	import { defaultScripts, enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
 	import {
 		cleanValueProperties,
 		emptySchema,
 		emptyString,
 		encodeState,
-		getModifierKey,
+		formatCron,
 		orderedJsonStringify
 	} from '$lib/utils'
 	import Path from './Path.svelte'
 	import ScriptEditor from './ScriptEditor.svelte'
-	import { Alert, Badge, Button, Drawer, Kbd, SecondsInput, Tab, TabContent, Tabs } from './common'
+	import { Alert, Badge, Button, Drawer, SecondsInput, Tab, TabContent, Tabs } from './common'
 	import LanguageIcon from './common/languageIcons/LanguageIcon.svelte'
 	import type { SupportedLanguage } from '$lib/common'
 	import Tooltip from './Tooltip.svelte'
@@ -25,6 +32,7 @@
 	import ErrorHandlerToggleButton from '$lib/components/details/ErrorHandlerToggleButton.svelte'
 	import {
 		Bug,
+		Calendar,
 		CheckCircle,
 		Code,
 		DiffIcon,
@@ -35,7 +43,6 @@
 		Settings,
 		X
 	} from 'lucide-svelte'
-	import { SCRIPT_SHOW_BASH, SCRIPT_SHOW_GO } from '$lib/consts'
 	import UnsavedConfirmationModal from './common/confirmationModal/UnsavedConfirmationModal.svelte'
 	import { sendUserToast } from '$lib/toast'
 	import { isCloudHosted } from '$lib/cloud'
@@ -51,10 +58,14 @@
 	import type Editor from './Editor.svelte'
 	import WorkerTagPicker from './WorkerTagPicker.svelte'
 	import MetadataGen from './copilot/MetadataGen.svelte'
+	import ScriptSchedules from './ScriptSchedules.svelte'
+	import { writable } from 'svelte/store'
+	import { type ScriptSchedule, loadScriptSchedule, defaultScriptLanguages } from '$lib/scripts'
+	import DefaultScripts from './DefaultScripts.svelte'
 
 	export let script: NewScript
 	export let initialPath: string = ''
-	export let template: 'pgsql' | 'mysql' | 'script' | 'docker' | 'powershell' = 'script'
+	export let template: 'docker' | 'script' = 'script'
 	export let initialArgs: Record<string, any> = {}
 	export let lockedLanguage = false
 	export let showMeta: boolean = false
@@ -70,31 +81,37 @@
 	let editor: Editor | undefined = undefined
 	let scriptEditor: ScriptEditor | undefined = undefined
 
+	let scheduleStore = writable<ScriptSchedule>({
+		summary: '',
+		cron: '0 */5 * * *',
+		timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+		args: {},
+		enabled: false
+	})
+	async function loadSchedule() {
+		const scheduleRes = await loadScriptSchedule(initialPath, $workspaceStore!)
+		if (scheduleRes) {
+			scheduleStore.set(scheduleRes)
+		}
+	}
+
+	$: {
+		if (initialPath != '') {
+			loadSchedule()
+		}
+	}
+
 	const enterpriseLangs = ['bigquery', 'snowflake', 'mssql']
 
 	export function setCode(code: string): void {
 		editor?.setCode(code)
 	}
 
-	const langs: [string, SupportedLanguage][] = [
-		['TypeScript (Deno)', Script.language.DENO],
-		['Python', Script.language.PYTHON3],
-		['TypeScript (Bun)', Script.language.BUN]
-	]
-	if (SCRIPT_SHOW_BASH) {
-		langs.push(['Bash', Script.language.BASH])
-	}
-	if (SCRIPT_SHOW_GO) {
-		langs.push(['Go', Script.language.GO])
-	}
-	langs.push(['REST', Script.language.NATIVETS])
-	langs.push(['PostgreSQL', Script.language.POSTGRESQL])
-	langs.push(['MySQL', Script.language.MYSQL])
-	langs.push(['BigQuery', Script.language.BIGQUERY])
-	langs.push(['Snowflake', Script.language.SNOWFLAKE])
-	langs.push(['MS SQL Server', Script.language.MSSQL])
-	langs.push(['GraphQL', Script.language.GRAPHQL])
-	langs.push(['PowerShell', Script.language.POWERSHELL])
+	$: langs = ($defaultScripts?.order ?? Object.keys(defaultScriptLanguages))
+		.map((l) => [defaultScriptLanguages[l], l])
+		.filter(
+			(x) => $defaultScripts?.hidden == undefined || !$defaultScripts.hidden.includes(x[1])
+		) as [string, SupportedLanguage | 'docker'][]
 
 	const scriptKindOptions: {
 		value: Script.kind
@@ -162,6 +179,28 @@
 		}
 	}
 
+	async function createSchedule(path: string) {
+		const { cron, timezone, args, enabled, summary } = $scheduleStore
+
+		try {
+			await ScheduleService.createSchedule({
+				workspace: $workspaceStore!,
+				requestBody: {
+					path: path,
+					schedule: formatCron(cron),
+					timezone,
+					script_path: path,
+					is_flow: false,
+					args,
+					enabled,
+					summary
+				}
+			})
+		} catch (err) {
+			sendUserToast(`The primary schedule could not be created: ${err}`, true)
+		}
+	}
+
 	async function editScript(stay: boolean): Promise<void> {
 		loadingSave = true
 		try {
@@ -205,6 +244,46 @@
 					concurrency_key: emptyString(script.concurrency_key) ? undefined : script.concurrency_key
 				}
 			})
+
+			const { enabled, timezone, args, cron, summary } = $scheduleStore
+			const scheduleExists = await ScheduleService.existsSchedule({
+				workspace: $workspaceStore ?? '',
+				path: script.path
+			})
+
+			if (scheduleExists) {
+				const schedule = await ScheduleService.getSchedule({
+					workspace: $workspaceStore ?? '',
+					path: script.path
+				})
+				if (
+					JSON.stringify(schedule.args) != JSON.stringify(args) ||
+					schedule.schedule != cron ||
+					schedule.timezone != timezone ||
+					schedule.summary != summary
+				) {
+					await ScheduleService.updateSchedule({
+						workspace: $workspaceStore ?? '',
+						path: script.path,
+						requestBody: {
+							schedule: formatCron(cron),
+							timezone,
+							args,
+							summary
+						}
+					})
+				}
+				if (enabled != schedule.enabled) {
+					await ScheduleService.setScheduleEnabled({
+						workspace: $workspaceStore ?? '',
+						path: script.path,
+						requestBody: { enabled }
+					})
+				}
+			} else if (enabled) {
+				await createSchedule(script.path)
+			}
+
 			savedScript = cloneDeep(script) as NewScriptWithDraft
 			history.replaceState(history.state, '', `/scripts/edit/${script.path}`)
 			if (stay) {
@@ -289,7 +368,6 @@
 							: script.concurrency_key
 					}
 				})
-				initialPath = script.path
 			}
 			await DraftService.createDraft({
 				workspace: $workspaceStore!,
@@ -308,6 +386,7 @@
 			} as NewScriptWithDraft
 
 			if (initialPath == '' || (savedScript?.draft_only && script.path !== initialPath)) {
+				initialPath = script.path
 				goto(`/scripts/edit/${script.path}`)
 			}
 			sendUserToast('Saved as draft')
@@ -366,7 +445,7 @@
 	let path: Path | undefined = undefined
 	let dirtyPath = false
 
-	let selectedTab: 'metadata' | 'runtime' | 'ui' = 'metadata'
+	let selectedTab: 'metadata' | 'runtime' | 'ui' | 'schedule' = 'metadata'
 </script>
 
 <svelte:window on:keydown={onKeyDown} />
@@ -388,6 +467,7 @@
 						cannot be inferred from the type directly.
 					</Tooltip>
 				</Tab>
+				<Tab value="schedule" active={$scheduleStore.enabled}>Schedule</Tab>
 				<svelte:fragment slot="content">
 					<div class="p-4">
 						<TabContent value="metadata">
@@ -457,14 +537,17 @@
 								</Section>
 
 								<Section label="Language">
+									<svelte:fragment slot="action"><DefaultScripts /></svelte:fragment>
 									{#if lockedLanguage}
 										<div class="text-sm text-tertiary italic mb-2">
 											As a forked script, the language '{script.language}' cannot be modified.
 										</div>
 									{/if}
 									<div class=" grid grid-cols-3 gap-2">
-										{#each langs as [label, lang]}
-											{@const isPicked = script.language == lang && template == 'script'}
+										{#each langs as [label, lang] (lang)}
+											{@const isPicked =
+												(lang == script.language && template == 'script') ||
+												(template == 'docker' && lang == 'docker')}
 											<Popover
 												disablePopup={!enterpriseLangs.includes(lang) || !!$enterpriseLicense}
 											>
@@ -476,9 +559,33 @@
 														? '!border-2 !bg-blue-50/75 dark:!bg-frost-900/75'
 														: 'm-[1px]'}
 													on:click={() => {
-														template = 'script'
-														initContent(lang, script.kind, template)
-														script.language = lang
+														if (lang == 'docker') {
+															if (isCloudHosted()) {
+																sendUserToast(
+																	'You cannot use Docker scripts on the multi-tenant platform. Use a dedicated instance or self-host windmill instead.',
+																	true,
+																	[
+																		{
+																			label: 'Learn more',
+																			callback: () => {
+																				window.open(
+																					'https://www.windmill.dev/docs/advanced/docker',
+																					'_blank'
+																				)
+																			}
+																		}
+																	]
+																)
+																return
+															}
+															template = 'docker'
+														} else {
+															template = 'script'
+														}
+														let language = lang == 'docker' ? Script.language.BASH : lang
+														//
+														initContent(language, script.kind, template)
+														script.language = language
 													}}
 													disabled={lockedLanguage ||
 														(enterpriseLangs.includes(lang) && !$enterpriseLicense)}
@@ -491,40 +598,6 @@
 												>
 											</Popover>
 										{/each}
-										<Button
-											size="sm"
-											variant="border"
-											color={template == 'docker' ? 'blue' : 'light'}
-											btnClasses={template == 'docker'
-												? '!border-2 !bg-blue-50/75 dark:!bg-frost-900/75'
-												: 'm-[1px]'}
-											disabled={lockedLanguage}
-											on:click={() => {
-												if (isCloudHosted()) {
-													sendUserToast(
-														'You cannot use Docker scripts on the multi-tenant platform. Use a dedicated instance or self-host windmill instead.',
-														true,
-														[
-															{
-																label: 'Learn more',
-																callback: () => {
-																	window.open(
-																		'https://www.windmill.dev/docs/advanced/docker',
-																		'_blank'
-																	)
-																}
-															}
-														]
-													)
-													return
-												}
-												template = 'docker'
-												initContent(Script.language.BASH, script.kind, template)
-												script.language = Script.language.BASH
-											}}
-										>
-											<LanguageIcon lang="docker" /><span class="ml-2 py-2">Docker</span>
-										</Button>
 									</div>
 								</Section>
 
@@ -592,8 +665,13 @@
 												type="text"
 												autofocus
 												bind:value={script.concurrency_key}
-												placeholder={`$workspace/script/${script.path}`}
+												placeholder={`$workspace/script/${script.path}-$args[foo]`}
 											/>
+											<Tooltip
+												>Concurrency keys are global, you can have them be workspace specific using
+												the variable `$workspace`. You can also use an argument's value using
+												`$args[name_of_arg]`</Tooltip
+											>
 										</Label>
 									</div>
 								</Section>
@@ -801,7 +879,7 @@
 									<Section label="Custom env variables">
 										<svelte:fragment slot="header">
 											<Tooltip
-												documentationLink="https://www.windmill.dev/docs/reference#custom-environment-variables"
+												documentationLink="https://www.windmill.dev/docs/script_editor/custom_environment_variables"
 											>
 												Additional static custom env variables to pass to the script.
 											</Tooltip>
@@ -859,6 +937,9 @@
 							<div class="mt-4" />
 							<ScriptSchema bind:schema={script.schema} />
 						</TabContent>
+						<TabContent value="schedule">
+							<ScriptSchedules {initialPath} schema={script.schema} schedule={scheduleStore} />
+						</TabContent>
 					</div>
 				</svelte:fragment>
 			</Tabs>
@@ -889,6 +970,21 @@
 				</div>
 
 				<div class="gap-4 flex">
+					{#if $scheduleStore.enabled}
+						<Button
+							btnClasses="hidden lg:inline-flex"
+							startIcon={{ icon: Calendar }}
+							variant="contained"
+							color="light"
+							size="xs"
+							on:click={async () => {
+								metadataOpen = true
+								selectedTab = 'schedule'
+							}}
+						>
+							{$scheduleStore.cron ?? ''}
+						</Button>
+					{/if}
 					<div class="flex justify-start w-full border rounded-md overflow-hidden">
 						<div>
 							<button
@@ -962,11 +1058,11 @@
 						startIcon={{ icon: Save }}
 						on:click={() => saveDraft()}
 						disabled={initialPath != '' && !savedScript}
+						shortCut={{
+							key: 'S'
+						}}
 					>
-						<span class="hidden lg:flex">
-							Draft&nbsp;<Kbd small isModifier>{getModifierKey()}</Kbd>
-						</span>
-						<Kbd small>S</Kbd>
+						<span class="hidden lg:flex"> Draft </span>
 					</Button>
 					<Button
 						loading={loadingSave}

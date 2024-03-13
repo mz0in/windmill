@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/stores'
-	import { JobService, Job, ScriptService, Script } from '$lib/gen'
+	import { JobService, Job, ScriptService, Script, type WorkflowStatus } from '$lib/gen'
 	import { canWrite, copyToClipboard, displayDate, emptyString, truncateHash } from '$lib/utils'
 	import BarsStaggered from '$lib/components/icons/BarsStaggered.svelte'
 
@@ -15,7 +15,6 @@
 		List,
 		Pen,
 		RefreshCw,
-		Scroll,
 		TimerOff,
 		Trash,
 		XCircle,
@@ -65,6 +64,7 @@
 	import { Highlight } from 'svelte-highlight'
 	import { json } from 'svelte-highlight/languages'
 	import Toggle from '$lib/components/Toggle.svelte'
+	import WorkflowTimeline from '$lib/components/WorkflowTimeline.svelte'
 
 	let job: Job | undefined
 	let jobUpdateLastFetch: Date | undefined
@@ -219,6 +219,10 @@
 	}
 
 	let redactSensitive = false
+
+	function asWorkflowStatus(x: any): Record<string, WorkflowStatus> {
+		return x as Record<string, WorkflowStatus>
+	}
 </script>
 
 {#if (job?.job_kind == 'flow' || job?.job_kind == 'flowpreview') && job?.['running'] && job?.parent_job == undefined}
@@ -305,13 +309,7 @@
 				{#if job && 'deleted' in job && !job?.deleted && ($superadmin || ($userStore?.is_admin ?? false))}
 					<ButtonDropdown target="body" hasPadding={false}>
 						<svelte:fragment slot="buttonReplacement">
-							<Button
-								btnClasses="!py-2"
-								nonCaptureEvent
-								variant="border"
-								size="sm"
-								startIcon={{ icon: Trash }}
-							/>
+							<Button nonCaptureEvent variant="border" size="sm" startIcon={{ icon: Trash }} />
 						</svelte:fragment>
 						<svelte:fragment slot="items">
 							<MenuItem
@@ -490,7 +488,7 @@
 						goto(viewHref)
 					}}
 					color="blue"
-					size="md"
+					size="sm"
 					startIcon={{ icon: RefreshCw }}>Run again</Button
 				>
 			{/if}
@@ -503,7 +501,7 @@
 								goto(`${stem}/edit/${job?.script_path}${isScript ? `` : `?nodraft=true`}`)
 							}}
 							color="blue"
-							size="md"
+							size="sm"
 							startIcon={{ icon: Pen }}>Edit</Button
 						>
 					{/if}
@@ -511,10 +509,10 @@
 				<Button
 					href={viewHref}
 					color="blue"
-					size="md"
+					size="sm"
 					startIcon={{
 						icon:
-							job?.job_kind === 'script' ? Code2 : job?.job_kind === 'flow' ? BarsStaggered : Scroll
+							job?.job_kind === 'script' ? Code2 : job?.job_kind === 'flow' ? BarsStaggered : Code2
 					}}
 				>
 					View {job?.job_kind}
@@ -607,6 +605,13 @@
 				/>
 			</div>
 		{:else if job?.job_kind !== 'flow' && job?.job_kind !== 'flowpreview' && job?.job_kind !== 'singlescriptflow'}
+			{#if job?.flow_status}
+				<div class="mt-10" />
+				<WorkflowTimeline
+					flow_status={asWorkflowStatus(job.flow_status)}
+					flowDone={job.type == 'CompletedJob'}
+				/>
+			{/if}
 			<!-- Logs and outputs-->
 			<div class="mr-2 sm:mr-0 mt-12">
 				<Tabs bind:selected={viewTab}>

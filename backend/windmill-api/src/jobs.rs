@@ -9,9 +9,12 @@
 use axum::http::HeaderValue;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
+#[cfg(feature = "prometheus")]
 use std::sync::atomic::Ordering;
+#[cfg(feature = "prometheus")]
 use tokio::time::Instant;
 use windmill_common::flow_status::{JobResult, RestartedFrom};
+use windmill_common::jobs::ENTRYPOINT_OVERRIDE;
 use windmill_common::variables::get_workspace_key;
 
 use crate::db::ApiAuthed;
@@ -38,7 +41,8 @@ use sqlx::types::JsonRawValue;
 use sqlx::{query_scalar, types::Uuid, FromRow, Postgres, Transaction};
 use tower_http::cors::{Any, CorsLayer};
 use urlencoding::encode;
-use windmill_audit::{audit_log, ActionKind};
+use windmill_audit::audit_ee::audit_log;
+use windmill_audit::ActionKind;
 use windmill_common::worker::{to_raw_value, CUSTOM_TAGS_PER_WORKSPACE, SERVER_CONFIG};
 use windmill_common::{
     db::UserDB,
@@ -51,15 +55,24 @@ use windmill_common::{
     users::username_to_permissioned_as,
     utils::{not_found_if_none, now_from_db, paginate, require_admin, Pagination, StripPath},
 };
-use windmill_common::{
-    get_latest_deployed_hash_for_path, BASE_URL, METRICS_DEBUG_ENABLED, METRICS_ENABLED,
-};
+
+#[cfg(feature = "prometheus")]
+use windmill_common::{METRICS_DEBUG_ENABLED, METRICS_ENABLED};
+
+use windmill_common::{get_latest_deployed_hash_for_path, BASE_URL};
 use windmill_queue::{
     add_completed_job_error, get_queued_job, get_result_by_id_from_running_flow, job_is_complete,
-    push, CanceledBy, PushArgs, PushIsolationLevel,
+    push, CanceledBy, DecodeQueries, PushArgs, PushIsolationLevel,
 };
 
-fn setup_list_jobs_debug_metrics() -> Option<prometheus::Histogram> {
+#[cfg(feature = "prometheus")]
+type Histo = prometheus::Histogram;
+
+#[cfg(not(feature = "prometheus"))]
+type Histo = ();
+
+#[cfg(feature = "prometheus")]
+fn setup_list_jobs_debug_metrics() -> Option<Histo> {
     let api_list_jobs_query_duration = if METRICS_DEBUG_ENABLED.load(Ordering::Relaxed)
         && METRICS_ENABLED.load(Ordering::Relaxed)
     {
@@ -75,6 +88,11 @@ fn setup_list_jobs_debug_metrics() -> Option<prometheus::Histogram> {
     };
 
     api_list_jobs_query_duration
+}
+
+#[cfg(not(feature = "prometheus"))]
+fn setup_list_jobs_debug_metrics() -> Option<Histo> {
+    None
 }
 
 pub fn workspaced_service() -> Router {
@@ -93,6 +111,12 @@ pub fn workspaced_service() -> Router {
                 .layer(cors.clone()),
         )
         .route(
+            "/run/workflow_as_code/:job_id/:entrypoint",
+            post(run_workflow_as_code)
+                .head(|| async { "" })
+                .layer(cors.clone()),
+        )
+        .route(
             "/restart/f/:job_id/from/:step_id",
             post(restart_flow).head(|| async { "" }).layer(cors.clone()),
         )
@@ -102,7 +126,7 @@ pub fn workspaced_service() -> Router {
         )
         .route(
             "/run/p/*script_path",
-            post(run_job_by_path)
+            post(run_script_by_path)
                 .head(|| async { "" })
                 .layer(cors.clone()),
         )
@@ -132,7 +156,7 @@ pub fn workspaced_service() -> Router {
                 .head(|| async { "" })
                 .layer(cors.clone()),
         )
-        .route("/run/preview", post(run_preview_job))
+        .route("/run/preview", post(run_preview_script))
         .route("/add_batch_jobs/:n", post(add_batch_jobs))
         .route("/run/preview_flow", post(run_preview_flow_job))
         .route(
@@ -249,10 +273,10 @@ async fn get_root_job(
 }
 
 async fn compute_root_job_for_flow(db: &DB, w_id: &str, job_id: Uuid) -> error::Result<String> {
-    let mut job = get_queued_job(job_id, w_id, db).await?;
+    let mut job = get_queued_job(&job_id, w_id, db).await?;
     while let Some(j) = job {
         if let Some(uuid) = j.parent_job {
-            job = get_queued_job(uuid, w_id, db).await?;
+            job = get_queued_job(&uuid, w_id, db).await?;
         } else {
             return Ok(j.id.to_string());
         }
@@ -462,9 +486,9 @@ async fn get_flow_job_debug_info(
     Extension(db): Extension<DB>,
     Path((w_id, id)): Path<(String, Uuid)>,
 ) -> error::Result<Response> {
-    let job = get_queued_job(id, w_id.as_str(), &db).await?;
+    let job = get_queued_job(&id, w_id.as_str(), &db).await?;
     if let Some(job) = job {
-        let is_flow = &job.job_kind == &JobKind::FlowPreview || &job.job_kind == &JobKind::Flow;
+        let is_flow = job.is_flow();
         if job.is_flow_step || !is_flow {
             return Err(error::Error::BadRequest(
                 "This endpoint is only for root flow jobs".to_string(),
@@ -618,11 +642,13 @@ pub struct RunJobQuery {
     scheduled_for: Option<chrono::DateTime<chrono::Utc>>,
     scheduled_in_secs: Option<i64>,
     parent_job: Option<Uuid>,
+    root_job: Option<Uuid>,
     invisible_to_owner: Option<bool>,
     queue_limit: Option<i64>,
     payload: Option<String>,
     job_id: Option<Uuid>,
     tag: Option<String>,
+    timeout: Option<i32>,
 }
 
 impl RunJobQuery {
@@ -634,7 +660,9 @@ impl RunJobQuery {
             Ok(Some(scheduled_for))
         } else if let Some(scheduled_in_secs) = self.scheduled_in_secs {
             let now = now_from_db(db).await?;
-            Ok(Some(now + chrono::Duration::seconds(scheduled_in_secs)))
+            Ok(Some(
+                now + chrono::Duration::try_seconds(scheduled_in_secs).unwrap_or_default(),
+            ))
         } else {
             Ok(None)
         }
@@ -664,6 +692,8 @@ pub struct ListQueueQuery {
     pub tag: Option<String>,
     pub scheduled_for_before_now: Option<bool>,
     pub all_workspaces: Option<bool>,
+    pub is_flow_step: Option<bool>,
+    pub has_null_parent: Option<bool>,
 }
 
 fn list_queue_jobs_query(w_id: &str, lq: &ListQueueQuery, fields: &[&str]) -> SqlBuilder {
@@ -706,6 +736,14 @@ fn list_queue_jobs_query(w_id: &str, lq: &ListQueueQuery, fields: &[&str]) -> Sq
     }
     if let Some(dt) = &lq.started_after {
         sqlb.and_where_ge("started_at", format!("to_timestamp({})", dt.timestamp()));
+    }
+    if let Some(fs) = &lq.is_flow_step {
+        sqlb.and_where_eq("is_flow_step", fs);
+    }
+    if let Some(fs) = &lq.has_null_parent {
+        if *fs {
+            sqlb.and_where_is_null("parent_job");
+        }
     }
 
     if let Some(dt) = &lq.created_before {
@@ -830,7 +868,7 @@ async fn cancel_all(
     for j in jobs.iter() {
         if !j.running && !j.is_flow_step.unwrap_or(false) {
             let e = serde_json::json!({"message": format!("Job canceled: cancel_all by {username}"), "name": "Canceled", "reason": "cancel_all", "canceler": username});
-            let job_running = get_queued_job(j.id, &w_id, &db).await?;
+            let job_running = get_queued_job(&j.id, &w_id, &db).await?;
 
             if let Some(job_running) = job_running {
                 let add_job = add_completed_job_error(
@@ -845,6 +883,7 @@ async fn cancel_all(
                     e,
                     rsmq.clone(),
                     "server",
+                    true,
                 )
                 .await;
                 if let Err(e) = add_job {
@@ -906,7 +945,7 @@ async fn list_jobs(
     Path(w_id): Path<String>,
     Query(pagination): Query<Pagination>,
     Query(lq): Query<ListCompletedQuery>,
-    Extension(api_list_jobs_query_duration): Extension<Option<prometheus::Histogram>>,
+    Extension(_api_list_jobs_query_duration): Extension<Option<Histo>>,
 ) -> error::JsonResult<Vec<Job>> {
     check_scopes(&authed, || format!("listjobs"))?;
 
@@ -986,6 +1025,8 @@ async fn list_jobs(
                 schedule_path: lq.schedule_path,
                 scheduled_for_before_now: lq.scheduled_for_before_now,
                 all_workspaces: lq.all_workspaces,
+                is_flow_step: lq.is_flow_step,
+                has_null_parent: lq.has_null_parent,
             },
             &[
                 "'QueuedJob' as typ",
@@ -1038,12 +1079,14 @@ async fn list_jobs(
     };
     let mut tx = user_db.begin(&authed).await?;
 
+    #[cfg(feature = "prometheus")]
     let start = Instant::now();
 
     let jobs: Vec<UnifiedJob> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
     tx.commit().await?;
 
-    if let Some(api_list_jobs_query_duration) = api_list_jobs_query_duration {
+    #[cfg(feature = "prometheus")]
+    if let Some(api_list_jobs_query_duration) = _api_list_jobs_query_duration {
         let duration = start.elapsed().as_secs_f64();
         api_list_jobs_query_duration.observe(duration);
         tracing::info!("list_jobs query took {}s: {}", duration, sql);
@@ -1421,9 +1464,9 @@ pub async fn get_suspended_job_flow(
 }
 
 fn conditionally_require_authed_user(
-    authed: Option<ApiAuthed>,
+    _authed: Option<ApiAuthed>,
     flow_status: FlowStatus,
-    trigger_email: &str,
+    _trigger_email: &str,
 ) -> error::Result<()> {
     let approval_conditions_opt = flow_status.approval_conditions;
 
@@ -1433,37 +1476,41 @@ fn conditionally_require_authed_user(
     let approval_conditions = approval_conditions_opt.unwrap();
 
     if approval_conditions.user_auth_required {
-        #[cfg(not(feature = "enterprise"))]
-        return Err(Error::BadRequest(
-            "Approvals for logged in users is an enterprise only feature".to_string(),
-        ));
-        #[cfg(feature = "enterprise")]
         {
-            if authed.is_none() {
-                return Err(Error::NotAuthorized(
-                    "Only logged in users can approve this flow step".to_string(),
-                ));
-            }
+            #[cfg(not(feature = "enterprise"))]
+            return Err(Error::BadRequest(
+                "Approvals for logged in users is an enterprise only feature".to_string(),
+            ));
 
-            let authed = authed.unwrap();
-            if !authed.is_admin {
-                if approval_conditions.self_approval_disabled && authed.email.eq(trigger_email) {
-                    return Err(Error::PermissionDenied(
-                        "Self-approval is disabled for this flow step".to_string(),
+            #[cfg(feature = "enterprise")]
+            {
+                if _authed.is_none() {
+                    return Err(Error::NotAuthorized(
+                        "Only logged in users can approve this flow step".to_string(),
                     ));
                 }
 
-                if !approval_conditions.user_groups_required.is_empty() {
-                    #[cfg(feature = "enterprise")]
+                let authed = _authed.unwrap();
+                if !authed.is_admin {
+                    if approval_conditions.self_approval_disabled && authed.email.eq(_trigger_email)
                     {
-                        for required_group in approval_conditions.user_groups_required.iter() {
-                            if authed.groups.contains(&required_group) {
-                                return Ok(());
+                        return Err(Error::PermissionDenied(
+                            "Self-approval is disabled for this flow step".to_string(),
+                        ));
+                    }
+
+                    if !approval_conditions.user_groups_required.is_empty() {
+                        #[cfg(feature = "enterprise")]
+                        {
+                            for required_group in approval_conditions.user_groups_required.iter() {
+                                if authed.groups.contains(&required_group) {
+                                    return Ok(());
+                                }
                             }
-                        }
-                        let error_msg = format!("Only users from one of the following groups are allowed to approve this workflow: {}", 
+                            let error_msg = format!("Only users from one of the following groups are allowed to approve this workflow: {}", 
                             approval_conditions.user_groups_required.join(", "));
-                        return Err(Error::PermissionDenied(error_msg));
+                            return Err(Error::PermissionDenied(error_msg));
+                        }
                     }
                 }
             }
@@ -1748,6 +1795,11 @@ struct Preview {
 }
 
 #[derive(Deserialize)]
+pub struct WorkflowTask {
+    pub args: Option<HashMap<String, Box<JsonRawValue>>>,
+}
+
+#[derive(Deserialize)]
 struct PreviewFlow {
     value: FlowValue,
     path: Option<String>,
@@ -1803,53 +1855,6 @@ fn decode_payload<D: DeserializeOwned>(t: String) -> anyhow::Result<D> {
     serde_json::from_slice(vec.as_slice()).context("invalid json")
 }
 
-#[derive(Deserialize)]
-pub struct DecodeQuery {
-    pub include_query: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct IncludeQuery {
-    pub include_query: Option<String>,
-}
-
-pub struct DecodeQueries(pub HashMap<String, Box<RawValue>>);
-
-#[axum::async_trait]
-impl<S> FromRequest<S, axum::body::Body> for DecodeQueries
-where
-    S: Send + Sync,
-{
-    type Rejection = Response;
-
-    async fn from_request(
-        req: Request<axum::body::Body>,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let query = req.uri().query().unwrap_or("");
-        let include_query = serde_urlencoded::from_str::<IncludeQuery>(query)
-            .map(|x| x.include_query)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let parse_query_args = include_query
-            .split(",")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let mut args = HashMap::new();
-        if !parse_query_args.is_empty() {
-            let queries =
-                serde_urlencoded::from_str::<HashMap<String, String>>(query).unwrap_or_default();
-            parse_query_args.iter().for_each(|h| {
-                if let Some(v) = queries.get(h) {
-                    args.insert(h.to_string(), to_raw_value(v));
-                }
-            });
-        }
-        Ok(DecodeQueries(args))
-    }
-}
-
 pub fn add_raw_string(
     raw_string: Option<String>,
     mut args: serde_json::Map<String, serde_json::Value>,
@@ -1896,9 +1901,10 @@ pub async fn check_license_key_valid() -> error::Result<()> {
 
     let valid = *LICENSE_KEY_VALID.read().await;
     if !valid {
-        return Err(error::Error::BadRequest(format!(
-            "License key is not valid. Go to your superadmin settings to update your license key.",
-        )));
+        return Err(Error::BadRequest(
+            "License key is not valid. Go to your superadmin settings to update your license key."
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -1944,7 +1950,7 @@ pub async fn run_flow_by_path(
         scheduled_for,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -1960,6 +1966,26 @@ pub async fn run_flow_by_path(
     Ok((StatusCode::CREATED, uuid.to_string()))
 }
 
+#[cfg(not(feature = "enterprise"))]
+pub async fn restart_flow(
+    _authed: ApiAuthed,
+    Extension(_db): Extension<DB>,
+    Extension(_user_db): Extension<UserDB>,
+    Extension(_rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
+    Path((_w_id, _job_id, _step_id, _branch_or_iteration_n)): Path<(
+        String,
+        Uuid,
+        String,
+        Option<usize>,
+    )>,
+    Query(_run_query): Query<RunJobQuery>,
+) -> error::Result<(StatusCode, String)> {
+    return Err(Error::BadRequest(
+        "Restarting a flow is a feature only available in enterprise version".to_string(),
+    ));
+}
+
+#[cfg(feature = "enterprise")]
 pub async fn restart_flow(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
@@ -1973,14 +1999,6 @@ pub async fn restart_flow(
     )>,
     Query(run_query): Query<RunJobQuery>,
 ) -> error::Result<(StatusCode, String)> {
-    #[cfg(not(feature = "enterprise"))]
-    {
-        return Err(Error::BadRequest(
-            "Restarting a flow is a feature only available in enterprise version".to_string(),
-        ));
-    }
-
-    #[cfg(feature = "enterprise")]
     check_license_key_valid().await?;
 
     let completed_job = sqlx::query_as::<_, CompletedJob>(
@@ -2020,7 +2038,7 @@ pub async fn restart_flow(
         scheduled_for,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2036,7 +2054,7 @@ pub async fn restart_flow(
     Ok((StatusCode::CREATED, uuid.to_string()))
 }
 
-pub async fn run_job_by_path(
+pub async fn run_script_by_path(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
     Extension(user_db): Extension<UserDB>,
@@ -2072,7 +2090,7 @@ pub async fn run_job_by_path(
         scheduled_for,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2084,6 +2102,85 @@ pub async fn run_job_by_path(
         None,
     )
     .await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, uuid.to_string()))
+}
+
+pub async fn run_workflow_as_code(
+    authed: ApiAuthed,
+    Extension(db): Extension<DB>,
+    Extension(user_db): Extension<UserDB>,
+    Extension(rsmq): Extension<Option<rsmq_async::MultiplexedRsmq>>,
+    Path((w_id, job_id, entrypoint)): Path<(String, Uuid, String)>,
+    Query(run_query): Query<RunJobQuery>,
+    Json(task): Json<WorkflowTask>,
+) -> error::Result<(StatusCode, String)> {
+    #[cfg(feature = "enterprise")]
+    check_license_key_valid().await?;
+    check_tag_available_for_workspace(&w_id, &run_query.tag).await?;
+
+    let job = get_queued_job(&job_id, &w_id, &db).await?;
+    let job = not_found_if_none(job, "Queued Job", &job_id.to_string())?;
+    let (job_payload, tag, _delete_after_use, timeout) = match job.job_kind {
+        JobKind::Preview => (
+            JobPayload::Code(RawCode {
+                content: job.raw_code.unwrap_or_default(),
+                path: job.script_path,
+                language: job.language.unwrap_or_else(|| ScriptLang::Deno),
+                lock: job.raw_lock,
+                concurrent_limit: job.concurrent_limit,
+                concurrency_time_window_s: job.concurrency_time_window_s,
+                cache_ttl: job.cache_ttl,
+                dedicated_worker: None,
+            }),
+            Some(job.tag.clone()),
+            None,
+            run_query.timeout,
+        ),
+        JobKind::Script => script_path_to_payload(job.script_path(), &db, &w_id).await?,
+        _ => return Err(anyhow::anyhow!("Not supported").into()),
+    };
+
+    let mut extra = HashMap::new();
+    extra.insert(ENTRYPOINT_OVERRIDE.to_string(), to_raw_value(&entrypoint));
+
+    let args = PushArgs { args: sqlx::types::Json(task.args), extra };
+    let scheduled_for = run_query.get_scheduled_for(&db).await?;
+
+    let tag = run_query.tag.clone().or(tag).or(Some(job.tag));
+    let tx = PushIsolationLevel::Isolated(user_db.clone(), authed.clone().into(), rsmq);
+
+    let (uuid, mut tx) = push(
+        &db,
+        tx,
+        &w_id,
+        job_payload,
+        args,
+        &authed.username,
+        &authed.email,
+        username_to_permissioned_as(&authed.username),
+        scheduled_for,
+        None,
+        Some(job_id),
+        job.root_job.or(Some(job_id)),
+        run_query.job_id,
+        false,
+        false,
+        None,
+        !run_query.invisible_to_owner.unwrap_or(false),
+        tag,
+        timeout,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query!(
+        "UPDATE queue SET flow_status = jsonb_set(COALESCE(flow_status, '{}'::jsonb), array[$1], jsonb_set(jsonb_set('{}'::jsonb, '{scheduled_for}', to_jsonb(now()::text)), '{name}', to_jsonb($4::text))) WHERE id = $2 AND workspace_id = $3",
+        uuid.to_string(),
+        job_id,
+        w_id,
+        entrypoint
+    ).execute(&mut tx).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, uuid.to_string()))
 }
@@ -2346,7 +2443,7 @@ pub async fn run_wait_result_job_by_path_get(
         None,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2465,7 +2562,7 @@ async fn run_wait_result_script_by_path_internal(
         None,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2540,7 +2637,7 @@ pub async fn run_wait_result_script_by_hash(
         None,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2622,7 +2719,7 @@ async fn run_wait_result_flow_by_path_internal(
         scheduled_for,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -2639,7 +2736,7 @@ async fn run_wait_result_flow_by_path_internal(
     run_wait_result(&db, uuid, w_id, early_return).await
 }
 
-async fn run_preview_job(
+async fn run_preview_script(
     authed: ApiAuthed,
     Extension(db): Extension<DB>,
     Extension(user_db): Extension<UserDB>,
@@ -2694,7 +2791,7 @@ async fn run_preview_job(
         None,
         true,
         tag,
-        None,
+        run_query.timeout,
         None,
         None,
     )
@@ -3063,7 +3160,7 @@ pub async fn run_job_by_hash(
         scheduled_for,
         None,
         run_query.parent_job,
-        run_query.parent_job,
+        run_query.root_job.or(run_query.parent_job),
         run_query.job_id,
         false,
         false,
@@ -3092,6 +3189,7 @@ pub struct JobUpdate {
     pub completed: Option<bool>,
     pub new_logs: Option<String>,
     pub mem_peak: Option<i32>,
+    pub flow_status: Option<serde_json::Value>,
 }
 
 async fn get_job_update(
@@ -3100,7 +3198,9 @@ async fn get_job_update(
     Query(JobUpdateQuery { running, log_offset }): Query<JobUpdateQuery>,
 ) -> error::JsonResult<JobUpdate> {
     let record = sqlx::query!(
-        "SELECT running, substr(logs, $1) as logs, mem_peak FROM queue WHERE workspace_id = $2 AND id = $3",
+        "SELECT running, substr(logs, $1) as logs, mem_peak, 
+        CASE WHEN is_flow_step is true then NULL else flow_status END as flow_status 
+        FROM queue WHERE workspace_id = $2 AND id = $3",
         log_offset,
         &w_id,
         &job_id
@@ -3118,6 +3218,7 @@ async fn get_job_update(
             completed: None,
             new_logs: record.logs,
             mem_peak: record.mem_peak,
+            flow_status: record.flow_status,
         }))
     } else {
         let logs = query_scalar!(
@@ -3134,7 +3235,8 @@ async fn get_job_update(
             running: Some(false),
             completed: Some(true),
             new_logs: logs,
-            mem_peak: record.map(|r| r.mem_peak).flatten(),
+            mem_peak: record.as_ref().map(|r| r.mem_peak).flatten(),
+            flow_status: record.and_then(|r| r.flow_status),
         }))
     }
 }
@@ -3202,6 +3304,11 @@ fn list_completed_jobs_query(
     if let Some(fs) = &lq.is_flow_step {
         sqlb.and_where_eq("is_flow_step", fs);
     }
+    if let Some(fs) = &lq.has_null_parent {
+        if *fs {
+            sqlb.and_where_is_null("parent_job");
+        }
+    }
     if let Some(jk) = &lq.job_kinds {
         sqlb.and_where_in(
             "job_kind",
@@ -3247,6 +3354,7 @@ pub struct ListCompletedQuery {
     pub tag: Option<String>,
     pub scheduled_for_before_now: Option<bool>,
     pub all_workspaces: Option<bool>,
+    pub has_null_parent: Option<bool>,
 }
 
 async fn list_completed_jobs(

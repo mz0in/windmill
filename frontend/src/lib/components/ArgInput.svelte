@@ -55,7 +55,7 @@
 	export let displayHeader = true
 	export let properties: { [name: string]: SchemaProperty } | undefined = undefined
 	export let nestedRequired: string[] | undefined = undefined
-	export let autofocus = false
+	export let autofocus: boolean | null = null
 	export let compact = false
 	export let password = false
 	export let pickForField: string | undefined = undefined
@@ -96,7 +96,7 @@
 			if (defaultValue === undefined || defaultValue === null) {
 				if (inputCat === 'string') {
 					value = ''
-				} else if (inputCat == 'enum') {
+				} else if (inputCat == 'enum' && required) {
 					value = enum_?.[0]
 				} else if (inputCat == 'boolean') {
 					value = false
@@ -305,8 +305,8 @@
 		{/if}
 
 		{#if description}
-			<div class="text-sm italic pb-1 text-secondary">
-				{description}
+			<div class="text-xs italic pb-1 text-secondary">
+				<pre class="font-main">{description}</pre>
 			</div>
 		{/if}
 		<div class="flex space-x-1">
@@ -340,6 +340,7 @@
 						<input
 							{autofocus}
 							on:focus
+							on:blur
 							{disabled}
 							type="number"
 							on:keydown={() => {
@@ -474,7 +475,7 @@
 			{:else if inputCat == 'resource-object' && resourceTypes == undefined}
 				<span class="text-2xs text-tertiary">Loading resource types...</span>
 			{:else if inputCat == 'resource-object' && (resourceTypes == undefined || (format.split('-').length > 1 && resourceTypes.includes(format.substring('resource-'.length))))}
-				<ObjectResourceInput {disablePortal} {format} bind:value {showSchemaExplorer} />
+				<ObjectResourceInput selectFirst {disablePortal} {format} bind:value {showSchemaExplorer} />
 			{:else if inputCat == 'resource-object' && format.split('-').length > 1 && format
 					.replace('resource-', '')
 					.replace('_', '')
@@ -567,7 +568,7 @@
 					/>
 				</div>
 			{:else if inputCat == 'date'}
-				<DateTimeInput {autofocus} bind:value />
+				<DateTimeInput useDropdown {autofocus} bind:value />
 			{:else if inputCat == 'sql' || inputCat == 'yaml'}
 				<div class="border my-1 mb-4 w-full border-primary">
 					<SimpleEditor
@@ -597,6 +598,7 @@
 				</div>
 			{:else if inputCat == 'resource-string'}
 				<ResourcePicker
+					selectFirst
 					{disablePortal}
 					bind:value
 					resourceType={format && format.split('-').length > 1
@@ -608,6 +610,7 @@
 				<input
 					{autofocus}
 					on:focus
+					on:blur
 					{disabled}
 					type="email"
 					class={valid

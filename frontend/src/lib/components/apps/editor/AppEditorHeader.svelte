@@ -1,16 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation'
 	import { page } from '$app/stores'
-	import {
-		Alert,
-		Badge,
-		Drawer,
-		DrawerContent,
-		Kbd,
-		Tab,
-		Tabs,
-		UndoRedo
-	} from '$lib/components/common'
+	import { Alert, Badge, Drawer, DrawerContent, Tab, Tabs, UndoRedo } from '$lib/components/common'
 	import Button from '$lib/components/common/button/Button.svelte'
 	import DisplayResult from '$lib/components/DisplayResult.svelte'
 	import FlowProgressBar from '$lib/components/flows/FlowProgressBar.svelte'
@@ -84,14 +75,13 @@
 	import { cloneDeep } from 'lodash'
 	import AppReportsDrawer from './AppReportsDrawer.svelte'
 	import HighlightCode from '$lib/components/HighlightCode.svelte'
-	import {
-		type ColumnDef,
-		getCountPostgresql,
-		createPostgresInput,
-		createPostgresInsert,
-		createUpdatePostgresInput,
-		getPrimaryKeys
-	} from '../components/display/dbtable/utils'
+	import { type ColumnDef, getPrimaryKeys } from '../components/display/dbtable/utils'
+	import DebugPanel from './contextPanel/DebugPanel.svelte'
+	import { getCountInput } from '../components/display/dbtable/queries/count'
+	import { getSelectInput } from '../components/display/dbtable/queries/select'
+	import { getInsertInput } from '../components/display/dbtable/queries/insert'
+	import { getUpdateInput } from '../components/display/dbtable/queries/update'
+	import { getDeleteInput } from '../components/display/dbtable/queries/delete'
 
 	async function hash(message) {
 		try {
@@ -161,6 +151,7 @@
 	let saveDrawerOpen = false
 	let inputsDrawerOpen = fromHub
 	let historyBrowserDrawerOpen = false
+	let debugAppDrawerOpen = false
 	let deploymentMsg: string | undefined = undefined
 
 	function closeSaveDrawer() {
@@ -199,8 +190,11 @@
 					if (c.type === 'dbexplorercomponent') {
 						let nr: { id: string; input: AppInput }[] = []
 						let config = c.configuration as any
-						let pg = config?.type?.configuration?.postgresql
-						if (pg) {
+
+						const dbType = config?.type?.selected
+						let pg = config?.type?.configuration?.[dbType]
+
+						if (pg && dbType) {
 							const { table, resource } = pg
 							const tableValue = table.value
 							const resourceValue = resource.value
@@ -208,28 +202,34 @@
 							const whereClause = (c.configuration.whereClause as any).value as unknown as
 								| string
 								| undefined
-							console.log(columnDefs)
 							if (tableValue && resourceValue && columnDefs) {
 								r.push({
-									input: createPostgresInput(resourceValue, tableValue, columnDefs, whereClause),
+									input: getSelectInput(resourceValue, tableValue, columnDefs, whereClause, dbType),
 									id: x.id
 								})
+
 								r.push({
-									input: getCountPostgresql(resourceValue, tableValue),
+									input: getCountInput(resourceValue, tableValue, dbType, columnDefs, whereClause),
 									id: x.id + '_count'
 								})
 								r.push({
-									input: createPostgresInsert(tableValue, columnDefs, resourceValue),
+									input: getInsertInput(tableValue, columnDefs, resourceValue, dbType),
 									id: x.id + '_insert'
 								})
+
 								let primaryColumns = getPrimaryKeys(columnDefs)
 								let columns = columnDefs?.filter((x) => primaryColumns.includes(x.field))
+
+								r.push({
+									input: getDeleteInput(resourceValue, tableValue, columns, dbType),
+									id: x.id + '_delete'
+								})
 
 								columnDefs
 									.filter((col) => col.editable || config.allEditable.value)
 									.forEach((column) => {
 										r.push({
-											input: createUpdatePostgresInput(resourceValue, tableValue, column, columns),
+											input: getUpdateInput(resourceValue, tableValue, column, columns, dbType),
 											id: x.id + '_update'
 										})
 									})
@@ -255,6 +255,8 @@
 				)
 		)) as ([string, Record<string, any>] | undefined)[]
 
+		console.log('allTriggers', allTriggers)
+
 		policy.triggerables = Object.fromEntries(
 			allTriggers.filter(Boolean) as [string, Record<string, any>][]
 		)
@@ -267,7 +269,8 @@
 	): Promise<[string, Record<string, any>] | undefined> {
 		const staticInputs = collectStaticFields(fields)
 		if (runnable?.type == 'runnableByName') {
-			console.log(runnable.inlineScript?.content)
+			console.log('processRunnable:content', runnable.inlineScript?.content)
+
 			let hex = await hash(runnable.inlineScript?.content)
 			console.log('hex', hex, id)
 			return [`${id}:rawscript/${hex}`, staticInputs]
@@ -672,6 +675,14 @@
 				})
 			},
 			disabled: !savedApp
+		},
+		// App debug menu
+		{
+			displayName: 'Troubleshoot panel',
+			icon: Bug,
+			action: () => {
+				debugAppDrawerOpen = true
+			}
 		}
 	]
 
@@ -684,6 +695,10 @@
 	let rightColumnSelect: 'timeline' | 'detail' = 'timeline'
 
 	let appReportingDrawerOpen = false
+
+	export function openTroubleshootPanel() {
+		debugAppDrawerOpen = true
+	}
 </script>
 
 <svelte:window on:keydown={onKeyDown} />
@@ -933,6 +948,12 @@
 <Drawer bind:open={historyBrowserDrawerOpen} size="1200px">
 	<DrawerContent title="Deployment History" on:close={() => (historyBrowserDrawerOpen = false)}>
 		<DeploymentHistory on:restore {appPath} />
+	</DrawerContent>
+</Drawer>
+
+<Drawer bind:open={debugAppDrawerOpen} size="800px">
+	<DrawerContent title="Troubleshoot Panel" on:close={() => (debugAppDrawerOpen = false)}>
+		<DebugPanel />
 	</DrawerContent>
 </Drawer>
 
@@ -1281,7 +1302,7 @@
 			>
 				<div class="flex flex-row gap-1 items-center">
 					<Bug size={14} />
-					<div> Debug runs</div>
+					<div>Debug runs</div>
 					<div class="text-2xs text-tertiary"
 						>({$jobs?.length > 99 ? '99+' : $jobs?.length ?? 0})</div
 					>
@@ -1306,8 +1327,9 @@
 			on:click={() => saveDraft()}
 			size="xs"
 			disabled={$page.params.path !== undefined && !savedApp}
+			shortCut={{ key: 'S' }}
 		>
-			Draft&nbsp;<Kbd small>Ctrl</Kbd><Kbd small>S</Kbd>
+			Draft
 		</Button>
 		<Button
 			loading={loading.save}

@@ -56,6 +56,7 @@
 	export let scriptKind: 'script' | 'trigger' | 'approval' = 'script'
 	export let scriptTemplate: 'pgsql' | 'mysql' | 'script' | 'docker' | 'powershell' = 'script'
 	export let noEditor: boolean
+	export let enableAi: boolean
 
 	let editor: Editor
 	let diffEditor: DiffEditor
@@ -101,7 +102,14 @@
 					previousId: undefined,
 					hasResume: false
 				},
-				extraLib: ''
+				extraLib: `
+				declare const error: {
+					message: string
+					name: string
+					stack: string
+				}
+				
+				`
 		  }
 		: getStepPropPicker(
 				$flowStateStore,
@@ -334,7 +342,7 @@
 											previousModuleId={previousModule?.id}
 											bind:args={flowModule.value.input_transforms}
 											extraLib={stepPropPicker.extraLib}
-											enableAi
+											{enableAi}
 										/>
 									</PropPickerWrapper>
 								</div>
@@ -345,6 +353,7 @@
 									mod={flowModule}
 									{editor}
 									{diffEditor}
+									{noEditor}
 									lang={flowModule.value['language'] ?? 'deno'}
 									schema={$flowStateStore[$selectedId]?.schema ?? {}}
 								/>
@@ -417,6 +426,12 @@
 														disabled={!$enterpriseLicense}
 														bind:seconds={flowModule.value.concurrency_time_window_s}
 													/>
+												</Label>
+												<Label label="Custom concurrency key">
+													<div class="text-tertiary text-xs"
+														>Custom concurrency keys can only be set as the setting of a workspace
+														script</div
+													>
 												</Label>
 											{:else}
 												<Alert type="warning" title="Limitation" size="xs">

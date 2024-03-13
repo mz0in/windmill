@@ -1,7 +1,7 @@
 <script lang="ts">
 	import SchemaForm from '$lib/components/SchemaForm.svelte'
 	import TestJobLoader from '$lib/components/TestJobLoader.svelte'
-	import { Button, Kbd } from '$lib/components/common'
+	import { Button, Drawer } from '$lib/components/common'
 	import { WindmillIcon } from '$lib/components/icons'
 	import LogPanel from '$lib/components/scriptEditor/LogPanel.svelte'
 	import {
@@ -12,11 +12,14 @@
 		Preview,
 		type OpenFlow,
 		type FlowModule,
-		SettingsService
+		WorkspaceService,
+		type InputTransform,
+		RawScript,
+		type PathScript
 	} from '$lib/gen'
 	import { inferArgs } from '$lib/infer'
-	import { enterpriseLicense, userStore, workspaceStore } from '$lib/stores'
-	import { emptySchema, getModifierKey, sendUserToast } from '$lib/utils'
+	import { copilotInfo, userStore, workspaceStore } from '$lib/stores'
+	import { emptySchema, sendUserToast } from '$lib/utils'
 	import { Pane, Splitpanes } from 'svelte-splitpanes'
 	import { onDestroy, onMount, setContext } from 'svelte'
 	import DarkModeToggle from '$lib/components/sidebar/DarkModeToggle.svelte'
@@ -32,8 +35,13 @@
 	import type { FlowEditorContext } from './flows/types'
 	import { dfs } from './flows/dfs'
 	import { loadSchemaFromModule } from './flows/flowInfers'
-	import { Play } from 'lucide-svelte'
+	import { CornerDownLeft, Play } from 'lucide-svelte'
 	import Toggle from './Toggle.svelte'
+	import { setLicense } from '$lib/enterpriseUtils'
+	import { workspacedOpenai } from './copilot/lib'
+	import type { FlowCopilotContext, FlowCopilotModule } from './copilot/flow'
+	import { pickScript } from './flows/flowStateUtils'
+	import type { Schedule } from './flows/scheduleUtils'
 
 	$: token = $page.url.searchParams.get('wm_token') ?? undefined
 	$: workspace = $page.url.searchParams.get('workspace') ?? undefined
@@ -45,8 +53,70 @@
 		OpenAPI.TOKEN = $page.url.searchParams.get('wm_token')!
 	}
 
+	let flowCopilotContext: FlowCopilotContext = {
+		drawerStore: writable<Drawer | undefined>(undefined),
+		modulesStore: writable<FlowCopilotModule[]>([]),
+		currentStepStore: writable<string | undefined>(undefined),
+		genFlow,
+		shouldUpdatePropertyType: writable<{
+			[key: string]: 'static' | 'javascript' | undefined
+		}>({}),
+		exprsToSet: writable<{
+			[key: string]: InputTransform | any | undefined
+		}>({}),
+		generatedExprs: writable<{
+			[key: string]: string | undefined
+		}>({}),
+		stepInputsLoading: writable<boolean>(false)
+	}
+	const { modulesStore } = flowCopilotContext
+
+	async function genFlow(idx: number, flowModules: FlowModule[], stepOnly = false) {
+		let module = stepOnly ? $modulesStore[0] : $modulesStore[idx]
+
+		if (module && module.selectedCompletion) {
+			const [hubScriptModule, hubScriptState] = await pickScript(
+				module.selectedCompletion.path,
+				`${module.selectedCompletion.summary} (${module.selectedCompletion.app})`,
+				module.id,
+				undefined
+			)
+			const flowModule: FlowModule & {
+				value: RawScript | PathScript
+			} = {
+				id: module.id,
+				value: hubScriptModule.value,
+				summary: hubScriptModule.summary
+			}
+
+			$flowStateStore[module.id] = hubScriptState
+
+			flowModules.splice(idx, 0, flowModule)
+			$flowStore = $flowStore
+			sendUserToast('Added module', false)
+		}
+	}
+
+	setContext('FlowCopilotContext', flowCopilotContext)
+
+	async function setCopilotInfo() {
+		if (workspace) {
+			workspacedOpenai.init(workspace, token)
+			try {
+				copilotInfo.set(await WorkspaceService.getCopilotInfo({ workspace }))
+			} catch (err) {
+				copilotInfo.set({
+					exists_openai_resource_path: false,
+					code_completion_enabled: false
+				})
+
+				console.error('Could not get copilot info')
+			}
+		}
+	}
 	$: if (workspace) {
 		$workspaceStore = workspace
+		setCopilotInfo()
 	}
 
 	$: if (workspace && token) {
@@ -127,13 +197,9 @@
 		}
 	}
 
-	async function setEnterpriseLicense() {
-		if (!$enterpriseLicense) {
-			$enterpriseLicense = await SettingsService.getLicenseId()
-		}
-	}
+	setLicense()
+
 	onMount(() => {
-		setEnterpriseLicense()
 		window.addEventListener('message', el, false)
 		document.addEventListener('keydown', (e) => {
 			const obj = {
@@ -281,11 +347,12 @@
 	}
 
 	const flowStateStore = writable({} as FlowState)
-	const scheduleStore = writable({
+	const scheduleStore = writable<Schedule>({
 		args: {},
 		cron: '',
 		timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-		enabled: false
+		enabled: false,
+		summary: undefined
 	})
 	const previewArgsStore = writable<Record<string, any>>({})
 	const scriptEditorDrawer = writable(undefined)
@@ -310,10 +377,10 @@
 		initialPath: ''
 	})
 
-	$: updateCode($flowStore)
+	$: updateFlow($flowStore)
 
 	let lastSent: OpenFlow | undefined = undefined
-	function updateCode(flow: OpenFlow) {
+	function updateFlow(flow: OpenFlow) {
 		if (lockChanges) {
 			return
 		}
@@ -422,12 +489,12 @@
 							icon: Play,
 							classes: 'animate-none'
 						}}
+						shortCut={{ Icon: CornerDownLeft, hide: testIsLoading }}
 					>
 						{#if testIsLoading}
 							Running
 						{:else}
-							Test&nbsp;<Kbd small isModifier>{getModifierKey()}</Kbd>
-							<Kbd small><span class="text-lg font-bold">⏎</span></Kbd>
+							Test
 						{/if}
 					</Button>
 				{/if}
@@ -482,7 +549,7 @@
 					</Pane>
 					<Pane size={33}>
 						{#key reload}
-							<FlowEditorPanel noEditor />
+							<FlowEditorPanel enableAi noEditor />
 						{/key}
 					</Pane>
 				</Splitpanes>

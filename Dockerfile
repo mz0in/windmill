@@ -100,8 +100,9 @@ SHELL ["/bin/bash", "-c"]
 RUN apt update -y
 RUN apt install -y unzip curl
 
-RUN [ "$TARGETPLATFORM" == "linux/arm64" ] && curl -Lsf https://github.com/LukeChannings/deno-arm64/releases/download/v1.40.2/deno-linux-arm64.zip -o deno.zip || true
-RUN [ "$TARGETPLATFORM" == "linux/amd64" ] && curl -Lsf https://github.com/denoland/deno/releases/download/v1.40.2/deno-x86_64-unknown-linux-gnu.zip -o deno.zip || true
+RUN [ "$TARGETPLATFORM" == "linux/amd64" ] && curl -Lsf https://github.com/denoland/deno/releases/download/v1.41.0/deno-x86_64-unknown-linux-gnu.zip -o deno.zip || true
+RUN [ "$TARGETPLATFORM" == "linux/arm64" ] && curl -Lsf https://github.com/denoland/deno/releases/download/v1.41.0/deno-aarch64-unknown-linux-gnu.zip -o deno.zip || true
+
 
 RUN unzip deno.zip && rm deno.zip
 
@@ -210,21 +211,18 @@ COPY --from=builder /frontend/build /static_frontend
 COPY --from=builder /windmill/target/release/windmill ${APP}/windmill
 
 
-COPY --from=downloader /deno /usr/bin/deno
-RUN chmod 755 /usr/bin/deno
+COPY --from=downloader --chmod=755 /deno /usr/bin/deno
 
 COPY --from=nsjail /nsjail/nsjail /bin/nsjail
 
-COPY --from=oven/bun:1.0.25 /usr/local/bin/bun /usr/bin/bun
+COPY --from=oven/bun:1.0.29 /usr/local/bin/bun /usr/bin/bun
 
 # add the docker client to call docker from a worker if enabled
 COPY --from=docker:dind /usr/local/bin/docker /usr/local/bin/
 
-RUN mkdir -p ${APP}
+WORKDIR ${APP}
 
 RUN ln -s ${APP}/windmill /usr/local/bin/windmill
-
-WORKDIR ${APP}
 
 RUN windmill cache
 

@@ -25,7 +25,12 @@
 	import AppTableFooter from './AppTableFooter.svelte'
 	import { tableOptions } from './tableOptions'
 	import Alert from '$lib/components/common/alert/Alert.svelte'
-	import { components, type ButtonComponent } from '../../../editor/component'
+	import {
+		components,
+		type ButtonComponent,
+		type CheckboxComponent,
+		type SelectComponent
+	} from '../../../editor/component'
 	import { initCss } from '../../../utils'
 	import { twMerge } from 'tailwind-merge'
 	import { connectOutput, initConfig, initOutput } from '$lib/components/apps/editor/appUtils'
@@ -43,7 +48,8 @@
 	export let id: string
 	export let componentInput: AppInput | undefined
 	export let configuration: RichConfigurations
-	export let actionButtons: (BaseAppComponent & ButtonComponent)[]
+	export let actionButtons: (BaseAppComponent &
+		(ButtonComponent | CheckboxComponent | SelectComponent))[]
 	export let initializing: boolean | undefined = undefined
 	export let customCss: ComponentCustomCSS<'tablecomponent'> | undefined = undefined
 	export let render: boolean
@@ -103,7 +109,6 @@
 	let selectedRowIndex = -1
 
 	function toggleRow(row: Record<string, any>, force: boolean = false) {
-		console.log(row)
 		let data = { ...row.original }
 		let index = data['__index']
 		delete data['__index']
@@ -141,9 +146,10 @@
 		if (searchValue === '') {
 			return result
 		}
-		return result.filter((row) =>
-			Object.values(row).some((value) => value?.toString()?.includes(searchValue))
-		)
+		return result.filter((row) => {
+			// console.log(Object.values(row).map((value) => value?.toString()))
+			return Object.values(row).some((value) => value?.toString()?.includes(searchValue))
+		})
 	}
 
 	function renderCell(x: any, props: any): any {
@@ -157,6 +163,7 @@
 	let filteredResult: Array<Record<string, any>> = []
 
 	function setFilteredResult() {
+		console.log('setting filtered result')
 		const wIndex = Array.isArray(result)
 			? (result as any[]).map((x, i) => ({ ...x, __index: i }))
 			: [{ error: 'input was not an array' }]
@@ -578,6 +585,7 @@
 																	customCss={actionButton.customCss}
 																	configuration={actionButton.configuration}
 																	recomputeIds={actionButton.recomputeIds}
+																	onToggle={actionButton.onToggle}
 																	preclickAction={async () => {
 																		toggleRow(row)
 																	}}
@@ -594,6 +602,7 @@
 																		customCss={actionButton.customCss}
 																		configuration={actionButton.configuration}
 																		recomputeIds={actionButton.recomputeIds}
+																		onSelect={actionButton.onSelect}
 																		preclickAction={async () => {
 																			toggleRow(row)
 																		}}
@@ -626,6 +635,7 @@
 																customCss={actionButton.customCss}
 																configuration={actionButton.configuration}
 																recomputeIds={actionButton.recomputeIds}
+																onToggle={actionButton.onToggle}
 																preclickAction={async () => {
 																	toggleRow(row)
 																}}
@@ -642,6 +652,7 @@
 																	customCss={actionButton.customCss}
 																	configuration={actionButton.configuration}
 																	recomputeIds={actionButton.recomputeIds}
+																	onSelect={actionButton.onSelect}
 																	preclickAction={async () => {
 																		toggleRow(row)
 																	}}

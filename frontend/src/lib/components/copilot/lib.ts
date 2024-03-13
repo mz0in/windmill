@@ -6,11 +6,12 @@ import type { DBSchema } from '$lib/stores'
 import { formatResourceTypes } from './utils'
 
 import { EDIT_CONFIG, FIX_CONFIG, GEN_CONFIG } from './prompts'
+
+import { buildClientSchema, printSchema } from 'graphql'
 import type {
 	ChatCompletionCreateParamsStreaming,
 	ChatCompletionMessageParam
-} from 'openai/resources/chat'
-import { buildClientSchema, printSchema } from 'graphql'
+} from 'openai/resources/index.mjs'
 
 export const SUPPORTED_LANGUAGES = new Set(Object.keys(GEN_CONFIG.prompts))
 
@@ -26,13 +27,13 @@ const openaiConfig: ChatCompletionCreateParamsStreaming = {
 class WorkspacedOpenai {
 	private client: OpenAI | undefined
 
-	init(workspace: string) {
+	init(workspace: string, token: string | undefined = undefined) {
 		const baseURL = `${location.origin}${OpenAPI.BASE}/w/${workspace}/openai/proxy`
 		this.client = new OpenAI({
 			baseURL,
 			apiKey: 'fakekey',
 			defaultHeaders: {
-				Authorization: ''
+				Authorization: token ? `Bearer ${token}` : ''
 			},
 			dangerouslyAllowBrowser: true
 		})
@@ -78,7 +79,7 @@ export async function testKey({
 }
 
 interface BaseOptions {
-	language: Script.language | 'frontend'
+	language: Script.language | 'frontend' | 'transformer'
 	dbSchema: DBSchema | undefined
 	workspace: string
 }

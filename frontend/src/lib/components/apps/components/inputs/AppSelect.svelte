@@ -34,6 +34,7 @@
 	export let controls: { left: () => boolean; right: () => boolean | string } | undefined =
 		undefined
 	export let noDefault = false
+	export let onSelect: string[] | undefined = undefined
 
 	const {
 		app,
@@ -118,6 +119,9 @@
 		}
 		preclickAction?.()
 		setValue(e.detail?.['value'])
+		if (onSelect) {
+			onSelect.forEach((id) => $runnableComponents?.[id]?.cb?.forEach((f) => f()))
+		}
 	}
 
 	function setValue(nvalue: any) {
@@ -223,6 +227,7 @@
 						: SELECT_INPUT_DEFAULT_STYLE.containerStyles) +
 					css?.input?.style}
 				{value}
+				class={css?.input?.class}
 				placeholder={resolvedConfig.placeholder}
 				disabled={resolvedConfig.disabled}
 				on:focus={() => {

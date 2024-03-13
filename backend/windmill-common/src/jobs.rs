@@ -5,6 +5,8 @@ use serde_json::value::RawValue;
 use sqlx::{types::Json, Pool, Postgres, Transaction};
 use uuid::Uuid;
 
+pub const ENTRYPOINT_OVERRIDE: &str = "_ENTRYPOINT_OVERRIDE";
+
 use crate::{
     error::{self, Error},
     flow_status::{FlowStatus, RestartedFrom},
@@ -117,7 +119,10 @@ impl QueuedJob {
             .unwrap_or("tmp/main")
     }
     pub fn is_flow(&self) -> bool {
-        matches!(self.job_kind, JobKind::Flow | JobKind::FlowPreview)
+        matches!(
+            self.job_kind,
+            JobKind::Flow | JobKind::FlowPreview | JobKind::SingleScriptFlow
+        )
     }
 
     pub fn full_path_with_workspace(&self) -> String {

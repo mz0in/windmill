@@ -218,13 +218,26 @@
 							bind:this={stepInputGen}
 							{focused}
 							{arg}
+							schemaProperty={schema.properties[argName]}
+							showPopup={(isStaticTemplate(inputCat) && propertyType == 'static') ||
+								propertyType === undefined ||
+								propertyType === 'static' ||
+								arg?.expr?.length > 0}
+							on:showExpr={(e) => {
+								setTimeout(() => {
+									if (monaco && propertyType === 'javascript') {
+										monaco.setSuggestion(e.detail)
+									}
+								}, 0)
+							}}
 							on:setExpr={(e) => {
 								arg = {
 									type: 'javascript',
 									expr: e.detail
 								}
 								propertyType = 'javascript'
-								monaco?.setCode(e.detail)
+								monaco?.setCode('')
+								monaco?.insertAtCursor(e.detail)
 							}}
 							{pickableProperties}
 							{argName}
@@ -377,7 +390,7 @@
 					showSchemaExplorer
 				/>
 			{:else if arg.expr != undefined}
-				<div class="border rounded mt-2 border-gray-300">
+				<div class="border mt-2">
 					<SimpleEditor
 						bind:this={monaco}
 						bind:code={arg.expr}

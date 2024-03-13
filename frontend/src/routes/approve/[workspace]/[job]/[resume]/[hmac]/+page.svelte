@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Job, JobService, SettingsService } from '$lib/gen'
+	import { Job, JobService } from '$lib/gen'
 	import { page } from '$app/stores'
 	import Button from '$lib/components/common/button/Button.svelte'
 	import CenteredModal from '$lib/components/CenteredModal.svelte'
@@ -16,6 +16,7 @@
 	import { emptyString } from '$lib/utils'
 	import { Alert } from '$lib/components/common'
 	import { getUserExt } from '$lib/user'
+	import { setLicense } from '$lib/enterpriseUtils'
 
 	$workspaceStore = $page.params.workspace
 	let rd = $page.url.href.replace($page.url.origin, '')
@@ -37,15 +38,9 @@
 	let default_payload: any = {}
 	let enum_payload: object = {}
 
-	async function setLicense() {
-		const license = await SettingsService.getLicenseId()
-		if (license) {
-			$enterpriseLicense = license
-		}
-	}
+	setLicense()
 
 	onMount(() => {
-		setLicense()
 		getJob()
 		timeout = setInterval(getJob, 1000)
 		window.onunhandledrejection = (event: PromiseRejectionEvent) => {
@@ -123,7 +118,7 @@
 			approver,
 			requestBody: {}
 		})
-		sendUserToast('Flow disapproved!')
+		sendUserToast('Flow denied!')
 		getJob()
 	}
 
@@ -160,9 +155,9 @@
 	{:else}
 		<div class="flex flex-row justify-between flex-wrap sm:flex-nowrap gap-x-4">
 			<div class="w-full">
-				<h2 class="mt-4">Current approvers</h2>
+				<h2 class="mt-4">Approvers:</h2>
 				<p class="text-xs italic"
-					>Each approver can only approve once and cannot change his approver name set by the
+					>Each approver can only approve once and cannot change their approver name set by the
 					approval sender</p
 				>
 				<div class="my-4">
@@ -197,7 +192,7 @@
 		<JobArgs args={job?.args} />
 		<div class="mt-8">
 			{#if approver}
-				<p>Dis/approving as: <b>{approver}</b></p>
+				<p>Approving as: <b>{approver}</b></p>
 			{/if}
 		</div>
 		{#if completed}
@@ -213,6 +208,7 @@
 				<Alert type="warning" title="Adding a form to the approval page is an EE feature" />
 			{:else}
 				<SchemaForm
+					noVariablePicker
 					bind:isValid={valid}
 					schema={mergeSchema(schema, enum_payload)}
 					bind:args={default_payload}
@@ -226,14 +222,14 @@
 				color="red"
 				on:click|once={cancel}
 				size="md"
-				disabled={completed || alreadyResumed}>Disapprove/Cancel</Button
+				disabled={completed || alreadyResumed}>Deny</Button
 			>
 			<Button
 				btnClasses="grow"
 				color="green"
 				on:click|once={resume}
 				size="md"
-				disabled={completed || alreadyResumed || !valid}>Approve/Resume</Button
+				disabled={completed || alreadyResumed || !valid}>Approve</Button
 			>
 		</div>
 		{#if !completed && !alreadyResumed && job?.raw_flow?.modules?.[approvalStep]?.suspend?.user_auth_required && job?.raw_flow?.modules?.[approvalStep]?.suspend?.self_approval_disabled && $userStore && $userStore.email === job.email && $userStore.is_admin}
@@ -245,8 +241,7 @@
 			</div>
 		{/if}
 
-		<div class="mt-4 flex flex-row flex-wrap justify-between"
-			><a href="https://windmill.dev">Learn more about Windmill</a>
+		<div class="mt-4 flex flex-row flex-wrap justify-between">
 			<a target="_blank" rel="noreferrer" href="/run/{job?.id}?workspace={job?.workspace_id}"
 				>Flow run details (require auth)</a
 			>

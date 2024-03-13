@@ -8,11 +8,10 @@
 	import { inferArgs, parseOutputs } from '$lib/infer'
 	import type { Schema } from '$lib/common'
 	import Editor from '$lib/components/Editor.svelte'
-	import { defaultIfEmptyString, emptySchema, getModifierKey, itemsExists } from '$lib/utils'
+	import { defaultIfEmptyString, emptySchema, itemsExists } from '$lib/utils'
 	import { computeFields } from './utils'
 	import { deepEqual } from 'fast-equals'
 	import type { AppInput } from '../../inputType'
-	import Kbd from '$lib/components/common/kbd/Kbd.svelte'
 	import SimpleEditor from '$lib/components/SimpleEditor.svelte'
 	import { buildExtraLib } from '../../utils'
 	import RunButton from './RunButton.svelte'
@@ -204,49 +203,46 @@
 						acc[key] = obj.type === 'static' ? obj.value : undefined
 						return acc
 					}, {})}
+					{transformer}
 				/>
 
 				<Button
 					title="Delete"
-					size="xs"
+					size="xs2"
 					color="red"
 					variant="border"
-					btnClasses="!px-2"
 					aria-label="Delete"
 					on:click={() => dispatch('delete')}
 					endIcon={{ icon: Trash2 }}
+					iconOnly
 				/>
 				{#if inlineScript.language != 'frontend'}
 					<Button
-						size="xs"
+						size="xs2"
 						color="light"
 						title="Full Editor"
-						btnClasses="!px-2  !bg-surface-secondary hover:!bg-surface-hover"
+						variant="border"
 						on:click={() => {
 							inlineScriptEditorDrawer?.openDrawer()
 						}}
 						endIcon={{ icon: Maximize2 }}
+						iconOnly
 					/>
 				{/if}
 
 				<Button
 					variant="border"
-					size="xs"
+					size="xs2"
 					color="light"
-					btnClasses="!px-2 !py-1"
 					on:click={async () => {
 						editor?.format()
 						simpleEditor?.format()
 					}}
+					shortCut={{
+						key: 'S'
+					}}
 				>
-					<div class="flex flex-row gap-1 items-center">
-						Format
-
-						<div class="flex flex-row items-center">
-							<Kbd small isModifier>{getModifierKey()}</Kbd>
-							<Kbd small>S</Kbd>
-						</div>
-					</div>
+					Format
 				</Button>
 				<RunButton bind:runLoading {id} inlineScript={!transformer ? inlineScript : undefined} />
 			</div>

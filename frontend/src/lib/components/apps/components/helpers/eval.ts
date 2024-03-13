@@ -18,29 +18,32 @@ export function computeGlobalContext(world: World | undefined, extraContext: any
 	}
 }
 
-function create_context_function_template(eval_string: string, context, noReturn: boolean) {
+function create_context_function_template(
+	eval_string: string,
+	contextKeys: string[],
+	noReturn: boolean
+) {
+	let hasReturnAsLastLine = noReturn || eval_string.split('\n').some((x) => x.startsWith('return '))
 	return `
 return async function (context, state, goto, setTab, recompute, getAgGrid, setValue, setSelectedIndex, openModal, closeModal, open, close, validate, invalidate, validateAll, clearFiles, showToast) {
 "use strict";
 ${
-	Object.keys(context).length > 0
-		? `let ${Object.keys(context).map((key) => ` ${key} = context['${key}']`)};`
+	contextKeys && contextKeys.length > 0
+		? `let ${contextKeys.map((key) => ` ${key} = context['${key}']`)};`
 		: ``
 }
 ${
-	noReturn
-		? `return ${eval_string.startsWith('return ') ? eval_string.substring(7) : eval_string}`
-		: eval_string
+	hasReturnAsLastLine
+		? eval_string
+		: `
+return ${eval_string.startsWith('return ') ? eval_string.substring(7) : eval_string}`
 }
+
 }                                                                                                                   
 `
 }
 
-function make_context_evaluator(
-	eval_string,
-	context,
-	noReturn: boolean
-): (
+type WmFunctor = (
 	context,
 	state,
 	goto,
@@ -58,11 +61,19 @@ function make_context_evaluator(
 	validateAll,
 	clearFiles,
 	showToast
-) => Promise<any> {
-	let template = create_context_function_template(eval_string, context, noReturn)
-	let functor = Function(template)
+) => Promise<any>
 
-	return functor()
+let functorCache: Record<number, WmFunctor> = {}
+function make_context_evaluator(eval_string, contextKeys: string[], noReturn: boolean): WmFunctor {
+	let cacheKey = hashCode(JSON.stringify({ eval_string, contextKeys, noReturn }))
+	if (functorCache[cacheKey]) {
+		return functorCache[cacheKey]
+	}
+	let template = create_context_function_template(eval_string, contextKeys, noReturn)
+	let functor = Function(template)
+	let r = functor()
+	functorCache[cacheKey] = r
+	return r
 }
 
 function isSerializable(obj) {
@@ -97,10 +108,21 @@ function isSerializable(obj) {
 	return true
 }
 
+function hashCode(s: string): number {
+	var hash = 0,
+		i,
+		chr
+	if (s.length === 0) return hash
+	for (i = 0; i < s.length; i++) {
+		chr = s.charCodeAt(i)
+		hash = (hash << 5) - hash + chr
+		hash |= 0 // Convert to 32bit integer
+	}
+	return hash
+}
 export async function eval_like(
 	text: string,
 	context = {},
-	noReturn: boolean,
 	state: Record<string, any>,
 	editor: boolean,
 	controlComponents: Record<
@@ -121,7 +143,8 @@ export async function eval_like(
 		}
 	>,
 	worldStore: World | undefined,
-	runnableComponents: Record<string, { cb?: (() => void)[] }>
+	runnableComponents: Record<string, { cb?: (() => void)[] }>,
+	noReturn: boolean
 ) {
 	const proxiedState = new Proxy(state, {
 		set(target, key, value) {
@@ -138,8 +161,9 @@ export async function eval_like(
 			return true
 		}
 	})
-	let evaluator = make_context_evaluator(text, context, noReturn)
 
+	let evaluator = make_context_evaluator(text, Object.keys(context ?? {}), noReturn)
+	// console.log(i, j)
 	return await evaluator(
 		context,
 		proxiedState,

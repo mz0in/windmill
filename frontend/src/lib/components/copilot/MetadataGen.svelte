@@ -2,7 +2,6 @@
 	import { getCompletion } from './lib'
 	import { isInitialCode } from '$lib/script_helpers'
 	import { Check, Loader2, Wand2 } from 'lucide-svelte'
-	import type { ChatCompletionMessageParam } from 'openai/resources'
 	import { copilotInfo, metadataCompletionEnabled } from '$lib/stores'
 	import { createEventDispatcher, onDestroy } from 'svelte'
 	import { sendUserToast } from '$lib/toast'
@@ -10,6 +9,7 @@
 	import autosize from 'svelte-autosize'
 	import type { FlowValue } from '$lib/gen'
 	import { yamlStringifyExceptKeys } from './utils'
+	import type { ChatCompletionMessageParam } from 'openai/resources/index.mjs'
 
 	type PromptConfig = {
 		system: string
@@ -227,7 +227,12 @@ Generate a description for the flow below:
 	>
 		{#if active}
 			<span
-				class="absolute text-xs bg-violet-100 text-violet-800 dark:bg-gray-700 dark:text-violet-400 px-1 py-0.5 rounded-md flex flex-row items-center justify-center gap-2 transition-all shrink-0"
+				class={twMerge(
+					'absolute text-xs bg-violet-100 text-violet-800 dark:bg-gray-700 dark:text-violet-400 px-1 py-0.5 rounded-md flex flex-row items-center justify-center gap-2 transition-all shrink-0',
+					!loading && generatedContent.length > 0
+						? 'bg-green-100 text-green-800 dark:text-green-400 dark:bg-green-700'
+						: ''
+				)}
 			>
 				<span class="px-0.5 py-0.5 rounded-md text-2xs text-bold flex flex-row items-center gap-1">
 					{#if loading}

@@ -53,6 +53,7 @@
 	export let hideRefreshButton: boolean = false
 	export let hasChildrens: boolean
 	export let allowConcurentRequests = false
+	export let noInitialize = false
 
 	const {
 		worldStore,
@@ -123,6 +124,7 @@
 		refreshIfAutoRefresh('static changed')
 	}
 
+	// $: console.log(runnableInputValues)
 	$: (runnableInputValues || extraQueryParams || args) &&
 		resultJobLoader &&
 		refreshIfAutoRefresh('arg changed')
@@ -252,12 +254,12 @@
 						row: rowContext ? $rowContext : undefined,
 						group: groupContext ? $groupContext : undefined
 					}),
-					false,
 					$state,
 					isEditor,
 					$componentControl,
 					$worldStore,
-					$runnableComponents
+					$runnableComponents,
+					true
 				)
 
 				await setResult(r, job, setRunnableJobEditorPanel)
@@ -360,6 +362,8 @@
 			updateResult({ error })
 			$errorByComponent[id] = { error }
 
+			donePromise?.({ error })
+			sendUserToast(error, true)
 			loading = false
 		}
 	}
@@ -420,6 +424,9 @@
 
 		if (error) {
 			$errorByComponent[id] = { id: jobId, error }
+		} else {
+			delete $errorByComponent[id]
+			$errorByComponent = $errorByComponent
 		}
 	}
 
@@ -449,12 +456,12 @@
 						row: rowContext ? $rowContext : undefined,
 						result: res
 					}),
-					false,
 					$state,
 					isEditor,
 					$componentControl,
 					$worldStore,
-					$runnableComponents
+					$runnableComponents,
+					true
 				)
 				return transformerResult
 			} catch (err) {
@@ -552,7 +559,7 @@
 			cb: [...($runnableComponents[id]?.cb ?? []), cancellableRun]
 		}
 
-		if (!$initialized.initializedComponents.includes(id)) {
+		if (!noInitialize && !$initialized.initializedComponents.includes(id)) {
 			$initialized.initializedComponents = [...$initialized.initializedComponents, id]
 		}
 	})
@@ -590,6 +597,7 @@
 			{id}
 			input={fields[key]}
 			bind:value={runnableInputValues[key]}
+			onDemandOnly={v.onDemandOnly}
 		/>
 	{/if}
 {/each}

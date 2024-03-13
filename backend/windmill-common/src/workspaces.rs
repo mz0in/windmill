@@ -19,6 +19,8 @@ pub enum ObjectType {
     Secret,
     Schedule,
     ResourceType,
+    User,
+    Group,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -26,4 +28,5 @@ pub struct GitRepositorySettings {
     pub script_path: String,
     pub git_repo_resource_path: String,
     pub use_individual_branch: Option<bool>,
+    pub exclude_types_override: Option<Vec<ObjectType>>,
 }

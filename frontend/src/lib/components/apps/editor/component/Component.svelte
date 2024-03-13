@@ -71,6 +71,8 @@
 	import AppS3FileInput from '../../components/inputs/AppS3FileInput.svelte'
 	import AppAlert from '../../components/display/AppAlert.svelte'
 	import AppDateSliderInput from '../../components/inputs/AppDateSliderInput.svelte'
+	import AppTimeInput from '../../components/inputs/AppTimeInput.svelte'
+	import AppDateTimeInput from '../../components/inputs/AppDateTimeInput.svelte'
 
 	export let component: AppComponent
 	export let selected: boolean
@@ -401,6 +403,7 @@
 				verticalAlignment={component.verticalAlignment}
 				configuration={component.configuration}
 				customCss={component.customCss}
+				onSelect={component.onSelect}
 				{render}
 			/>
 		{:else if component.type === 'multiselectcomponent'}
@@ -441,6 +444,7 @@
 				configuration={component.configuration}
 				customCss={component.customCss}
 				recomputeIds={component.recomputeIds}
+				onToggle={component.onToggle}
 				{render}
 			/>
 		{:else if component.type === 'textinputcomponent'}
@@ -485,6 +489,23 @@
 			/>
 		{:else if component.type === 'dateinputcomponent'}
 			<AppDateInput
+				verticalAlignment={component.verticalAlignment}
+				configuration={component.configuration}
+				inputType="date"
+				id={component.id}
+				customCss={component.customCss}
+				{render}
+			/>
+		{:else if component.type === 'timeinputcomponent'}
+			<AppTimeInput
+				verticalAlignment={component.verticalAlignment}
+				configuration={component.configuration}
+				id={component.id}
+				customCss={component.customCss}
+				{render}
+			/>
+		{:else if component.type === 'datetimeinputcomponent'}
+			<AppDateTimeInput
 				verticalAlignment={component.verticalAlignment}
 				configuration={component.configuration}
 				inputType="date"

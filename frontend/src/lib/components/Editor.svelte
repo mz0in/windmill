@@ -28,10 +28,6 @@
 	import libStdContent from '$lib/es6.d.ts.txt?raw'
 	import denoFetchContent from '$lib/deno_fetch.d.ts.txt?raw'
 
-	// import nord from '$lib/assets/nord.json'
-
-	// import nord from '$lib/assets/nord.json'
-
 	import { MonacoLanguageClient } from 'monaco-languageclient'
 
 	import { toSocket, WebSocketMessageReader, WebSocketMessageWriter } from 'vscode-ws-jsonrpc'
@@ -58,8 +54,8 @@
 	import { workspaceStore } from '$lib/stores'
 	import { Preview, UserService } from '$lib/gen'
 	import type { Text } from 'yjs'
-	import { initializeMode } from 'monaco-graphql/esm/initializeMode'
-	import type { MonacoGraphQLAPI } from 'monaco-graphql/esm/api'
+	import { initializeMode } from 'monaco-graphql/esm/initializeMode.js'
+	import type { MonacoGraphQLAPI } from 'monaco-graphql/esm/api.js'
 	import { sleep } from '$lib/utils'
 	import { editorCodeCompletion } from './copilot/completion'
 	import { initializeVscode } from './vscode'
@@ -675,7 +671,7 @@
 								}
 							)
 						} catch (err) {
-							console.error(err)
+							console.warn(err)
 						}
 					}
 
@@ -766,7 +762,7 @@
 					const denoFetch = { content: denoFetchContent, filePath: 'deno_fetch.d.ts' }
 					languages.typescript.javascriptDefaults.setExtraLibs([stdLib, denoFetch])
 				}
-				if (scriptLang == 'bun') {
+				if (scriptLang == 'bun' && ata == undefined) {
 					const addLibraryToRuntime = async (code: string, _path: string) => {
 						const path = 'file://' + _path
 						let uri = mUri.parse(path)
@@ -783,17 +779,24 @@
 						let p = new URL(_path, uri).href
 						let nuri = mUri.parse(p)
 						if (editor) {
-							let model = meditor.getModel(nuri)
-							if (model) {
-								model.setValue(code)
+							let localModel = meditor.getModel(nuri)
+							if (localModel) {
+								localModel.setValue(code)
 							} else {
 								meditor.createModel(code, 'javascript', nuri)
+							}
+							try {
+								if (model) {
+									model?.setValue(model.getValue())
+								}
+							} catch (e) {
+								console.log('error resetting model', e)
 							}
 						}
 					}
 					await initWasm()
 					const root = await genRoot(hostname)
-
+					console.log('SETUP TYPE ACQUISITION', { root, path })
 					ata = setupTypeAcquisition({
 						projectName: 'Windmill',
 						depsParser: (c) => {
@@ -935,7 +938,8 @@
 							!websocketAlive.pyright &&
 							!websocketAlive.go &&
 							!websocketAlive.shellcheck &&
-							!websocketAlive.ruff
+							!websocketAlive.ruff &&
+							scriptLang != 'bun'
 						) {
 							console.log('reconnecting to language servers')
 							lastWsAttempt = new Date()
@@ -958,6 +962,7 @@
 		console.log('path changed, reloading language server', initialPath, path)
 		initialPath = path
 		pathTimeout && clearTimeout(pathTimeout)
+		ata = undefined
 		pathTimeout = setTimeout(reloadWebsocket, 1000)
 	}
 
@@ -1143,7 +1148,8 @@
 				!websocketAlive.ruff &&
 				!websocketAlive.shellcheck &&
 				!websocketAlive.go &&
-				!websocketInterval
+				!websocketInterval &&
+				scriptLang != 'bun'
 			) {
 				console.log('reconnecting to language servers on focus')
 				reloadWebsocket()

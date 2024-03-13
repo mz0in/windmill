@@ -475,6 +475,29 @@ export function parse_mssql(code) {
 
 /**
 * @param {string} code
+* @returns {string | undefined}
+*/
+export function parse_db_resource(code) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.parse_db_resource(retptr, ptr0, len0);
+        var r0 = getInt32Memory0()[retptr / 4 + 0];
+        var r1 = getInt32Memory0()[retptr / 4 + 1];
+        let v2;
+        if (r0 !== 0) {
+            v2 = getStringFromWasm0(r0, r1).slice();
+            wasm.__wbindgen_free(r0, r1 * 1, 1);
+        }
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+* @param {string} code
 * @returns {string}
 */
 export function parse_graphql(code) {
@@ -538,7 +561,7 @@ async function __wbg_load(module, imports) {
 function __wbg_get_imports() {
     const imports = {};
     imports.wbg = {};
-    imports.wbg.__wbg_eval_ff4183ac1495b791 = function(arg0, arg1) {
+    imports.wbg.__wbg_eval_89aaea39f7e976e8 = function(arg0, arg1) {
         const ret = eval(getStringFromWasm0(arg0, arg1));
         return addHeapObject(ret);
     };

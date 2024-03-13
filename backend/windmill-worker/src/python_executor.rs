@@ -3,7 +3,7 @@ use std::{collections::HashMap, process::Stdio};
 use itertools::Itertools;
 use regex::Regex;
 use serde_json::value::RawValue;
-use sqlx::{Pool, Postgres};
+use sqlx::{types::Json, Pool, Postgres};
 use tokio::{
     fs::{metadata, DirBuilder, File},
     io::AsyncReadExt,
@@ -16,10 +16,13 @@ use windmill_common::{
     error::{self, Error},
     jobs::QueuedJob,
     utils::calculate_hash,
-    variables::get_secret_value_as_admin,
     worker::WORKER_CONFIG,
     DB,
 };
+
+#[cfg(feature = "enterprise")]
+use windmill_common::variables::get_secret_value_as_admin;
+
 use windmill_queue::CanceledBy;
 
 lazy_static::lazy_static! {
@@ -30,7 +33,6 @@ lazy_static::lazy_static! {
     std::env::var("FLOCK_PATH").unwrap_or_else(|_| "/usr/bin/flock".to_string());
     static ref NON_ALPHANUM_CHAR: Regex = regex::Regex::new(r"[^0-9A-Za-z=.-]").unwrap();
 
-    static ref PIP_INDEX_URL: Option<String> = std::env::var("PIP_INDEX_URL").ok();
     static ref PIP_TRUSTED_HOST: Option<String> = std::env::var("PIP_TRUSTED_HOST").ok();
     static ref PIP_INDEX_CERT: Option<String> = std::env::var("PIP_INDEX_CERT").ok();
 
@@ -53,11 +55,12 @@ use crate::S3_CACHE_BUCKET;
 
 use crate::{
     common::{
-        create_args_and_out_file, get_reserved_variables, handle_child, read_result, set_logs,
-        start_child_process, write_file,
+        create_args_and_out_file, get_main_override, get_reserved_variables, handle_child,
+        read_result, set_logs, start_child_process, write_file,
     },
     AuthedClientBackgroundTask, DISABLE_NSJAIL, DISABLE_NUSER, HOME_ENV, HTTPS_PROXY, HTTP_PROXY,
-    LOCK_CACHE_DIR, NO_PROXY, NSJAIL_PATH, PATH_ENV, PIP_CACHE_DIR, PIP_EXTRA_INDEX_URL, TZ_ENV,
+    LOCK_CACHE_DIR, NO_PROXY, NSJAIL_PATH, PATH_ENV, PIP_CACHE_DIR, PIP_EXTRA_INDEX_URL,
+    PIP_INDEX_URL, TZ_ENV,
 };
 
 pub async fn create_dependencies_dir(job_dir: &str) {
@@ -161,7 +164,11 @@ pub async fn pip_compile(
         args.extend(["--extra-index-url", url, "--no-emit-index-url"]);
         pip_args.push(format!("--extra-index-url {}", url));
     }
-    let pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+    let pip_index_url = PIP_INDEX_URL
+        .read()
+        .await
+        .clone()
+        .map(handle_ephemeral_token);
     if let Some(url) = pip_index_url.as_ref() {
         args.extend(["--index-url", url, "--no-emit-index-url"]);
         pip_args.push(format!("--index-url {}", url));
@@ -265,10 +272,17 @@ pub async fn handle_python_job(
         last,
         transforms,
         spread,
-    ) = prepare_wrapper(job_dir, inner_content, script_path).await?;
+        main_name,
+    ) = prepare_wrapper(job_dir, inner_content, script_path, job.args.as_ref()).await?;
 
     create_args_and_out_file(&client, job, job_dir, db).await?;
 
+    let os_main_override = if let Some(main_override) = main_name.as_ref() {
+        format!("import os\nos.environ[\"MAIN_OVERRIDE\"] = \"{main_override}\"\n")
+    } else {
+        String::new()
+    };
+    let main_override = main_name.unwrap_or_else(|| "main".to_string());
     let wrapper_content: String = format!(
         r#"
 import json
@@ -277,6 +291,7 @@ import json
 {import_datetime}
 import traceback
 import sys
+{os_main_override}
 from {module_dir_dot} import {last} as inner_script
 import re
 
@@ -296,7 +311,7 @@ def to_b_64(v: bytes):
 
 replace_nan = re.compile(r'(?:\bNaN\b|\\u0000)')
 try:
-    res = inner_script.main(**args)
+    res = inner_script.{main_override}(**args)
     typ = type(res)
     if typ.__name__ == 'DataFrame':
         if typ.__module__ == 'pandas.core.frame':
@@ -436,6 +451,7 @@ async fn prepare_wrapper(
     job_dir: &str,
     inner_content: &str,
     script_path: &str,
+    args: Option<&Json<HashMap<String, Box<RawValue>>>>,
 ) -> error::Result<(
     &'static str,
     &'static str,
@@ -445,7 +461,10 @@ async fn prepare_wrapper(
     String,
     String,
     String,
+    Option<String>,
 )> {
+    let main_override = get_main_override(args);
+
     let relative_imports = RELATIVE_IMPORT_REGEX.is_match(&inner_content);
 
     let script_path_splitted = script_path.split("/");
@@ -484,7 +503,7 @@ async fn prepare_wrapper(
         let _ = write_file(job_dir, "loader.py", RELATIVE_PYTHON_LOADER).await?;
     }
 
-    let sig = windmill_parser_py::parse_python_signature(inner_content)?;
+    let sig = windmill_parser_py::parse_python_signature(inner_content, main_override.clone())?;
     let transforms = sig
         .args
         .iter()
@@ -562,9 +581,11 @@ if args["{name}"] is None:
         last,
         transforms,
         spread,
+        main_override,
     ))
 }
 
+#[cfg(feature = "enterprise")]
 async fn replace_pip_secret(
     db: &DB,
     w_id: &str,
@@ -623,11 +644,14 @@ async fn handle_python_deps(
     let requirements = match requirements_o {
         Some(r) => r,
         None => {
+            let mut already_visited = vec![];
+
             let requirements = windmill_parser_py_imports::parse_python_imports(
                 inner_content,
                 w_id,
                 script_path,
                 db,
+                &mut already_visited,
             )
             .await?
             .join("\n");
@@ -707,7 +731,12 @@ pub async fn handle_python_reqs(
             vars.push(("EXTRA_INDEX_URL", url));
         }
 
-        pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+        pip_index_url = PIP_INDEX_URL
+            .read()
+            .await
+            .clone()
+            .map(handle_ephemeral_token);
+
         if let Some(url) = pip_index_url.as_ref() {
             vars.push(("INDEX_URL", url));
         }
@@ -821,7 +850,11 @@ pub async fn handle_python_reqs(
             if let Some(url) = pip_extra_index_url.as_ref() {
                 command_args.extend(["--extra-index-url", url]);
             }
-            let pip_index_url = PIP_INDEX_URL.clone().map(handle_ephemeral_token);
+            let pip_index_url = PIP_INDEX_URL
+                .read()
+                .await
+                .clone()
+                .map(handle_ephemeral_token);
 
             if let Some(url) = pip_index_url.as_ref() {
                 command_args.extend(["--index-url", url]);
@@ -843,6 +876,8 @@ pub async fn handle_python_reqs(
             if let Some(no_proxy) = NO_PROXY.as_ref() {
                 envs.push(("NO_PROXY", no_proxy));
             }
+
+            envs.push(("HOME", HOME_ENV.as_str()));
 
             tracing::debug!("pip install command: {:?}", command_args);
 
@@ -969,6 +1004,7 @@ pub async fn start_worker(
     logs.push_str("\n\n--- PYTHON CODE EXECUTION ---\n");
     set_logs(&mut logs, &Uuid::nil(), db).await;
 
+    let _args = None;
     let (
         import_loader,
         import_base64,
@@ -978,7 +1014,8 @@ pub async fn start_worker(
         last,
         transforms,
         spread,
-    ) = prepare_wrapper(job_dir, inner_content, script_path).await?;
+        _,
+    ) = prepare_wrapper(job_dir, inner_content, script_path, _args.as_ref()).await?;
 
     {
         let indented_transforms = transforms
@@ -1056,7 +1093,7 @@ for line in sys.stdin:
         "dedicated_worker",
         "dedicated_worker",
         Uuid::nil().to_string().as_str(),
-        "dedicted_worker",
+        "dedicated_worker",
         Some(script_path.to_string()),
         None,
         None,

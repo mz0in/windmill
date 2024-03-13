@@ -26,14 +26,19 @@ use windmill_common::{
         DEFAULT_TAGS_PER_WORKSPACE_SETTING, DISABLE_STATS_SETTING, ENV_SETTINGS,
         EXPOSE_DEBUG_METRICS_SETTING, EXPOSE_METRICS_SETTING, EXTRA_PIP_INDEX_URL_SETTING,
         JOB_DEFAULT_TIMEOUT_SECS_SETTING, KEEP_JOB_DIR_SETTING, LICENSE_KEY_SETTING,
-        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, REQUEST_SIZE_LIMIT_SETTING,
-        REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING, RETENTION_PERIOD_SECS_SETTING,
+        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, PIP_INDEX_URL_SETTING,
+        REQUEST_SIZE_LIMIT_SETTING, REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING,
+        RETENTION_PERIOD_SECS_SETTING, SAML_METADATA_SETTING, SCIM_TOKEN_SETTING,
     },
-    stats::schedule_stats,
+    stats_ee::schedule_stats,
     utils::{rd_string, Mode},
     worker::{reload_custom_tags_setting, WORKER_GROUP},
-    DB, METRICS_ADDR, METRICS_ENABLED,
+    DB, METRICS_ENABLED,
 };
+
+#[cfg(feature = "enterprise")]
+use windmill_common::METRICS_ADDR;
+
 use windmill_worker::{
     BUN_CACHE_DIR, BUN_TMP_CACHE_DIR, DENO_CACHE_DIR, DENO_CACHE_DIR_DEPS, DENO_CACHE_DIR_NPM,
     DENO_TMP_CACHE_DIR, DENO_TMP_CACHE_DIR_DEPS, DENO_TMP_CACHE_DIR_NPM, GO_BIN_CACHE_DIR,
@@ -45,7 +50,8 @@ use crate::monitor::{
     initial_load, load_keep_job_dir, load_require_preexisting_user, load_tag_per_workspace_enabled,
     monitor_db, monitor_pool, reload_base_url_setting, reload_bunfig_install_scopes_setting,
     reload_extra_pip_index_url_setting, reload_job_default_timeout_setting, reload_license_key,
-    reload_npm_config_registry_setting, reload_retention_period_setting, reload_server_config,
+    reload_npm_config_registry_setting, reload_pip_index_url_setting,
+    reload_retention_period_setting, reload_scim_token_setting, reload_server_config,
     reload_worker_config,
 };
 
@@ -60,8 +66,34 @@ mod monitor;
 #[cfg(feature = "pg_embed")]
 mod pg_embed;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[inline(always)]
+fn create_and_run_current_thread_inner<F, R>(future: F) -> R
+where
+    F: std::future::Future<Output = R> + 'static,
+    R: Send + 'static,
+{
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(32)
+        .build()
+        .unwrap();
+
+    // Since this is the main future, we want to box it in debug mode because it tends to be fairly
+    // large and the compiler won't optimize repeated copies. We also make this runtime factory
+    // function #[inline(always)] to avoid holding the unboxed, unused future on the stack.
+    #[cfg(debug_assertions)]
+    // SAFETY: this this is guaranteed to be running on a current-thread executor
+    let future = Box::pin(future);
+
+    rt.block_on(future)
+}
+
+pub fn main() -> anyhow::Result<()> {
+    deno_core::JsRuntime::init_platform(None);
+    create_and_run_current_thread_inner(windmill_main())
+}
+
+async fn windmill_main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     if std::env::var("RUST_LOG").is_err() {
@@ -78,9 +110,16 @@ async fn main() -> anyhow::Result<()> {
 
     match cli_arg.as_str() {
         "cache" => {
-            tracing::info!("Caching embedding model...");
-            windmill_api::embeddings::ModelInstance::load_model_files().await?;
-            tracing::info!("Cached embedding model");
+            #[cfg(feature = "embedding")]
+            {
+                tracing::info!("Caching embedding model...");
+                windmill_api::embeddings::ModelInstance::load_model_files().await?;
+                tracing::info!("Cached embedding model");
+            }
+            #[cfg(not(feature = "embedding"))]
+            {
+                tracing::warn!("Embeddings are not enabled, ignoring...");
+            }
             return Ok(());
         }
         "-v" | "--version" | "version" => {
@@ -112,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 {
                     panic!("Agent mode is only available in the EE, ignoring...");
                 }
-
+                #[cfg(feature = "enterprise")]
                 Mode::Agent
             } else {
                 if &x != "standalone" {
@@ -263,7 +302,7 @@ Windmill Community Edition {GIT_VERSION}
 
         initial_load(&db, killpill_tx.clone(), worker_mode, server_mode).await;
 
-        monitor_db(&db, &base_internal_url, rsmq.clone(), server_mode).await;
+        monitor_db(&db, &base_internal_url, rsmq.clone(), server_mode, true).await;
 
         monitor_pool(&db).await;
 
@@ -340,6 +379,7 @@ Windmill Community Edition {GIT_VERSION}
                                 &base_internal_url,
                                 rsmq.clone(),
                                 server_mode,
+                                false
                             )
                             .await;
                         },
@@ -398,8 +438,14 @@ Windmill Community Edition {GIT_VERSION}
                                                 JOB_DEFAULT_TIMEOUT_SECS_SETTING => {
                                                     reload_job_default_timeout_setting(&db).await
                                                 },
+                                                SCIM_TOKEN_SETTING => {
+                                                    reload_scim_token_setting(&db).await
+                                                },
                                                 EXTRA_PIP_INDEX_URL_SETTING => {
                                                     reload_extra_pip_index_url_setting(&db).await
+                                                },
+                                                PIP_INDEX_URL_SETTING => {
+                                                    reload_pip_index_url_setting(&db).await
                                                 },
                                                 NPM_CONFIG_REGISTRY_SETTING => {
                                                     reload_npm_config_registry_setting(&db).await
@@ -433,6 +479,12 @@ Windmill Community Edition {GIT_VERSION}
                                                         if let Err(e) = tx.send(()) {
                                                             tracing::error!(error = %e, "Could not send killpill to server");
                                                         }
+                                                    }
+                                                },
+                                                SAML_METADATA_SETTING => {
+                                                    tracing::info!("SAML metadata change detected, killing server expecting to be restarted");
+                                                    if let Err(e) = tx.send(()) {
+                                                        tracing::error!(error = %e, "Could not send killpill to server");
                                                     }
                                                 },
                                                 DISABLE_STATS_SETTING => {},
@@ -485,14 +537,16 @@ Windmill Community Edition {GIT_VERSION}
         };
 
         let instance_name = rd_string(8);
-        schedule_stats(
-            instance_name,
-            mode.clone(),
-            &db,
-            &HTTP_CLIENT,
-            cfg!(feature = "enterprise"),
-        )
-        .await;
+        if mode != Mode::Agent {
+            schedule_stats(
+                instance_name,
+                mode.clone(),
+                &db,
+                &HTTP_CLIENT,
+                cfg!(feature = "enterprise"),
+            )
+            .await;
+        }
 
         futures::try_join!(shutdown_signal, workers_f, monitor_f, server_f, metrics_f)?;
     } else {
@@ -575,6 +629,7 @@ pub async fn run_workers<R: rsmq_async::RsmqConnection + Send + Sync + Clone + '
         })
         .unwrap_or_else(|| rd_string(5));
 
+    #[cfg(tokio_unstable)]
     let monitor = tokio_metrics::TaskMonitor::new();
 
     let ip = windmill_common::external_ip::get_ip()
@@ -629,9 +684,11 @@ pub async fn run_workers<R: rsmq_async::RsmqConnection + Send + Sync + Clone + '
         let base_internal_url = base_internal_url.clone();
         let rsmq2 = rsmq.clone();
         let sync_barrier = sync_barrier.clone();
-        handles.push(tokio::spawn(monitor.instrument(async move {
+
+        handles.push(tokio::spawn(async move {
             tracing::info!(worker = %worker_name, "starting worker");
-            windmill_worker::run_worker(
+
+            let f = windmill_worker::run_worker(
                 &db1,
                 &instance_name,
                 worker_name,
@@ -644,9 +701,18 @@ pub async fn run_workers<R: rsmq_async::RsmqConnection + Send + Sync + Clone + '
                 rsmq2,
                 sync_barrier,
                 agent_mode,
-            )
-            .await
-        })));
+            );
+
+            #[cfg(tokio_unstable)]
+            {
+                monitor.monitor(f, "worker").await
+            }
+
+            #[cfg(not(tokio_unstable))]
+            {
+                f.await
+            }
+        }));
     }
 
     futures::future::try_join_all(handles).await?;

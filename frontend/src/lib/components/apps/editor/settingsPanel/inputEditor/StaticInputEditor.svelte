@@ -20,6 +20,8 @@
 	import AgChartWizard from '$lib/components/wizards/AgChartWizard.svelte'
 	import DBExplorerWizard from '$lib/components/wizards/DBExplorerWizard.svelte'
 	import Label from '$lib/components/Label.svelte'
+	import DateTimeInput from '$lib/components/DateTimeInput.svelte'
+	import DBTableSelect from './DBTableSelect.svelte'
 
 	export let componentInput: StaticInput<any> | undefined
 	export let fieldType: InputType | undefined = undefined
@@ -42,27 +44,35 @@
 			<textarea use:autosize on:keydown|stopPropagation bind:value={componentInput.value} />
 		{:else if fieldType === 'date'}
 			<input on:keydown|stopPropagation type="date" bind:value={componentInput.value} />
+		{:else if fieldType === 'time'}
+			<input on:keydown|stopPropagation type="time" bind:value={componentInput.value} />
+		{:else if fieldType === 'datetime'}
+			<DateTimeInput bind:value={componentInput.value} />
 		{:else if fieldType === 'boolean'}
 			<Toggle bind:checked={componentInput.value} size="xs" class="mt-2" />
 		{:else if fieldType === 'select' && selectOptions}
-			<select on:keydown|stopPropagation bind:value={componentInput.value}>
-				{#each selectOptions ?? [] as option}
-					{#if typeof option == 'string'}
-						<option value={option}>
-							{option}
-						</option>
-					{:else}
-						<option value={option.value}>
-							{option.label}
-						</option>
-					{/if}
-				{/each}
-			</select>
+			{#if subFieldType === 'db-table'}
+				<DBTableSelect bind:componentInput {selectOptions} {id} />
+			{:else}
+				<select on:keydown|stopPropagation bind:value={componentInput.value}>
+					{#each selectOptions ?? [] as option}
+						{#if typeof option == 'string'}
+							<option value={option}>
+								{option}
+							</option>
+						{:else}
+							<option value={option.value}>
+								{option.label}
+							</option>
+						{/if}
+					{/each}
+				</select>
+			{/if}
 		{:else if fieldType === 'icon-select'}
 			<IconSelectInput bind:componentInput />
 		{:else if fieldType === 'tab-select'}
 			<TabSelectInput bind:componentInput />
-		{:else if fieldType === 'resource' && subFieldType !== 's3'}
+		{:else if fieldType === 'resource' && subFieldType && ['mysql', 'postgres', 'ms_sql_server', 'snowflake', 'bigquery'].includes(subFieldType)}
 			<ResourcePicker
 				initialValue={componentInput.value?.split('$res:')?.[1] || ''}
 				on:change={(e) => {
@@ -76,7 +86,7 @@
 					}
 				}}
 				showSchemaExplorer
-				resourceType="postgresql"
+				resourceType={subFieldType === 'postgres' ? 'postgresql' : subFieldType}
 			/>
 		{:else if fieldType === 'resource' && subFieldType === 's3'}
 			<ResourcePicker

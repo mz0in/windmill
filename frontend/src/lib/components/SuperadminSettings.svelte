@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { UserService, GlobalUserInfo } from '$lib/gen'
+	import { UserService, GlobalUserInfo, SettingService } from '$lib/gen'
 	import TableCustom from '$lib/components/TableCustom.svelte'
 	import InviteGlobalUser from '$lib/components/InviteGlobalUser.svelte'
 	import { Button, Drawer, DrawerContent, Tab, Tabs } from '$lib/components/common'
@@ -18,7 +18,9 @@
 	import { ExternalLink } from 'lucide-svelte'
 	import { settingsKeys } from './instanceSettings'
 	import ConfirmationModal from './common/confirmationModal/ConfirmationModal.svelte'
-
+	import ChangeInstanceUsername from './ChangeInstanceUsername.svelte'
+	import Tooltip from './Tooltip.svelte'
+	import { isCloudHosted } from '$lib/cloud'
 	let drawer: Drawer
 	let filter = ''
 
@@ -50,6 +52,25 @@
 	let tab: 'users' | string = 'users'
 
 	let nbDisplayed = 50
+
+	let instanceSettings
+
+	let automateUsernameCreation = false
+	async function getAutomateUsernameCreationSetting() {
+		automateUsernameCreation =
+			(await SettingService.getGlobal({ key: 'automate_username_creation' })) ?? false
+	}
+	getAutomateUsernameCreationSetting()
+	let automateUsernameModalOpen = false
+	async function enableAutomateUsernameCreationSetting() {
+		await SettingService.setGlobal({
+			key: 'automate_username_creation',
+			requestBody: { value: true }
+		})
+		getAutomateUsernameCreationSetting()
+		sendUserToast('Automatic username creation enabled')
+		listUsers()
+	}
 </script>
 
 <SearchItems
@@ -61,7 +82,7 @@
 
 <Drawer bind:this={drawer} on:open={listUsers} size="1200px" on:close={removeHash}>
 	<DrawerContent overflow_y={true} title="Instance Settings" on:close={closeDrawer}>
-		<div class="flex flex-col h-full">
+		<div class="flex flex-col h-full w-full">
 			<div>
 				<div class="flex justify-between">
 					<div class="text-xs pt-1 text-tertiary flex flex-col">
@@ -91,6 +112,42 @@
 						<div class="pt-4" />
 						<TabContent value="users">
 							<div class="h-full">
+								{#if !automateUsernameCreation && !isCloudHosted()}
+									<div class="mb-4">
+										<h3 class="mb-2">
+											Automatic username creation
+											<Tooltip>
+												Automatically create a username for new users based on their email, shared
+												across workspaces.
+											</Tooltip>
+										</h3>
+										<Button
+											btnClasses="w-auto"
+											size="sm"
+											color="dark"
+											on:click={() => {
+												automateUsernameModalOpen = true
+											}}
+										>
+											Enable (recommended)
+										</Button>
+										<ConfirmationModal
+											open={automateUsernameModalOpen}
+											on:confirmed={() => {
+												automateUsernameModalOpen = false
+												enableAutomateUsernameCreationSetting()
+											}}
+											on:canceled={() => (automateUsernameModalOpen = false)}
+											title="Automatic username creation"
+											confirmationText="Enable"
+										>
+											Once activated, it will not be possible to disable this feature. In case
+											existing users have different usernames in different workspaces, you will have
+											to manually confirm the username for each user.
+										</ConfirmationModal>
+									</div>
+								{/if}
+
 								<div class="py-2 mb-4">
 									<InviteGlobalUser on:new={listUsers} />
 								</div>
@@ -106,20 +163,43 @@
 											<th>email</th>
 											<th>auth</th>
 											<th>name</th>
+											{#if automateUsernameCreation}
+												<th>username</th>
+											{/if}
 											<th />
 											<th />
 										</tr>
 										<tbody slot="body" class="overflow-y-auto w-full h-full max-h-full">
 											{#if filteredUsers && users}
-												{#each filteredUsers.slice(0, nbDisplayed) as { email, super_admin, login_type, name } (email)}
+												{#each filteredUsers.slice(0, nbDisplayed) as { email, super_admin, login_type, name, username } (email)}
 													<tr class="border">
 														<td>{email}</td>
 														<td>{login_type}</td>
 														<td><span class="break-words">{truncate(name ?? '', 30)}</span></td>
+
+														{#if automateUsernameCreation}
+															<td>
+																{#if username}
+																	{username}
+																{:else}
+																	{#key filteredUsers.map((u) => u.username).join()}
+																		<ChangeInstanceUsername
+																			username=""
+																			{email}
+																			isConflict
+																			on:renamed={() => {
+																				listUsers()
+																			}}
+																		/>
+																	{/key}
+																{/if}
+															</td>
+														{/if}
 														<td>
 															<ToggleButtonGroup
 																selected={super_admin}
 																on:selected={async (e) => {
+																	console.log('BAR')
 																	if (email == $userStore?.email) {
 																		sendUserToast('You cannot demote yourself', true)
 																		listUsers()
@@ -140,11 +220,25 @@
 															</ToggleButtonGroup>
 														</td>
 														<td>
-															<div class="flex flex-row gap-x-1">
-																<button
-																	class="text-red-500 whitespace-nowrap"
+															<div class="flex flex-row gap-x-1 justify-end">
+																{#if automateUsernameCreation && username}
+																	<ChangeInstanceUsername
+																		{username}
+																		{email}
+																		on:renamed={() => {
+																			listUsers()
+																		}}
+																	/>
+																{/if}
+																<Button
+																	color="light"
+																	variant="contained"
+																	size="xs"
+																	spacingSize="xs2"
+																	btnClasses="text-red-500"
 																	on:click={() => {
 																		deleteConfirmedCallback = async () => {
+																			console.log(email)
 																			await UserService.globalUserDelete({ email })
 																			sendUserToast(`User ${email} removed`)
 																			listUsers()
@@ -152,7 +246,7 @@
 																	}}
 																>
 																	Remove
-																</button>
+																</Button>
 															</div>
 														</td>
 													</tr>
@@ -171,13 +265,24 @@
 							</div>
 						</TabContent>
 						<TabContent value="" values={settingsKeys}>
-							<div class="h-full"> <InstanceSettings hideTabs {tab} /> </div>
+							<InstanceSettings bind:this={instanceSettings} hideTabs hideSave {tab} />
 						</TabContent>
 					</svelte:fragment>
 				</Tabs>
 			</div>
-		</div></DrawerContent
-	>
+		</div>
+		{#if tab != 'users'}
+			<div class="absolute bottom-2 w-[95%]">
+				<Button
+					color="dark"
+					on:click={() => {
+						instanceSettings?.saveSettings()
+					}}
+				>
+					Save
+				</Button>
+			</div>{/if}
+	</DrawerContent>
 </Drawer>
 
 <ConfirmationModal

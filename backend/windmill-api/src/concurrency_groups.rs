@@ -1,12 +1,21 @@
+#[cfg(feature = "enterprise")]
 use crate::db::{ApiAuthed, DB};
-use std::collections::HashMap;
-
+#[cfg(feature = "enterprise")]
 use axum::extract::Path;
+#[cfg(feature = "enterprise")]
 use axum::routing::{delete, get};
-use axum::{Extension, Json, Router};
-use polars::prelude::IntoVec;
+#[cfg(feature = "enterprise")]
+use axum::{Extension, Json};
+
+use axum::Router;
+
+#[cfg(feature = "enterprise")]
 use serde::Serialize;
+#[cfg(feature = "enterprise")]
+use std::collections::HashMap;
+#[cfg(feature = "enterprise")]
 use windmill_common::error::Error::{InternalErr, PermissionDenied};
+#[cfg(feature = "enterprise")]
 use windmill_common::error::JsonResult;
 
 #[cfg(feature = "enterprise")]
@@ -61,7 +70,7 @@ async fn list_concurrency_groups(
         })?;
         concurrency_groups.push(ConcurrencyGroups {
             concurrency_id: concurrency_id.clone(),
-            job_uuids: job_uuids_map.keys().into_vec(),
+            job_uuids: job_uuids_map.keys().cloned().collect(),
         })
     }
 
@@ -103,6 +112,14 @@ async fn delete_concurrency_group(
     )
     .execute(&mut *tx)
     .await?;
+
+    sqlx::query!(
+        "DELETE FROM custom_concurrency_key_ended  WHERE key = $1",
+        concurrency_id.clone(),
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
     Ok(Json(()))
 }

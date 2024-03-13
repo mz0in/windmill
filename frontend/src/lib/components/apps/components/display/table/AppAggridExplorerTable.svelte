@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { GridApi, createGrid, type IDatasource } from 'ag-grid-community'
-	import { isObject } from '$lib/utils'
+	import { isObject, sendUserToast } from '$lib/utils'
 	import { createEventDispatcher, getContext } from 'svelte'
 	import type { AppViewerContext, ComponentCustomCSS } from '../../../types'
 
@@ -13,16 +13,15 @@
 	import { twMerge } from 'tailwind-merge'
 	import { initCss } from '$lib/components/apps/utils'
 	import ResolveStyle from '../../helpers/ResolveStyle.svelte'
-	import type { RunnableComponent } from '../..'
 	import type { Output } from '$lib/components/apps/rx'
 	import type { InitConfig } from '$lib/components/apps/editor/appUtils'
 	import { Button } from '$lib/components/common'
-	import { cellRendererFactory } from '../dbtable/utils'
+	import { cellRendererFactory } from './utils'
 	import { Trash2 } from 'lucide-svelte'
+	import type { ColumnDef } from '../dbtable/utils'
 	// import 'ag-grid-community/dist/styles/ag-theme-alpine-dark.css'
 
 	export let id: string
-
 	export let customCss: ComponentCustomCSS<'aggridcomponent'> | undefined = undefined
 	export let containerHeight: number | undefined = undefined
 	export let resolvedConfig: InitConfig<
@@ -127,6 +126,13 @@
 	$: eGui && mountGrid()
 
 	function transformColumnDefs(columnDefs: any[]) {
+		const { isValid, errors } = validateColumnDefs(columnDefs)
+
+		if (!isValid) {
+			sendUserToast(`Invalid columnDefs: ${errors.join('\n')}`, true)
+			return []
+		}
+
 		let r = columnDefs?.filter((x) => x && !x.ignored) ?? []
 		if (allowDelete) {
 			r.push({
@@ -136,11 +142,13 @@
 					new Button({
 						target: c.eGui,
 						props: {
-							btnClasses: 'mt-1',
-							color: 'red',
-							variant: 'border',
+							btnClasses: 'w-12',
+							wrapperClasses: 'flex justify-end items-center h-full',
+							color: 'light',
+							size: 'sm',
+							variant: 'contained',
 							iconOnly: true,
-							endIcon: { icon: Trash2 },
+							startIcon: { icon: Trash2 },
 							nonCaptureEvent: true
 						}
 					})
@@ -161,6 +169,23 @@
 
 	let firstRow = 0
 	let lastRow = 0
+
+	function validateColumnDefs(columnDefs: ColumnDef[]): { isValid: boolean; errors: string[] } {
+		let isValid = true
+		const errors: string[] = []
+
+		// Validate each column definition
+		columnDefs.forEach((colDef, index) => {
+			// Check if 'field' property exists and is a non-empty string
+			if (!colDef.field || typeof colDef.field !== 'string' || colDef.field.trim() === '') {
+				isValid = false
+				errors.push(`Column at index ${index} is missing a valid 'field' property.`)
+			}
+		})
+
+		return { isValid, errors }
+	}
+
 	function mountGrid() {
 		if (eGui) {
 			createGrid(
@@ -175,6 +200,10 @@
 						editable: resolvedConfig?.allEditable,
 						onCellValueChanged
 					},
+					infiniteInitialRowCount: 100,
+					cacheBlockSize: 100,
+					cacheOverflowSize: 10,
+					maxBlocksInCache: 20,
 					suppressColumnMoveAnimation: true,
 					rowSelection: resolvedConfig?.multipleSelectable ? 'multiple' : 'single',
 					rowMultiSelectWithClick: resolvedConfig?.multipleSelectable
@@ -193,6 +222,7 @@
 					},
 					onGridReady: (e) => {
 						outputs?.ready.set(true)
+
 						$componentControl[id] = {
 							agGrid: { api: e.api, columnApi: e.columnApi },
 							setSelectedIndex: (index) => {
@@ -217,7 +247,12 @@
 
 	$: resolvedConfig && updateOptions()
 
-	$: datasource && api?.updateGridOptions({ datasource })
+	let oldDatasource = datasource
+	$: if (datasource && datasource != oldDatasource) {
+		oldDatasource = datasource
+
+		api?.updateGridOptions({ datasource })
+	}
 
 	let extraConfig = resolvedConfig.extraConfig
 	$: if (!deepEqual(extraConfig, resolvedConfig.extraConfig)) {
@@ -260,12 +295,6 @@
 			...(resolvedConfig?.extraConfig ?? {})
 		})
 	}
-
-	let runnableComponent: RunnableComponent
-
-	export function recompute() {
-		runnableComponent?.runComponent()
-	}
 </script>
 
 {#each Object.keys(css ?? {}) as key (key)}
@@ -280,11 +309,7 @@
 
 {#if Array.isArray(resolvedConfig.columnDefs) && resolvedConfig.columnDefs.every(isObject)}
 	<div
-		class={twMerge(
-			'border shadow-sm divide-y flex flex-col h-full',
-			css?.container?.class,
-			'wm-aggrid-container'
-		)}
+		class={twMerge('divide-y flex flex-col h-full', css?.container?.class, 'wm-aggrid-container')}
 		style={containerHeight ? `height: ${containerHeight}px;` : css?.container?.style}
 		bind:clientHeight
 		bind:clientWidth
@@ -300,10 +325,10 @@
 		>
 			<div bind:this={eGui} style:height="100%" />
 		</div>
+		<div class="flex gap-1 w-full justify-end text-sm text-secondary py-1"
+			>{firstRow}{'->'}{lastRow + 1} of {datasource?.rowCount} rows</div
+		>
 	</div>
-	<div class="flex gap-1 absolute bottom-1 right-2 text-sm text-secondary"
-		>{firstRow}{'->'}{lastRow + 1} of {datasource?.rowCount} rows</div
-	>
 {:else if resolvedConfig.columnDefs != undefined}
 	<Alert title="Parsing issues" type="error" size="xs">
 		The columnDefs should be an array of objects, received:

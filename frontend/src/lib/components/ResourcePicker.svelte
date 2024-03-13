@@ -19,6 +19,7 @@
 	export let resourceType: string | undefined = undefined
 	export let disablePortal = false
 	export let showSchemaExplorer = false
+	export let selectFirst = false
 
 	let valueSelect =
 		initialValue || value
@@ -29,7 +30,7 @@
 			  }
 			: undefined
 
-	let collection = [valueSelect]
+	let collection = valueSelect ? [valueSelect] : []
 
 	async function loadResources(resourceType: string | undefined) {
 		const nc = (
@@ -50,6 +51,11 @@
 			nc.push({ value: value ?? initialValue!, label: value ?? initialValue!, type: '' })
 		}
 		collection = nc
+		if (collection.length == 1 && selectFirst && valueSelect == undefined) {
+			value = collection[0].value
+			valueType = collection[0].type
+			valueSelect = collection[0]
+		}
 	}
 
 	$: {
@@ -127,14 +133,27 @@
 			/>
 		{/if}
 
-		<Button
-			color="light"
-			variant="border"
-			size="xs"
-			on:click={() => appConnect?.open?.(resourceType)}
-			startIcon={{ icon: Plus }}
-			iconOnly
-		/>
+		{#if resourceType?.includes(',')}
+			{#each resourceType.split(',') as rt}
+				<Button
+					color="light"
+					variant="border"
+					size="xs"
+					on:click={() => appConnect?.open?.(rt)}
+					startIcon={{ icon: Plus }}>{rt}</Button
+				>
+			{/each}
+		{:else}
+			<Button
+				color="light"
+				variant="border"
+				size="xs"
+				on:click={() => appConnect?.open?.(resourceType)}
+				startIcon={{ icon: Plus }}
+				iconOnly
+			/>
+		{/if}
+
 		<Button
 			variant="border"
 			color="light"

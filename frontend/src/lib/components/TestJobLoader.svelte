@@ -1,16 +1,18 @@
 <script lang="ts">
-	import { Job, JobService } from '$lib/gen'
+	import { Job, JobService, type FlowStatus } from '$lib/gen'
 	import { workspaceStore } from '$lib/stores'
 	import { onDestroy, tick } from 'svelte'
 	import type { Preview } from '$lib/gen/models/Preview'
 	import { createEventDispatcher } from 'svelte'
 	import type { SupportedLanguage } from '$lib/common'
+	import { sendUserToast } from '$lib/toast'
 
 	export let isLoading = false
 	export let job: Job | undefined = undefined
 	export let workspaceOverride: string | undefined = undefined
 	export let notfound = false
 	export let jobUpdateLastFetch: Date | undefined = undefined
+	export let toastError = false
 
 	const dispatch = createEventDispatcher()
 
@@ -48,6 +50,9 @@
 			}
 			return testId
 		} catch (err) {
+			if (toastError) {
+				sendUserToast(err.body, true)
+			}
 			// if error happens on submitting the job, reset UI state so the user can try again
 			isLoading = false
 			currentId = undefined
@@ -155,6 +160,9 @@
 					})
 					if (previewJobUpdates.new_logs) {
 						job.logs = (job?.logs ?? '').concat(previewJobUpdates.new_logs)
+					}
+					if (previewJobUpdates.flow_status) {
+						job.flow_status = previewJobUpdates.flow_status as FlowStatus
 					}
 					if (previewJobUpdates.mem_peak && job) {
 						job.mem_peak = previewJobUpdates.mem_peak

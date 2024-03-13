@@ -7,27 +7,29 @@ use std::{
     time::Duration,
 };
 
+use rsmq_async::MultiplexedRsmq;
 use serde::de::DeserializeOwned;
 use sqlx::{Pool, Postgres};
 use tokio::{
     join,
     sync::{mpsc, RwLock},
 };
-use uuid::Uuid;
 use windmill_api::{
-    oauth2::{build_oauth_clients, OAuthClient},
-    DEFAULT_BODY_LIMIT, IS_SECURE, OAUTH_CLIENTS, REQUEST_SIZE_LIMIT,
+    oauth2_ee::{build_oauth_clients, OAuthClient},
+    DEFAULT_BODY_LIMIT, IS_SECURE, OAUTH_CLIENTS, REQUEST_SIZE_LIMIT, SAML_METADATA, SCIM_TOKEN,
 };
 use windmill_common::{
     error,
+    flow_status::FlowStatusModule,
     global_settings::{
         BASE_URL_SETTING, BUNFIG_INSTALL_SCOPES_SETTING, DEFAULT_TAGS_PER_WORKSPACE_SETTING,
         EXPOSE_DEBUG_METRICS_SETTING, EXPOSE_METRICS_SETTING, EXTRA_PIP_INDEX_URL_SETTING,
         JOB_DEFAULT_TIMEOUT_SECS_SETTING, KEEP_JOB_DIR_SETTING, LICENSE_KEY_SETTING,
-        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, REQUEST_SIZE_LIMIT_SETTING,
-        REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING, RETENTION_PERIOD_SECS_SETTING,
+        NPM_CONFIG_REGISTRY_SETTING, OAUTH_SETTING, PIP_INDEX_URL_SETTING,
+        REQUEST_SIZE_LIMIT_SETTING, REQUIRE_PREEXISTING_USER_FOR_OAUTH_SETTING,
+        RETENTION_PERIOD_SECS_SETTING, SAML_METADATA_SETTING, SCIM_TOKEN_SETTING,
     },
-    jobs::{JobKind, QueuedJob},
+    jobs::QueuedJob,
     oauth2::REQUIRE_PREEXISTING_USER_FOR_OAUTH,
     server::load_server_config,
     users::truncate_token,
@@ -37,10 +39,11 @@ use windmill_common::{
     },
     BASE_URL, DB, METRICS_DEBUG_ENABLED, METRICS_ENABLED,
 };
+use windmill_queue::cancel_job;
 use windmill_worker::{
-    create_token_for_owner, handle_job_error, AuthedClient, SendResult, BUNFIG_INSTALL_SCOPES,
-    JOB_DEFAULT_TIMEOUT, KEEP_JOB_DIR, NPM_CONFIG_REGISTRY, PIP_EXTRA_INDEX_URL,
-    SCRIPT_TOKEN_EXPIRY,
+    create_token_for_owner, handle_job_error, AuthedClient, SameWorkerPayload, SendResult,
+    BUNFIG_INSTALL_SCOPES, JOB_DEFAULT_TIMEOUT, KEEP_JOB_DIR, NPM_CONFIG_REGISTRY,
+    PIP_EXTRA_INDEX_URL, PIP_INDEX_URL, SCRIPT_TOKEN_EXPIRY,
 };
 
 #[cfg(feature = "enterprise")]
@@ -53,6 +56,11 @@ use crate::ee::set_license_key;
 
 lazy_static::lazy_static! {
     static ref ZOMBIE_JOB_TIMEOUT: String = std::env::var("ZOMBIE_JOB_TIMEOUT")
+    .ok()
+    .and_then(|x| x.parse::<String>().ok())
+    .unwrap_or_else(|| "30".to_string());
+
+    static ref FLOW_ZOMBIE_TRANSITION_TIMEOUT: String = std::env::var("FLOW_ZOMBIE_TRANSITION_TIMEOUT")
     .ok()
     .and_then(|x| x.parse::<String>().ok())
     .unwrap_or_else(|| "30".to_string());
@@ -107,16 +115,11 @@ pub async fn initial_load(
 
     if worker_mode {
         load_keep_job_dir(db).await;
-    }
-
-    if worker_mode {
         reload_worker_config(&db, tx, false).await;
     }
 
-    if server_mode {
-        if let Err(e) = reload_custom_tags_setting(db).await {
-            tracing::error!("Error reloading custom tags: {:?}", e)
-        }
+    if let Err(e) = reload_custom_tags_setting(db).await {
+        tracing::error!("Error reloading custom tags: {:?}", e)
     }
 
     if let Err(e) = reload_base_url_setting(db).await {
@@ -125,13 +128,10 @@ pub async fn initial_load(
 
     if server_mode {
         reload_server_config(&db).await;
-    }
-
-    if server_mode {
         reload_retention_period_setting(&db).await;
-    }
-    if server_mode {
         reload_request_size(&db).await;
+        reload_saml_metadata_setting(&db).await;
+        reload_scim_token_setting(&db).await;
     }
 
     #[cfg(feature = "enterprise")]
@@ -141,12 +141,8 @@ pub async fn initial_load(
 
     if worker_mode {
         reload_extra_pip_index_url_setting(&db).await;
-    }
-
-    if worker_mode {
+        reload_pip_index_url_setting(&db).await;
         reload_npm_config_registry_setting(&db).await;
-    }
-    if worker_mode {
         reload_bunfig_install_scopes_setting(&db).await;
     }
 }
@@ -280,39 +276,44 @@ pub async fn delete_expired_items(db: &DB) -> () {
     if job_retention_secs > 0 {
         match db.begin().await {
             Ok(mut tx) => {
-                let r = sqlx::query!(
-                    "DELETE FROM job_stats WHERE job_id IN (SELECT id FROM completed_job WHERE created_at <= now() - ($1::bigint::text || ' s')::interval AND started_at + ((duration_ms/1000 + $1::bigint) || ' s')::interval <= now())",
-                    job_retention_secs
-                )
-                .fetch_all(&mut *tx)
-                .await;
-                match r {
-                    Ok(_) => {
-                        let deleted_jobs = sqlx::query_scalar!(
+                let deleted_jobs = sqlx::query_scalar!(
                             "DELETE FROM completed_job WHERE created_at <= now() - ($1::bigint::text || ' s')::interval  AND started_at + ((duration_ms/1000 + $1::bigint) || ' s')::interval <= now() RETURNING id",
                             job_retention_secs
                         )
                         .fetch_all(&mut *tx)
                         .await;
 
-                        match deleted_jobs {
-                            Ok(deleted_jobs) => {
-                                if deleted_jobs.len() > 0 {
-                                    tracing::info!(
-                                        "deleted {} jobs completed JOB_RETENTION_SECS {} ago: {:?}",
-                                        deleted_jobs.len(),
-                                        job_retention_secs,
-                                        deleted_jobs,
-                                    )
-                                }
+                match deleted_jobs {
+                    Ok(deleted_jobs) => {
+                        if deleted_jobs.len() > 0 {
+                            tracing::info!(
+                                "deleted {} jobs completed JOB_RETENTION_SECS {} ago: {:?}",
+                                deleted_jobs.len(),
+                                job_retention_secs,
+                                deleted_jobs,
+                            );
+                            if let Err(e) = sqlx::query!(
+                                "DELETE FROM job_stats WHERE job_id = ANY($1)",
+                                &deleted_jobs
+                            )
+                            .execute(&mut *tx)
+                            .await
+                            {
+                                tracing::error!("Error deleting job stats: {:?}", e);
                             }
-                            Err(e) => {
-                                tracing::error!("Error deleting expired jobs: {:?}", e)
+                            if let Err(e) = sqlx::query!(
+                                "DELETE FROM custom_concurrency_key_ended WHERE  ended_at <= now() - ($1::bigint::text || ' s')::interval ",
+                                job_retention_secs
+                            )
+                            .execute(&mut *tx)
+                            .await
+                            {
+                                tracing::error!("Error deleting  custom concurrency key: {:?}", e);
                             }
                         }
                     }
-                    Err(err) => {
-                        tracing::error!("Error deleting expired job stats: {:?}", err)
+                    Err(e) => {
+                        tracing::error!("Error deleting expired jobs: {:?}", e)
                     }
                 }
 
@@ -328,12 +329,37 @@ pub async fn delete_expired_items(db: &DB) -> () {
     }
 }
 
+pub async fn reload_scim_token_setting(db: &DB) {
+    reload_option_setting_with_tracing(db, SCIM_TOKEN_SETTING, "SCIM_TOKEN", SCIM_TOKEN.clone())
+        .await;
+}
+
+pub async fn reload_saml_metadata_setting(db: &DB) {
+    reload_option_setting_with_tracing(
+        db,
+        SAML_METADATA_SETTING,
+        "SAML_METADATA",
+        SAML_METADATA.clone(),
+    )
+    .await;
+}
+
 pub async fn reload_extra_pip_index_url_setting(db: &DB) {
     reload_option_setting_with_tracing(
         db,
         EXTRA_PIP_INDEX_URL_SETTING,
         "PIP_EXTRA_INDEX_URL",
         PIP_EXTRA_INDEX_URL.clone(),
+    )
+    .await;
+}
+
+pub async fn reload_pip_index_url_setting(db: &DB) {
+    reload_option_setting_with_tracing(
+        db,
+        PIP_INDEX_URL_SETTING,
+        "PIP_INDEX_URL",
+        PIP_INDEX_URL.clone(),
     )
     .await;
 }
@@ -550,19 +576,26 @@ pub async fn monitor_pool(db: &DB) {
     }
 }
 
-pub async fn monitor_db<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 'static>(
+pub async fn monitor_db(
     db: &Pool<Postgres>,
     base_internal_url: &str,
-    rsmq: Option<R>,
+    rsmq: Option<MultiplexedRsmq>,
     server_mode: bool,
+    initial_load: bool,
 ) {
     let zombie_jobs_f = async {
-        if server_mode {
+        if server_mode && !initial_load {
             handle_zombie_jobs(db, base_internal_url, rsmq.clone(), "server").await;
+            match handle_zombie_flows(db, rsmq.clone()).await {
+                Err(err) => {
+                    tracing::error!("Error handling zombie flows: {:?}", err);
+                }
+                _ => {}
+            }
         }
     };
     let expired_items_f = async {
-        if server_mode {
+        if server_mode && !initial_load {
             delete_expired_items(&db).await;
         }
     };
@@ -583,7 +616,10 @@ pub async fn monitor_db<R: rsmq_async::RsmqConnection + Send + Sync + Clone + 's
     };
 
     let expose_queue_metrics_f = async {
-        if METRICS_ENABLED.load(std::sync::atomic::Ordering::Relaxed) && server_mode {
+        if !initial_load
+            && METRICS_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+            && server_mode
+        {
             expose_queue_metrics(&db).await;
         }
     };
@@ -750,10 +786,10 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
 ) {
     if *RESTART_ZOMBIE_JOBS {
         let restarted = sqlx::query!(
-                "UPDATE queue SET running = false, started_at = null, logs = logs || '\nRestarted job after not receiving job''s ping for too long the ' || now() || '\n\n' WHERE last_ping < now() - ($1 || ' seconds')::interval AND running = true AND job_kind != $2 AND job_kind != $3 AND same_worker = false RETURNING id, workspace_id, last_ping",
+                "UPDATE queue SET running = false, started_at = null, logs = logs || '\nRestarted job after not receiving job''s ping for too long the ' || now() || '\n\n' 
+                WHERE last_ping < now() - ($1 || ' seconds')::interval
+                 AND running = true AND job_kind NOT IN ('flow', 'flowpreview', 'singlescriptflow') AND same_worker = false RETURNING id, workspace_id, last_ping",
                 *ZOMBIE_JOB_TIMEOUT,
-                JobKind::Flow as JobKind,
-                JobKind::FlowPreview as JobKind,
             )
             .fetch_all(db)
             .await
@@ -764,8 +800,8 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
             QUEUE_ZOMBIE_RESTART_COUNT.inc_by(restarted.len() as _);
         }
         for r in restarted {
-            tracing::info!(
-                "restarted zombie job {} {} {}",
+            tracing::error!(
+                "Zombie job detected, restarting it: {} {} {:?}",
                 r.id,
                 r.workspace_id,
                 r.last_ping
@@ -773,14 +809,15 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
         }
     }
 
-    let mut timeout_query = "SELECT * FROM queue WHERE last_ping < now() - ($1 || ' seconds')::interval AND running = true AND job_kind != $2 AND job_kind != $3".to_string();
+    let mut timeout_query =
+        "SELECT * FROM queue WHERE last_ping < now() - ($1 || ' seconds')::interval 
+    AND running = true  AND job_kind NOT IN ('flow', 'flowpreview', 'singlescriptflow')"
+            .to_string();
     if *RESTART_ZOMBIE_JOBS {
         timeout_query.push_str(" AND same_worker = true");
     };
     let timeouts = sqlx::query_as::<_, QueuedJob>(&timeout_query)
         .bind(ZOMBIE_JOB_TIMEOUT.as_str())
-        .bind(JobKind::Flow)
-        .bind(JobKind::FlowPreview)
         .fetch_all(db)
         .await
         .ok()
@@ -794,7 +831,8 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
         tracing::info!("timedout zombie job {} {}", job.id, job.workspace_id,);
 
         // since the job is unrecoverable, the same worker queue should never be sent anything
-        let (same_worker_tx_never_used, _same_worker_rx_never_used) = mpsc::channel::<Uuid>(1);
+        let (same_worker_tx_never_used, _same_worker_rx_never_used) =
+            mpsc::channel::<SameWorkerPayload>(1);
         let (send_result_never_used, _send_result_rx_never_used) = mpsc::channel::<SendResult>(1);
 
         let token = create_token_for_owner(
@@ -839,4 +877,118 @@ async fn handle_zombie_jobs<R: rsmq_async::RsmqConnection + Send + Sync + Clone>
         )
         .await;
     }
+}
+
+async fn handle_zombie_flows(
+    db: &DB,
+    rsmq: Option<rsmq_async::MultiplexedRsmq>,
+) -> error::Result<()> {
+    let flows = sqlx::query_as::<_, QueuedJob>(
+        r#"
+        SELECT *
+        FROM queue
+        WHERE running = true AND suspend = 0 AND scheduled_for <= now() AND (job_kind = 'flow' OR job_kind = 'flowpreview')
+            AND last_ping IS NOT NULL AND last_ping < NOW() - ($1 || ' seconds')::interval 
+        "#,
+    ).bind(FLOW_ZOMBIE_TRANSITION_TIMEOUT.as_str())
+    .fetch_all(db)
+    .await?;
+
+    for flow in flows {
+        let status = flow.parse_flow_status();
+        if status.is_some_and(|s| {
+            s.modules
+                .get(0)
+                .is_some_and(|x| matches!(x, FlowStatusModule::WaitingForPriorSteps { .. }))
+        }) {
+            tracing::error!(
+                "Zombie flow detected: {} in workspace {}. It hasn't started yet, restarting it.",
+                flow.id,
+                flow.workspace_id
+            );
+            // if the flow hasn't started and is a zombie, we can simply restart it
+            sqlx::query!(
+                "UPDATE queue SET running = false, started_at = null WHERE id = $1",
+                flow.id
+            )
+            .execute(db)
+            .await?;
+        } else {
+            let id = flow.id.clone();
+            cancel_zombie_flow_job(
+                db,
+                flow,
+                &rsmq,
+                format!("Flow {} cancelled as it was hanging in between 2 steps", id),
+            )
+            .await?;
+        }
+    }
+
+    let flows2 = sqlx::query!(
+        "
+    DELETE
+    FROM parallel_monitor_lock
+    WHERE last_ping IS NOT NULL AND last_ping < NOW() - ($1 || ' seconds')::interval 
+    RETURNING parent_flow_id, job_id, last_ping
+        ",
+        FLOW_ZOMBIE_TRANSITION_TIMEOUT.as_str()
+    )
+    .fetch_all(db)
+    .await?;
+
+    for flow in flows2 {
+        let in_queue =
+            sqlx::query_as::<_, QueuedJob>("SELECT * FROM queue WHERE id = $1 AND running = true")
+                .bind(flow.parent_flow_id)
+                .fetch_optional(db)
+                .await?;
+        if let Some(job) = in_queue {
+            tracing::error!(
+                "parallel Zombie flow detected: {} in workspace {}. Last ping was: {:?}.",
+                job.id,
+                job.workspace_id,
+                flow.last_ping
+            );
+            cancel_zombie_flow_job(db, job, &rsmq,
+                format!("Flow {} cancelled as one of the parallel branch {} was unable to make the last transition ", flow.parent_flow_id, flow.job_id))
+                .await?;
+        } else {
+            tracing::info!("releasing lock for parallel flow: {}", flow.parent_flow_id);
+        }
+    }
+    Ok(())
+}
+
+async fn cancel_zombie_flow_job(
+    db: &Pool<Postgres>,
+    flow: QueuedJob,
+    rsmq: &Option<MultiplexedRsmq>,
+    message: String,
+) -> Result<(), error::Error> {
+    let tx = db.begin().await.unwrap();
+    tracing::error!(
+        "zombie flow detected: {} in workspace {}. Cancelling it.",
+        flow.id,
+        flow.workspace_id
+    );
+    let (mut ntx, _) = cancel_job(
+        "monitor",
+        Some(message),
+        flow.id,
+        flow.workspace_id.as_str(),
+        tx,
+        db,
+        rsmq.clone(),
+        false,
+    )
+    .await?;
+    sqlx::query!(
+        "UPDATE queue SET running = false, started_at = null WHERE id = $1",
+        flow.id
+    )
+    .execute(&mut *ntx)
+    .await?;
+    ntx.commit().await?;
+    Ok(())
 }

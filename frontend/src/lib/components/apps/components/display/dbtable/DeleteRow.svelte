@@ -5,8 +5,9 @@
 	import type RunnableComponent from '../../helpers/RunnableComponent.svelte'
 	import RunnableWrapper from '../../helpers/RunnableWrapper.svelte'
 	import { initOutput } from '../../../editor/appUtils'
-	import { type ColumnMetadata, createDeletePostgresInput } from './utils'
+	import { getPrimaryKeys, type ColumnDef, type DbType } from './utils'
 	import { sendUserToast } from '$lib/toast'
+	import { getDeleteInput } from './queries/delete'
 
 	export let id: string
 
@@ -28,12 +29,14 @@
 	export async function triggerDelete(
 		resource: string,
 		table: string,
-		columns: ColumnMetadata[],
-		data: Record<string, any>
+		allColumns: ColumnDef[],
+		data: Record<string, any>,
+		dbType: DbType
 	) {
-		// const datatype = tableMetaData?.find((column) => column.isprimarykey)?.datatype
+		let primaryColumns = getPrimaryKeys(allColumns)
+		let columns = allColumns?.filter((x) => primaryColumns.includes(x.field))
 
-		input = createDeletePostgresInput(resource, table, columns)
+		input = getDeleteInput(resource, table, columns, dbType)
 
 		await tick()
 

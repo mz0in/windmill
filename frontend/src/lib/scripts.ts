@@ -1,6 +1,6 @@
 import { get } from 'svelte/store'
 import type { Schema, SupportedLanguage } from './common'
-import { FlowService, Script, ScriptService } from './gen'
+import { FlowService, Script, ScriptService, ScheduleService } from './gen'
 import { workspaceStore } from './stores'
 
 export function scriptLangToEditorLang(lang: Script.language) {
@@ -35,6 +35,42 @@ export function scriptLangToEditorLang(lang: Script.language) {
 	}
 }
 
+export type ScriptSchedule = {
+	summary: string | undefined
+	args: Record<string, any>
+	cron: string
+	timezone: string
+	enabled: boolean
+}
+
+// Load the schedule of a flow given its path and the workspace
+export async function loadScriptSchedule(
+	path: string,
+	workspace: string
+): Promise<ScriptSchedule | undefined> {
+	const existsSchedule = await ScheduleService.existsSchedule({
+		workspace,
+		path
+	})
+
+	if (!existsSchedule) {
+		return undefined
+	}
+
+	const schedule = await ScheduleService.getSchedule({
+		workspace,
+		path
+	})
+
+	return {
+		summary: schedule.summary,
+		enabled: schedule.enabled,
+		cron: schedule.schedule,
+		timezone: schedule.timezone,
+		args: schedule.args ?? {}
+	}
+}
+
 export async function loadSchemaFlow(path: string): Promise<Schema> {
 	const flow = await FlowService.getFlowByPath({
 		workspace: get(workspaceStore)!,
@@ -50,6 +86,23 @@ export function scriptPathToHref(path: string): string {
 		return `/scripts/get/${path}?workspace=${get(workspaceStore)}`
 	}
 }
+
+export const defaultScriptLanguages = Object.fromEntries([
+	[Script.language.BUN, 'TypeScript (Bun)'],
+	[Script.language.PYTHON3, 'Python'],
+	[Script.language.DENO, 'TypeScript (Deno)'],
+	[Script.language.BASH, 'Bash'],
+	[Script.language.GO, 'Go'],
+	[Script.language.NATIVETS, 'REST'],
+	[Script.language.POSTGRESQL, 'PostgreSQL'],
+	[Script.language.MYSQL, 'MySQL'],
+	[Script.language.BIGQUERY, 'BigQuery'],
+	[Script.language.SNOWFLAKE, 'Snowflake'],
+	[Script.language.MSSQL, 'MS SQL Server'],
+	[Script.language.GRAPHQL, 'GraphQL'],
+	[Script.language.POWERSHELL, 'PowerShell'],
+	['docker', 'Docker']
+])
 
 export async function getScriptByPath(path: string): Promise<{
 	content: string

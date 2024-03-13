@@ -11,9 +11,13 @@ use windmill_common::{
     error::{to_anyhow, Error},
     jobs::QueuedJob,
 };
-use windmill_parser_sql::{parse_mysql_sig, RE_ARG_MYSQL_NAMED};
+use windmill_parser_sql::{parse_db_resource, parse_mysql_sig, RE_ARG_MYSQL_NAMED};
+use windmill_queue::CanceledBy;
 
-use crate::{common::build_args_map, AuthedClientBackgroundTask};
+use crate::{
+    common::{build_args_map, run_future_with_polling_update_job_poller},
+    AuthedClientBackgroundTask,
+};
 
 #[derive(Deserialize)]
 struct MysqlDatabase {
@@ -30,6 +34,9 @@ pub async fn do_mysql(
     client: &AuthedClientBackgroundTask,
     query: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
+    mem_peak: &mut i32,
+    canceled_by: &mut Option<CanceledBy>,
+    worker_name: &str,
 ) -> windmill_common::error::Result<Box<RawValue>> {
     let args = build_args_map(job, client, db).await?.map(Json);
     let job_args = if args.is_some() {
@@ -38,7 +45,27 @@ pub async fn do_mysql(
         job.args.as_ref()
     };
 
-    let database = if let Some(db) = job_args.and_then(|x| x.get("database")) {
+    let inline_db_res_path = parse_db_resource(&query);
+
+    let db_arg = if let Some(inline_db_res_path) = inline_db_res_path {
+        let val = client
+            .get_authed()
+            .await
+            .get_resource_value_interpolated::<serde_json::Value>(
+                &inline_db_res_path,
+                Some(job.id.to_string()),
+            )
+            .await?;
+
+        let as_raw = serde_json::from_value(val)
+            .map_err(|e| Error::InternalErr(format!("Error while parsing inline resource: {e}")))?;
+
+        Some(as_raw)
+    } else {
+        job_args.and_then(|x| x.get("database").cloned())
+    };
+
+    let database = if let Some(db) = db_arg {
         serde_json::from_str::<MysqlDatabase>(db.get())
             .map_err(|e| Error::ExecutionErr(e.to_string()))?
     } else {
@@ -100,15 +127,22 @@ pub async fn do_mysql(
             }
             Value::String(s) => mysql_async::Value::Bytes(s.as_bytes().to_vec()),
             Value::Number(n)
-                if n.is_i64() && (arg_t == "int" || arg_t == "integer" || arg_t == "smallint") =>
+                if n.is_i64()
+                    && (arg_t == "int"
+                        || arg_t == "integer"
+                        || arg_t == "smallint"
+                        || arg_t == "bigint") =>
             {
                 mysql_async::Value::Int(n.as_i64().unwrap())
             }
-            Value::Number(n) if n.is_u64() && arg_t == "uint" => {
-                mysql_async::Value::UInt(n.as_u64().unwrap())
-            }
             Value::Number(n) if n.is_f64() && arg_t == "float" => {
                 (n.as_f64().unwrap() as f32).into()
+            }
+            Value::Number(n) if n.is_i64() && arg_t == "float" => {
+                (n.as_i64().unwrap() as f32).into()
+            }
+            Value::Number(n) if n.is_u64() && arg_t == "uint" => {
+                mysql_async::Value::UInt(n.as_u64().unwrap())
             }
             Value::Number(n) if n.is_f64() && arg_t == "real" => n.as_f64().into(),
             value @ _ => {
@@ -126,28 +160,47 @@ pub async fn do_mysql(
             _ => {}
         }
     }
-    let rows: Vec<Row> = conn
-        .exec(
-            query,
-            match statement_values {
-                Params::Positional(v) => Params::Positional(v),
-                Params::Named(m) => Params::Named(m),
-                _ => Params::Empty,
-            },
-        )
-        .await
-        .map_err(to_anyhow)?;
-    let rows = rows
-        .into_iter()
-        .map(|x| convert_row_to_value(x))
-        .collect::<Vec<serde_json::Value>>();
+
+    let result_f = async {
+        let rows: Vec<Row> = conn
+            .exec(
+                query,
+                match statement_values {
+                    Params::Positional(v) => Params::Positional(v),
+                    Params::Named(m) => Params::Named(m),
+                    _ => Params::Empty,
+                },
+            )
+            .await
+            .map_err(to_anyhow)?;
+        Ok(rows
+            .into_iter()
+            .map(|x| convert_row_to_value(x))
+            .collect::<Vec<serde_json::Value>>())
+            as Result<Vec<serde_json::Value>, anyhow::Error>
+    };
+
+    let result = run_future_with_polling_update_job_poller(
+        job.id,
+        job.timeout,
+        db,
+        mem_peak,
+        canceled_by,
+        result_f,
+        worker_name,
+        &job.workspace_id,
+    )
+    .await?;
 
     drop(conn);
 
     pool.disconnect().await.map_err(to_anyhow)?;
 
+    let raw_result = windmill_common::worker::to_raw_value(&json!(result));
+    *mem_peak = (raw_result.get().len() / 1000) as i32;
+
     // And then check that we got back the same string we sent over.
-    return Ok(windmill_common::worker::to_raw_value(&json!(rows)));
+    return Ok(raw_result);
 }
 
 fn string_date_to_mysql_date(s: &str) -> mysql_async::Value {
